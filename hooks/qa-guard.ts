@@ -8,26 +8,45 @@ export type GuardCtx = {
   repoRoot: string
   fixDir: string
   runDir: string
-  authDir: string
   agentBrowser: string
   impeccable: string
+  session: string
+  cdpPort: number | null
+  origins: readonly string[]
   testCommand: string
   containers: readonly string[]
 }
 export type BashVerdict = { decision: 'allow' | 'deny' | 'pass'; reason: string }
 
 const GIT_DENIED = ['push', 'checkout', 'switch', 'merge', 'rebase', 'stash', 'reset', 'clean', 'worktree', 'config', 'remote']
-const GIT_ARG_OPTS = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env']
+const GIT_ARG_OPTS = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--shallow-file']
 const GIT_WORKTREE_SUBS = ['add', 'commit', 'diff', 'status', 'log']
 const GIT_BANNED_LONG = ['--no-verify', '--ext-diff', '--no-index', '--output']
 const CURL_FLAGS = ['--silent', '--show-error', '--include', '--head', '--fail', '--insecure', '--verbose']
 const CURL_VALUED = ['-X', '--request', '-H', '--header', '-d', '--data', '--data-raw', '-m', '--max-time', '--connect-timeout', '-w', '--write-out']
 const CURL_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const DOCKER_VALUED = ['--since', '--until', '--tail', '-n']
-const LOCAL_DOMAINS = 'localhost,127.0.0.1'
+const AB_FLAGS = ['-i', '--interactive', '-c', '--compact', '--full', '--json', '--exact', '--clear']
+const AB_VALUED = ['-d', '--depth', '--name']
+const AB_NETWORK_VALUED = ['--filter', '--type', '--method', '--status']
+const AB_ONE = ['click', 'dblclick', 'hover', 'focus', 'check', 'uncheck', 'scrollintoview', 'press', 'wait']
+const AB_NONE = ['snapshot', 'back', 'forward', 'reload', 'console', 'errors']
+const AB_GET = ['text', 'value', 'attr', 'title', 'url', 'count', 'box', 'styles']
+const AB_FIND_BY = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last', 'nth']
+const AB_FIND_DO = ['click', 'dblclick', 'fill', 'type', 'hover', 'focus', 'check', 'uncheck', 'text']
 const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
 
-const workDirOf = (role: QaRole, ctx: GuardCtx): string => (role === 'fixer' && ctx.fixDir !== '' ? ctx.fixDir : ctx.repoRoot)
+function workDirOf(role: QaRole, ctx: GuardCtx): string {
+  switch (role) {
+    case 'fixer':
+      return ctx.fixDir !== '' ? ctx.fixDir : ctx.repoRoot
+    case 'runner':
+    case 'observer':
+      return ctx.repoRoot
+    default:
+      throw new Error('Caso não tratado: ' + String(role satisfies never))
+  }
+}
 
 // `~` e `~/x` contra a home; `~user` contra a pasta ao lado da home (aproximação); relativo contra a pasta de trabalho.
 function resolveIn(path: string, base: string, home: string): string {
@@ -72,13 +91,13 @@ function isUnsafeShape(command: string): boolean {
   let quote = ''
   for (let i = 0; i < command.length; i++) {
     const c = command[i] ?? ''
+    // o bash só expande `~/` solto no começo de uma palavra; entre aspas é texto literal
+    if (c === '~' && !(quote === '' && (i === 0 || command[i - 1] === ' ') && command[i + 1] === '/')) return true
     if (quote !== '') {
       if (c === quote) quote = ''
     } else if (c === "'" || c === '"') {
       quote = c
     } else if ('*?[]{}()!#'.includes(c)) {
-      return true
-    } else if (c === '~' && !((i === 0 || command[i - 1] === ' ') && command[i + 1] === '/')) {
       return true
     }
   }
@@ -100,7 +119,11 @@ function gitDenyReason(ws: readonly string[], at: number): string | null {
     const w = ws[j] ?? ''
     const config = w === '-c' || w === '--config-env' ? ws[j + 1] : w.startsWith('--config-env=') ? w.slice(13) : undefined
     if (config?.toLowerCase().startsWith('alias.')) return 'git com alias é proibido (pode esconder um push)'
-    j += GIT_ARG_OPTS.includes(w) ? 2 : 1
+    const known = GIT_ARG_OPTS.includes(w)
+    // opção desconhecida pode levar argumento: olha as duas palavras seguintes
+    const hides = !known && !w.includes('=') && [ws[j + 1], ws[j + 2]].some(x => x !== undefined && GIT_DENIED.includes(x))
+    if (hides) return `git com opção desconhecida ${w} antes de subcomando proibido`
+    j += known ? 2 : 1
   }
   const sub = ws[j]
   if (sub === undefined) return null
@@ -126,7 +149,8 @@ function cdDenyReason(tokens: readonly string[], at: number, role: QaRole, ctx: 
   const next = tokens[at + 1]
   const dest = next === undefined || isOp(next) ? '~' : next
   const stays = role === 'fixer' && !dest.startsWith('-') && !dest.includes('$') && isInside(resolveIn(dest, workDirOf(role, ctx), ctx.home), ctx.fixDir)
-  return stays ? null : `${tokens[at]} para fora da worktree de correção é proibido`
+  if (stays) return null
+  return role === 'fixer' ? `${tokens[at]} para fora da worktree de correção é proibido` : `${tokens[at]} é proibido para runner e observer`
 }
 
 function denyReason(role: QaRole, command: string, ctx: GuardCtx): string | null {
@@ -136,15 +160,21 @@ function denyReason(role: QaRole, command: string, ctx: GuardCtx): string | null
       const w = ws[i] ?? ''
       const name = programOf(w)
       const reason =
-        name === 'gh' ? 'gh (GitHub CLI) é proibido para agentes de QA' : name === 'git' ? gitDenyReason(ws, i) : checkoutPathReason(w, role, ctx)
+        name === 'gh'
+          ? 'gh (GitHub CLI) é proibido para agentes de QA'
+          : name === 'git'
+            ? role === 'fixer'
+              ? gitDenyReason(ws, i)
+              : 'git é proibido para runner e observer'
+            : checkoutPathReason(w, role, ctx)
       if (reason !== null) return reason
     }
   }
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i]
-    if (t === 'cd' || t === 'pushd') {
-      const reason = cdDenyReason(tokens, i, role, ctx)
-      if (reason !== null) return reason
+  // `tokens` guarda os operadores (`cd && x` vai para a home); `shellWords` junta as aspas (`c''d`)
+  for (const ws of [tokens, shellWords(command)]) {
+    for (let i = 0; i < ws.length; i++) {
+      const cd = ws[i] === 'cd' || ws[i] === 'pushd' ? cdDenyReason(ws, i, role, ctx) : null
+      if (cd !== null) return cd
     }
   }
   return null
@@ -152,21 +182,21 @@ function denyReason(role: QaRole, command: string, ctx: GuardCtx): string | null
 
 // ---- 3. Libera ----
 
-function urlOk(w: string): boolean {
+function urlOk(w: string, ctx: GuardCtx): boolean {
   if (!/^https?:\/\//i.test(w)) return false
   try {
     const u = new URL(w)
-    return (u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.username === '' && u.password === ''
+    return ctx.origins.includes(u.origin) && u.username === '' && u.password === ''
   } catch {
     return false
   }
 }
 
 function valueOk(v: string, role: QaRole, ctx: GuardCtx): boolean {
-  if (SCHEME.test(v)) return urlOk(v)
+  if (SCHEME.test(v)) return urlOk(v, ctx)
   if (!v.includes('/') && v !== '..' && v !== '~') return true
   const p = resolveIn(v, workDirOf(role, ctx), ctx.home)
-  return isInside(p, ctx.runDir) || isInside(p, ctx.authDir) || (role === 'fixer' && isInside(p, ctx.fixDir))
+  return isInside(p, ctx.runDir) || (role === 'fixer' && isInside(p, ctx.fixDir))
 }
 
 // Palavra inteira e, se houver `=`, o trecho depois dele.
@@ -177,15 +207,92 @@ function wordOk(w: string, role: QaRole, ctx: GuardCtx): boolean {
 
 const argsOk = (args: readonly string[], role: QaRole, ctx: GuardCtx): boolean => args.every(w => wordOk(w, role, ctx))
 
-function agentBrowserOk(args: readonly string[], role: QaRole, ctx: GuardCtx): boolean {
-  const flags = args.filter(w => w.startsWith('--allowed-domains'))
-  const flag = flags[0]
-  const scoped =
-    flags.length === 1 && (flag === `--allowed-domains=${LOCAL_DOMAINS}` || (flag === '--allowed-domains' && args[args.indexOf(flag) + 1] === LOCAL_DOMAINS))
-  return scoped && argsOk(args, role, ctx)
+// Opções do agent-browser: separa em posicionais e `null` se aparecer opção fora da lista.
+function abParts(rest: readonly string[], network: boolean): { pos: string[]; opts: string[] } | null {
+  const pos: string[] = []
+  const opts: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i] ?? ''
+    if (AB_FLAGS.includes(w)) {
+      opts.push(w)
+    } else if (AB_VALUED.includes(w) || (network && AB_NETWORK_VALUED.includes(w))) {
+      const v = rest[++i]
+      const bad = v === undefined || v.startsWith('-') || ((w === '-d' || w === '--depth') && !/^\d+$/.test(v))
+      if (bad) return null
+      opts.push(w)
+    } else if (w.startsWith('-')) {
+      return null
+    } else {
+      pos.push(w)
+    }
+  }
+  return { pos, opts }
 }
 
-function curlOk(args: readonly string[]): boolean {
+// `screenshot` só grava .png com caminho absoluto dentro de runDir.
+function screenshotOk(path: string | undefined, ctx: GuardCtx): boolean {
+  if (path === undefined || !path.startsWith('/')) return false
+  const p = normalizePath(path)
+  return p.endsWith('.png') && isInside(p, ctx.runDir)
+}
+
+function abFormOk(sub: string, pos: readonly string[], opts: readonly string[], ctx: GuardCtx): boolean {
+  const n = pos.length
+  const first = pos[0] ?? ''
+  if (AB_NONE.includes(sub)) return n === 0
+  if (AB_ONE.includes(sub)) return n === 1
+  switch (sub) {
+    case 'open':
+      return n === 1 && urlOk(first, ctx)
+    case 'fill':
+    case 'type':
+      return n === 2
+    case 'select':
+      return n >= 2
+    case 'keyboard':
+      return n === 2 && (first === 'type' || first === 'inserttext')
+    case 'scroll':
+      return ['up', 'down', 'left', 'right'].includes(first) && (n === 1 || (n === 2 && /^\d+$/.test(pos[1] ?? '')))
+    case 'screenshot':
+      return n === 1 && screenshotOk(first, ctx)
+    case 'get':
+      return n >= 1 && AB_GET.includes(first)
+    case 'is':
+      return n === 2 && ['visible', 'enabled', 'checked'].includes(first)
+    case 'find':
+      return (n === 3 || n === 4) && AB_FIND_BY.includes(first) && AB_FIND_DO.includes(pos[2] ?? '')
+    case 'network':
+      // o JSON de `network requests` traz cabeçalhos (cookies, tokens)
+      return n === 1 && first === 'requests' && !opts.includes('--json')
+    default:
+      return false
+  }
+}
+
+// Só a sessão que o mod preparou, subcomandos da lista e opções da lista: o domínio e a política são fixados pelo script.
+function agentBrowserOk(args: readonly string[], ctx: GuardCtx): boolean {
+  const [flag, session, sub, ...rest] = args
+  if (flag !== '--session' || ctx.session === '' || session !== ctx.session || sub === undefined) return false
+  const parts = abParts(rest, sub === 'network')
+  return parts !== null && abFormOk(sub, parts.pos, parts.opts, ctx)
+}
+
+// `detect` com a porta de depuração do mod e só as opções da lista.
+function impeccableOk(args: readonly string[], ctx: GuardCtx): boolean {
+  if (args[0] !== 'detect' || ctx.cdpPort === null) return false
+  let cdp = false
+  for (let i = 1; i < args.length; i++) {
+    const w = args[i] ?? ''
+    const v = args[i + 1] ?? ''
+    if (w === '--json' || w === '--no-advisory') continue
+    if (w === '--cdp' && v === String(ctx.cdpPort)) cdp = true
+    else if (!(w === '--target' && v !== '' && !v.startsWith('-')) && !(w === '--scope' && /^[a-z,]+$/.test(v))) return false
+    i++
+  }
+  return cdp
+}
+
+function curlOk(args: readonly string[], ctx: GuardCtx): boolean {
   let urls = 0
   for (let i = 0; i < args.length; i++) {
     const w = args[i] ?? ''
@@ -197,7 +304,7 @@ function curlOk(args: readonly string[]): boolean {
       // `%output{arquivo}` no write-out grava arquivo
       const writes = (w === '-w' || w === '--write-out') && /%output/i.test(v ?? '')
       if (v === undefined || v.includes('@') || badMethod || writes) return false
-    } else if (w.startsWith('-') || !urlOk(w)) {
+    } else if (w.startsWith('-') || !urlOk(w, ctx)) {
       return false
     } else {
       urls++
@@ -251,9 +358,9 @@ function isAllowed(role: QaRole, command: string, ctx: GuardCtx): boolean {
   const [prog, ...args] = shellWords(command)
   if (prog === undefined || prog === '' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) return false
   if (role === 'fixer' && ctx.testCommand !== '' && command.trim() === ctx.testCommand) return true
-  if (prog === ctx.agentBrowser) return agentBrowserOk(args, role, ctx)
-  if (prog === ctx.impeccable) return argsOk(args, role, ctx)
-  if (prog === 'curl') return curlOk(args)
+  if (prog === ctx.agentBrowser) return agentBrowserOk(args, ctx)
+  if (prog === ctx.impeccable) return impeccableOk(args, ctx)
+  if (prog === 'curl') return curlOk(args, ctx)
   if (prog === 'docker') return role === 'observer' && dockerLogsOk(args, ctx) && argsOk(args, role, ctx)
   if (prog === 'git') return role === 'fixer' && gitWorktreeOk(args, role, ctx)
   return false
@@ -270,7 +377,8 @@ export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx): BashV
 
 // Gravar só no runDir (qualquer papel) ou, para o fixer, na worktree de correção (menos o `.git`, que aponta para outro repositório).
 export function writeCheckOf(role: QaRole, filePath: string, ctx: GuardCtx): 'allow' | 'deny' {
-  if (filePath === '') return 'deny'
+  // o bash não expande `~` entre aspas e os agentes recebem caminhos absolutos
+  if (filePath === '' || filePath.startsWith('~')) return 'deny'
   const p = resolveIn(filePath, workDirOf(role, ctx), ctx.home)
   if (isInside(p, ctx.runDir)) return 'allow'
   const inFix = role === 'fixer' && isInside(p, ctx.fixDir) && !isInside(p, `${normalizePath(ctx.fixDir)}/.git`)
