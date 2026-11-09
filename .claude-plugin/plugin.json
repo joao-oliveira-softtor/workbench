@@ -1,6 +1,5 @@
 {
   "name": "workbench",
-  "version": "0.1.0",
   "description": "Painel e faixa fixa das worktrees em voo (push, PR, distância da base, migrations atrás da base) em /workbench, botão Compactar e continuar, botões Planejar (`/plan` refinado com o fluxo EGM) e EGM (fluxo oficial do Google) e delegação de tarefas ao modelo certo (/route auto on|off)",
   "types": "./types/index.d.ts"
 }
