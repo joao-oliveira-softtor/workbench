@@ -153,7 +153,10 @@ describe('parseMatrix', () => {
     expect(parseMatrix('```json\n{ "baseUrl": \n```').ok).toBe(false)
   })
 
-  test('{QA_PORT} vale só em startCommand e testCommand pode ser vazio', () => {
+  test('{QA_PORT} é aceito em startCommand e recusado em installCommand e testCommand; testCommand pode ser vazio', () => {
+    expect(parseMatrix(mdOf(matrixOf({ startCommand: 'npm run dev --port={QA_PORT}' }))).ok).toBe(true)
+    expect(parseMatrix(mdOf(matrixOf({ installCommand: 'npm ci {QA_PORT}' }))).ok).toBe(false)
+    expect(parseMatrix(mdOf(matrixOf({ testCommand: 'npm test {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: '' }))).ok).toBe(true)
   })
 })
@@ -226,6 +229,8 @@ const rawDefect = (over: Record<string, unknown> = {}): Record<string, unknown> 
   source: 'geometria',
   where: 'button.salvar',
   repro: ['abrir'],
+  kind: 'design',
+  severity: 'fail',
   ...over,
 })
 
@@ -314,6 +319,10 @@ describe('parseVerdict', () => {
     ['where vazio', { defects: [rawDefect({ where: '' })] }],
     ['repro com número', { defects: [rawDefect({ repro: [1] })] }],
     ['defects que não é lista', { defects: {} }],
+    ['defeito sem severity', { defects: [rawDefect({ severity: undefined })] }],
+    ['defeito com severity de fora', { defects: [rawDefect({ severity: 'grave' })] }],
+    ['defeito sem kind', { defects: [rawDefect({ kind: undefined })] }],
+    ['defeito com kind de fora', { defects: [rawDefect({ kind: 'visual' })] }],
   ]
   for (const [name, patch] of bad) {
     test(`recusa: ${name}`, () => expect(parseV(rawVerdict(patch))).toBeNull())
@@ -605,6 +614,33 @@ describe('diffCheckOf', () => {
     for (const p of paths) expect(diffCheckOf(`M\t${p}`, '').reasons).toHaveLength(1)
   })
 
+  test('reconhece o separador - e as extensões mts/cts (app.e2e-spec.ts)', () => {
+    for (const p of ['test/app.e2e-spec.ts', 'src/a-test.ts', 'src/a.test.mts', 'src/a.spec.cts']) {
+      expect(diffCheckOf(`M\t${p}`, '').reasons).toHaveLength(1)
+    }
+  })
+
+  test('configuração de teste: alterar, apagar ou renomear não pode; criar pode', () => {
+    for (const p of ['playwright.config.ts', 'web/vitest.config.mts', 'jest.config.js', 'cypress.config.ts']) {
+      for (const status of ['M', 'D', 'T']) {
+        const r = diffCheckOf(`${status}\t${p}`, '')
+        expect(r.reasons).toHaveLength(1)
+        expect(r.reasons[0]).toContain(p)
+      }
+      expect(diffCheckOf(`R100\t${p}\tsrc/novo.ts`, '').reasons).toHaveLength(1)
+      expect(diffCheckOf(`A\t${p}`, '')).toEqual(ok)
+    }
+  })
+
+  test('caminho entre aspas (git cita acento, aspas e controle) é recusado: alterar, apagar e renomear', () => {
+    const quoted = '"tests/a\\303\\251.test.ts"'
+    for (const line of [`M\t${quoted}`, `D\t${quoted}`, `R100\t${quoted}\ttests/b.test.ts`, `A\t${quoted}`]) {
+      const r = diffCheckOf(line, '')
+      expect(r.reasons).toHaveLength(1)
+      expect(r.reasons[0]).toContain('a\\303\\251.test.ts')
+    }
+  })
+
   test('arquivo parecido, mas que não é teste, passa', () => {
     expect(diffCheckOf('M\tsrc/contest.ts\nM\tsrc/latest/a.ts\nM\tsrc/protester.ts', '').reasons).toEqual([])
   })
@@ -637,7 +673,7 @@ describe('diffCheckOf', () => {
     expect(diffCheckOf('M\tsrc/a.ts', '').migration).toBe(false)
   })
 
-  const header = '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n'
+  const header = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n'
   test('cada marcador de supressão em linha acrescentada é recusado, citando o arquivo', () => {
     for (const marker of ['impeccable-disable', 'impeccable-ignore', 'eslint-disable', '@ts-ignore', '@ts-expect-error', '@ts-nocheck', 'stylelint-disable', 'biome-ignore']) {
       const r = diffCheckOf('M\tsrc/a.ts', `${header}+// ${marker} regra\n`)
@@ -647,12 +683,36 @@ describe('diffCheckOf', () => {
     }
   })
 
-  test('o mesmo marcador em linha removida, em contexto ou no cabeçalho não conta', () => {
+  test('o mesmo marcador em linha removida ou em contexto não conta', () => {
     expect(diffCheckOf('M\tsrc/a.ts', `${header}-// eslint-disable-next-line\n // @ts-ignore\n`)).toEqual(ok)
   })
 
+  test('marcador dentro do nome de um cabeçalho de verdade (entre diff --git e @@) não conta', () => {
+    expect(diffCheckOf('A\teslint-disable.md', 'diff --git a/eslint-disable.md b/eslint-disable.md\nnew file mode 100644\n--- /dev/null\n+++ b/eslint-disable.md\n@@ -0,0 +1 @@\n+texto\n')).toEqual(ok)
+  })
+
+  test('linha acrescentada que começa com ++ (+++count) passa pela busca de marcadores', () => {
+    const r = diffCheckOf('M\tsrc/a.ts', `${header}+++count // eslint-disable-line\n`)
+    expect(r.reasons).toHaveLength(1)
+    expect(r.reasons[0]).toContain('eslint-disable')
+    expect(r.reasons[0]).toContain('src/a.ts')
+  })
+
+  test('linha removida -- x seguida de acrescentada ++ y (lidas como --- e +++) dentro de um trecho ainda conta', () => {
+    const r = diffCheckOf('M\tsrc/a.ts', `${header}--- x\n+++ // eslint-disable\n`)
+    expect(r.reasons).toHaveLength(1)
+    expect(r.reasons[0]).toContain('src/a.ts')
+  })
+
+  test('patch sem diff --git (formato inesperado): toda linha + é acrescentada, na dúvida recusa', () => {
+    const r = diffCheckOf('M\tsrc/a.ts', '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n+// @ts-ignore\n')
+    expect(r.reasons).toHaveLength(1)
+    expect(r.reasons[0]).toContain('@ts-ignore')
+    expect(diffCheckOf('M\tsrc/a.ts', '+++ // eslint-disable\n').reasons).toHaveLength(1)
+  })
+
   test('o arquivo certo é citado quando o patch tem vários', () => {
-    const patch = '+++ b/src/a.ts\n+ok\n+++ b/src/b.ts\n+// @ts-ignore\n'
+    const patch = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n+ok\ndiff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n+// @ts-ignore\n'
     expect(diffCheckOf('M\tsrc/a.ts\nM\tsrc/b.ts', patch).reasons[0]).toContain('src/b.ts')
   })
 
@@ -671,6 +731,7 @@ describe('diffCheckOf', () => {
 
   test('cópia para fora de teste passa; cópia criada dentro de snapshots é nova e passa', () => {
     expect(diffCheckOf('C100\ttests/a.ts\tsrc/b.ts', '')).toEqual(ok)
+    expect(diffCheckOf('C100\tsrc/a.png\tsrc/__snapshots__/b.png', '')).toEqual(ok)
   })
 })
 
@@ -762,6 +823,22 @@ describe('acceptFixOf', () => {
     expect(run({ c1: evOf(verdictOf({ evidence: proofs, defects: [old] }), null) }, { t }).accepted).toBe(true)
   })
 
+  test('célula alvo fora de cells, ou sem entrada em after, é recusada (sem evidência não aceita)', () => {
+    const t = defectOf({ id: 'd1', source: 'geometria', where: 'h1' })
+    const fora = acceptFixOf({ target: { cell: 'c1', defect: t }, cells: [], before, after: clean })
+    expect(fora.accepted).toBe(false)
+    expect(fora.reasons.some(x => x.includes('c1') && x.includes('retestada'))).toBe(true)
+    const semAfter = acceptFixOf({ target: { cell: 'c1', defect: t }, cells, before, after: {} })
+    expect(semAfter.accepted).toBe(false)
+    expect(semAfter.reasons.some(x => x.includes('c1') && x.includes('evidência'))).toBe(true)
+  })
+
+  test('6: o texto citado no motivo vai em uma linha só', () => {
+    const t = { ...target, text: 'Salvar\n## Falso' }
+    const r = run({ c1: evOf(verdictOf({ evidence: proofs, defects: [old] })) }, { t })
+    expect(r.reasons.some(x => x.includes('texto') && !x.includes('\n'))).toBe(true)
+  })
+
   test('junta todos os motivos que valem', () => {
     const novo = defectOf({ id: 'd9', source: 'console', kind: 'funcional', where: 'erro' })
     const r = run({ c1: evOf(verdictOf({ verdict: 'FAIL-APP', evidence: [], defects: [target, novo] })) })
@@ -786,6 +863,17 @@ describe('fixReportOf', () => {
       expect(text).toContain(piece)
     }
     expect(text).toContain('tentativas: 2')
+  })
+
+  test('texto de fora com quebra de linha não abre linha nova em correcoes.md', () => {
+    const evil = '\n## Falso\n- status: corrigido'
+    const out = fixReportOf([
+      fix('desistiu', { reasons: [`motivo${evil}`], pending: [`p${evil}`], commits: [`c${evil}`], before: `a${evil}`, after: `d${evil}`, regressionTest: `t${evil}`, defect: `c1.d1${evil}`, retest: [{ cell: `c1${evil}`, verdict: 'PASS' }] }),
+    ])
+    expect(out).not.toContain('\n## Falso')
+    expect(out).not.toContain('\n- status: corrigido')
+    expect(out.split('\n').filter(l => l.startsWith('## '))).toHaveLength(1)
+    expect(out).toContain('motivo ## Falso - status: corrigido')
   })
 
   test('lista vazia mostra contagem zero', () => {

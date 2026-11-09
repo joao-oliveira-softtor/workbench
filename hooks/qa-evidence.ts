@@ -316,7 +316,7 @@ function severityOf(source: Source, rule: string | undefined, failRules: readonl
 }
 
 // O tipo também sai da fonte; só `criterio` aceita o que o agente informou.
-function kindOf(source: Source, informed: unknown): Defect['kind'] {
+function kindOf(source: Source, informed: Defect['kind']): Defect['kind'] {
   switch (source) {
     case 'impeccable-detect':
     case 'geometria':
@@ -327,7 +327,6 @@ function kindOf(source: Source, informed: unknown): Defect['kind'] {
     case 'console':
       return 'funcional'
     case 'criterio':
-      need(informed === 'design' || informed === 'funcional', 'kind: defeito de critério precisa ser design ou funcional')
       return informed
     default:
       throw new Error('Caso não tratado: ' + String(source satisfies never))
@@ -344,9 +343,12 @@ function defectAt(raw: unknown, i: number, failRules: readonly string[], seen: S
   const where = textAt(o, 'where', at)
   need(where.trim() !== '', `${at}where: não pode ser vazio`)
   const text = optionalTextAt(o, 'text', at)
+  // O campo tem que existir e ser válido, mesmo que o código decida o valor final.
+  const informedKind = oneOf(['design', 'funcional'] as const, o.kind, `${at}kind`)
+  oneOf(['fail', 'candidate'] as const, o.severity, `${at}severity`)
   return {
     id,
-    kind: kindOf(source, o.kind),
+    kind: kindOf(source, informedKind),
     source,
     ...(rule === undefined ? {} : { rule }),
     where,
@@ -513,8 +515,10 @@ export function retestCellsOf(matrix: Matrix, cellId: string, outcomes: Outcomes
 // Heurísticas (listas, não uma prova): o que o commit de uma correção não pode conter.
 export const TEST_PATTERNS = [
   /(^|\/)(tests?|__tests__|e2e|specs?|cypress|playwright)\//i,
-  /(\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)|_test\.(py|go)|Test\.(php|java|kt)|\.feature)$/,
+  /([.-](test|spec)\.[cm]?[jt]sx?|_test\.(py|go)|Test\.(php|java|kt)|\.feature)$/,
   /(^|\/)test_[^/]*\.py$/,
+  // Mexer no `exclude` da configuração desliga teste.
+  /(^|\/)(playwright|vitest|jest|cypress)\.config\.[^/]*$/,
 ]
 export const SNAPSHOT_PATTERNS = [/(^|\/)(__snapshots__|__image_snapshots__|[^/]*-snapshots)\//i, /\.snap$/]
 export const IMPECCABLE_PATTERNS = [/(^|\/)\.?impeccable/i]
@@ -527,6 +531,8 @@ type Touched = { path: string; changed: boolean }
 // null = linha que não dá para entender; na dúvida, recusa.
 function touchedOf(line: string): Touched[] | null {
   const f = line.split('\t')
+  // O git cita o caminho com acento, aspas, `\\` ou controle (octal escapado): não dá para casar padrão, então recusa.
+  if (f.slice(1).some(p => p.startsWith('"'))) return null
   const [status = '', a = '', b = ''] = f
   if (/^[MDT]$/.test(status) && f.length === 2 && a) return [{ path: a, changed: true }]
   if (status === 'A' && f.length === 2 && a) return [{ path: a, changed: false }]
@@ -544,7 +550,7 @@ export function diffCheckOf(nameStatus: string, patch: string): { migration: boo
     const touched = touchedOf(line)
     if (touched === null) reasons.add(`linha do name-status não reconhecida: "${line}"`)
     for (const { path, changed } of touched ?? []) {
-      if (changed && matches(TEST_PATTERNS, path)) reasons.add(`teste existente alterado ou apagado: ${path}`)
+      if (changed && matches(TEST_PATTERNS, path)) reasons.add(`teste ou configuração de teste alterado ou apagado: ${path}`)
       if (changed && matches(SNAPSHOT_PATTERNS, path)) reasons.add(`base de print alterada ou apagada: ${path}`)
       if (matches(IMPECCABLE_PATTERNS, path)) reasons.add(`configuração do Impeccable mexida: ${path}`)
       if (matches(MIGRATION_PATTERNS, path)) {
@@ -554,8 +560,13 @@ export function diffCheckOf(nameStatus: string, patch: string): { migration: boo
     }
   }
   let file = '(arquivo desconhecido)'
+  // Dois estados: entre `diff --git` e o primeiro `@@` é cabeçalho (de onde sai o caminho); no resto, toda linha `+` é
+  // acrescentada, inclusive `+++ y`. Sem nenhum `diff --git` (formato inesperado) o estado fica em "trecho": na dúvida, recusa.
+  let inHeader = false
   for (const line of patch.split('\n')) {
-    if (line.startsWith('+++')) file = /^\+\+\+ (?:b\/)?(.*)$/.exec(line)?.[1] ?? file
+    if (line.startsWith('diff --git ')) inHeader = true
+    else if (line.startsWith('@@')) inHeader = false
+    else if (inHeader) file = (line.startsWith('+++ ') ? /^\+\+\+ (?:b\/)?(.*)$/.exec(line)?.[1] : undefined) ?? file
     else if (line.startsWith('+')) {
       for (const marker of SUPPRESSION_MARKERS) if (line.includes(marker)) reasons.add(`supressão de regra (${marker}) em ${file}`)
     }
@@ -574,15 +585,16 @@ export function acceptFixOf(input: {
   const { target, cells, before, after } = input
   const reasons: string[] = []
   const sig = signatureOf(target.defect)
+  const sigText = oneLine(sig)
   for (const cell of cells) {
     const now = own(after, cell.id)?.verdict ?? null
     const final = finalVerdictOf(cell, now)
     if (NOT_CONCLUDED.has(final)) reasons.push(`${cell.id}: o reteste não concluiu (${final})`)
     const nowDefects = now?.defects ?? []
-    if (nowDefects.some(d => signatureOf(d) === sig)) reasons.push(`${cell.id}: o defeito alvo continua (${sig})`)
+    if (nowDefects.some(d => signatureOf(d) === sig)) reasons.push(`${cell.id}: o defeito alvo continua (${sigText})`)
     const oldFails = new Set((own(before, cell.id)?.verdict?.defects ?? []).filter(d => d.severity === 'fail').map(signatureOf))
     for (const d of nowDefects) {
-      if (d.severity === 'fail' && !oldFails.has(signatureOf(d))) reasons.push(`${cell.id}: defeito novo (${signatureOf(d)})`)
+      if (d.severity === 'fail' && !oldFails.has(signatureOf(d))) reasons.push(`${cell.id}: defeito novo (${oneLine(signatureOf(d))})`)
     }
     const old = own(before, cell.id)?.verdict
     cell.criteria.forEach((_, i) => {
@@ -590,20 +602,22 @@ export function acceptFixOf(input: {
     })
   }
   const targetNow = own(after, target.cell)
+  if (!cells.some(c => c.id === target.cell)) reasons.push(`${target.cell}: a célula alvo não foi retestada`)
+  if (!targetNow) reasons.push(`${target.cell}: sem evidência do reteste da célula alvo`)
   if (target.defect.source === 'criterio') {
     const i = Number(target.defect.rule)
     if (!targetNow?.verdict || !hasProof(targetNow.verdict, i)) reasons.push(`${target.cell}: o critério ${i} do defeito alvo continua sem prova`)
   }
   const wanted = normalizedTextOf(target.defect.text ?? '')
   if (wanted !== '' && !normalizedTextOf(targetNow?.result?.steps.map(s => s.text).join(' ') ?? '').includes(wanted)) {
-    reasons.push(`${target.cell}: o texto "${target.defect.text}" sumiu da tela no reteste`)
+    reasons.push(`${target.cell}: o texto "${oneLine(target.defect.text ?? '')}" sumiu da tela no reteste`)
   }
   return { accepted: reasons.length === 0, reasons }
 }
 
 const FIX_STATUSES = ['corrigido', 'não reverificado', 'não reproduzido na worktree', 'desistiu'] as const satisfies readonly FixStatus[]
 
-const listOf = (items: readonly string[]): string => (items.length > 0 ? items.join('; ') : 'nenhum')
+const listOf = (items: readonly string[]): string => (items.length > 0 ? items.map(oneLine).join('; ') : 'nenhum')
 
 export function fixReportOf(results: readonly FixResult[]): string {
   return [
@@ -612,15 +626,15 @@ export function fixReportOf(results: readonly FixResult[]): string {
     ...FIX_STATUSES.map(s => `- ${s}: ${results.filter(r => r.status === s).length}`),
     ...results.flatMap(r => [
       '',
-      `## ${r.defect}`,
+      `## ${oneLine(r.defect)}`,
       `- status: ${r.status}`,
       `- tentativas: ${r.attempts}`,
       `- commits: ${listOf(r.commits)}`,
       `- motivos de recusa: ${listOf(r.reasons)}`,
       `- reteste: ${listOf(r.retest.map(t => `${t.cell}: ${t.verdict}`))}`,
-      `- print de antes: ${r.before}`,
-      `- print de depois: ${r.after}`,
-      `- teste de regressão: ${r.regressionTest ?? 'nenhum'}`,
+      `- print de antes: ${oneLine(r.before)}`,
+      `- print de depois: ${oneLine(r.after)}`,
+      `- teste de regressão: ${oneLine(r.regressionTest ?? 'nenhum')}`,
       `- pendências: ${listOf(r.pending)}`,
     ]),
     '',
