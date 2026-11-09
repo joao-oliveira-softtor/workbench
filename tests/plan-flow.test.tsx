@@ -46,7 +46,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   })
   on('session.messages', () => ({ value: [{ role: 'user' as const, text: 'conversa-x', toolUses: [] }] }))
   // Só o CLAUDE.md existe (o engine entrega o caminho já absoluto): o AGENTS.md cai no engine do teste e fica de fora.
-  on('fs.read', (_$, e, next) => (e.path.endsWith('/CLAUDE.md') ? { value: 'claude-x' } : next(e)))
+  on('fs.read', (_$, e, next) => (/[\\/]CLAUDE\.md$/.test(e.path) ? { value: 'claude-x' } : next(e)))
   on('model.complete', async (_$, e) => {
     log.models.push(e.model)
     log.prompts.push(e.prompt)
