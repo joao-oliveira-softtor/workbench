@@ -181,13 +181,14 @@ function baseUrlOf(o: Rec): string {
   return v
 }
 
-// Caminho relativo à raiz do repositório; vira argumento de comando, então nada de `..`, `~`, `\` nem caractere fora da lista.
+// Caminho relativo à raiz do repositório; vira argumento de comando, então nada de `..`, `~`, `\`, segmento vazio ou só de
+// pontos, segmento que comece com `-` (leria como opção) nem caractere fora da lista. Só `''` é vazio (e só se `required` for falso).
 function relPathAt(o: Rec, key: string, opts: { required: boolean }, at = ''): string {
   const v = textAt(o, key, at)
   need(!opts.required || v !== '', `${at}${key}: não pode ser vazio`)
   need(
-    /^[A-Za-z0-9_./-]*$/.test(v) && !v.startsWith('/') && !v.split('/').some(seg => seg === '.' || seg === '..'),
-    `${at}${key}: precisa ser um caminho relativo, sem "." nem "..", só com letras, números e _ . / -`,
+    v === '' || v.split('/').every(seg => /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(seg) && !/^\.+$/.test(seg)),
+    `${at}${key}: precisa ser um caminho relativo, sem segmento vazio, "." nem "..", sem "-" no começo de segmento, só com letras, números e _ . / -`,
   )
   return v
 }
@@ -352,9 +353,12 @@ function savedOf(text: string): Saved {
   return { cookies, origins }
 }
 
-// Só cookie que vale para o hostname da origem do app (`domain` igual ou com ponto na frente).
+// Só cookie que vale para o hostname da origem do app (`domain` igual ou com ponto na frente). Só http(s): `data:`, `about:`,
+// `file:` e `mailto:` não têm hostname, e o `.origin` deles é "null" dos dois lados (casaria cookie e storage que não são do app).
+// shortcut: cookie de domínio-pai (`.exemplo.com` para `http://app.exemplo.com`) é descartado, melhorar se um app guardar a sessão no domínio-pai.
 function mineOf(text: string, origin: string): { cookies: Rec[]; origins: Saved['origins']; origin: string } {
   const url = new URL(origin)
+  need(url.protocol === 'http:' || url.protocol === 'https:', 'origem: só http ou https')
   const saved = savedOf(text)
   const cookies = saved.cookies.filter(c => c.domain === url.hostname || c.domain === `.${url.hostname}`)
   return { cookies, origins: saved.origins, origin: url.origin }

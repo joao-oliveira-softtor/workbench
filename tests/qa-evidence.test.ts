@@ -126,6 +126,11 @@ describe('parseMatrix', () => {
     ['testDir com espaço', { testDir: 'meus testes' }, 'testDir'],
     ['testDir com acento', { testDir: 'testés' }, 'testDir'],
     ['testDir com $', { testDir: 'e2e$x' }, 'testDir'],
+    ['testDir que parece opção', { testDir: '--update-snapshots' }, 'testDir'],
+    ['testDir com segmento que parece opção', { testDir: 'web/-x' }, 'testDir'],
+    ['testDir com segmento vazio', { testDir: 'a//b' }, 'testDir'],
+    ['testDir com barra no fim', { testDir: 'e2e/' }, 'testDir'],
+    ['testDir com segmento só de pontos', { testDir: 'web/...' }, 'testDir'],
     ['campo faltando', { profiles: undefined }, 'profiles'],
     ['tipo errado', { cut: 'nada' }, 'cut'],
     ['sem células', { cells: [] }, 'cells'],
@@ -927,6 +932,11 @@ describe('parseFix', () => {
     ['regressionTest com .', { regressionTest: './a.spec.ts' }],
     ['regressionTest com espaço', { regressionTest: 'e2e/a b.spec.ts' }],
     ['regressionTest com $', { regressionTest: 'e2e/$HOME.spec.ts' }],
+    ['regressionTest que parece opção', { regressionTest: '--update-snapshots' }],
+    ['regressionTest com segmento que parece opção', { regressionTest: 'e2e/-a.spec.ts' }],
+    ['regressionTest com segmento vazio', { regressionTest: 'e2e//a.spec.ts' }],
+    ['regressionTest com barra no fim', { regressionTest: 'e2e/' }],
+    ['regressionTest só de pontos', { regressionTest: '...' }],
   ]
   for (const [name, patch] of bad) {
     test(`recusa: ${name}`, () => expect(parseFix(fixText(patch))).toBeNull())
@@ -969,15 +979,36 @@ describe('sessão salva do navegador', () => {
     })
   }
 
-  test('origem que não abre com new URL dá null nas duas', () => {
-    expect(authSummaryOf(stateText(), 'localhost', NOW)).toBeNull()
-    expect(sessionLoadOf(stateText(), 'localhost')).toBeNull()
+  test('origem que não abre com new URL, ou que não é http(s), dá null nas duas', () => {
+    for (const origin of ['localhost', 'data:text/html,x', 'about:blank', 'file:///x', 'mailto:a@b.c']) {
+      expect(authSummaryOf(stateText(), origin, NOW)).toBeNull()
+      expect(sessionLoadOf(stateText(), origin)).toBeNull()
+    }
+  })
+
+  test('origem sem hostname não leva cookie de domínio vazio nem storage de origem "null"', () => {
+    const text = stateText({ cookies: [cookieOf({ domain: '' }), cookieOf({ domain: '.' })], origins: [originOf({ origin: 'data:text/html,x' })] })
+    expect(sessionLoadOf(text, 'data:text/html,x')).toBeNull()
+    expect(sessionLoadOf(text, 'http://localhost:3000')?.cookies).toBe('[]')
   })
 
   describe('authSummaryOf', () => {
     test('conta só os cookies do hostname, com ou sem ponto na frente', () => {
       const text = stateText({ cookies: [cookieOf(), cookieOf({ name: 'b', domain: '.localhost' }), cookieOf({ name: 'c', domain: 'accounts.exemplo.com' }), cookieOf({ name: 'd', domain: 'sublocalhost' })] })
       expect(authSummaryOf(text, APP, NOW)).toEqual({ cookies: 2, expired: 0 })
+    })
+
+    test('subdomínio, domínio parecido, maiúscula e porta no domain não valem para a origem', () => {
+      for (const domain of ['x.localhost', 'localhost.evil.com', 'LOCALHOST', '.LOCALHOST', 'localhost:3000']) {
+        expect(authSummaryOf(stateText({ cookies: [cookieOf({ domain })] }), APP, NOW)).toEqual({ cookies: 0, expired: 0 })
+        expect(sessionLoadOf(stateText({ cookies: [cookieOf({ domain })] }), APP)?.cookies).toBe('[]')
+      }
+    })
+
+    // shortcut: cookie de domínio-pai (`.exemplo.com` para `http://app.exemplo.com`) é descartado, melhorar se um app guardar a sessão no domínio-pai.
+    test('cookie de domínio-pai é descartado (limite conhecido)', () => {
+      const text = stateText({ cookies: [cookieOf({ domain: '.exemplo.com' })] })
+      expect(authSummaryOf(text, 'http://app.exemplo.com', NOW)).toEqual({ cookies: 0, expired: 0 })
     })
 
     test('expirado é expires em segundos <= now; -1 (sessão) nunca expira', () => {
@@ -1001,7 +1032,9 @@ describe('sessão salva do navegador', () => {
     })
 
     test('o resumo não carrega valores', () => {
-      expect(JSON.stringify(authSummaryOf(stateText(), APP, NOW))).not.toMatch(/v1|v2|v3/)
+      const out = JSON.stringify(authSummaryOf(stateText(), APP, NOW))
+      expect(out).toBe('{"cookies":1,"expired":0}')
+      for (const value of ['v1', 'v2', 'v3']) expect(out).not.toContain(value)
     })
   })
 
