@@ -29,3 +29,5 @@ claude plugin update workbench@workbench
 ```
 
 Depois, reinicie a sessão.
+
+Para atualizar sozinho a cada sessão nova, ligue o auto-update do marketplace: em `/plugin`, aba Marketplaces, escolha `workbench` e ative o auto-update. Ou, no `~/.claude/settings.json`, ponha `"autoUpdate": true` em `extraKnownMarketplaces.workbench`.
