@@ -27,6 +27,7 @@ export type Matrix = {
   installCommand: string
   startCommand: string
   testCommand: string
+  testDir: string // pasta dos testes Playwright, relativa à raiz do repositório; '' sem Playwright
   backend: { containers: string[] }
   profiles: string[]
   requirements: { id: string; text: string; source: string }[]
@@ -66,6 +67,7 @@ export type CellVerdict = {
 export type CellOutcome = { final: Verdict; verdict: CellVerdict | null }
 export type Evidence = { result: CellResult | null; verdict: CellVerdict | null }
 export type FixStatus = 'corrigido' | 'não reverificado' | 'não reproduzido na worktree' | 'desistiu'
+export type Fix = { retestable: boolean; reason?: string; regressionTest?: string }
 export type FixResult = {
   defect: string
   status: FixStatus
@@ -179,6 +181,17 @@ function baseUrlOf(o: Rec): string {
   return v
 }
 
+// Caminho relativo à raiz do repositório; vira argumento de comando, então nada de `..`, `~`, `\` nem caractere fora da lista.
+function relPathAt(o: Rec, key: string, opts: { required: boolean }, at = ''): string {
+  const v = textAt(o, key, at)
+  need(!opts.required || v !== '', `${at}${key}: não pode ser vazio`)
+  need(
+    /^[A-Za-z0-9_./-]*$/.test(v) && !v.startsWith('/') && !v.split('/').some(seg => seg === '.' || seg === '..'),
+    `${at}${key}: precisa ser um caminho relativo, sem "." nem "..", só com letras, números e _ . / -`,
+  )
+  return v
+}
+
 function commandAt(o: Rec, key: string, opts: { required: boolean; port?: boolean }): string {
   const v = textAt(o, key)
   need(!opts.required || v.trim() !== '', `${key}: não pode ser vazio`)
@@ -231,6 +244,7 @@ function matrixOf(markdown: string): Matrix {
   const installCommand = commandAt(m, 'installCommand', { required: true })
   const startCommand = commandAt(m, 'startCommand', { required: true, port: true })
   const testCommand = commandAt(m, 'testCommand', { required: false })
+  const testDir = relPathAt(m, 'testDir', { required: false })
   const containers = stringsAt(recOf(m.backend, 'backend'), 'containers', 'backend.')
   containers.forEach((c, i) => identAt(c, CONTAINER_ID, `backend.containers[${i}]`))
   const profiles = stringsAt(m, 'profiles')
@@ -246,7 +260,7 @@ function matrixOf(markdown: string): Matrix {
   need(rawCells.length >= 1 && rawCells.length <= MAX_CELLS, `cells: precisa ter de 1 a ${MAX_CELLS} células (achei ${rawCells.length})`)
   const seenCells = new Set<string>()
   const cells = rawCells.map((c, i) => cellAt(c, i, { requirements: seenReqs, profiles: seenProfiles }, seenCells))
-  return { baseUrl, loginRoute, installCommand, startCommand, testCommand, backend: { containers }, profiles, requirements, cells, cut: stringsAt(m, 'cut') }
+  return { baseUrl, loginRoute, installCommand, startCommand, testCommand, testDir, backend: { containers }, profiles, requirements, cells, cut: stringsAt(m, 'cut') }
 }
 
 // `matriz.md` é texto livre com exatamente um bloco ```json; o erro vai para um aviso na tela.
@@ -293,6 +307,78 @@ export function parseResult(text: string): CellResult | null {
       console: logs,
       pageErrors: stringsAt(o, 'pageErrors'),
       ...(error === undefined ? {} : { error }),
+    }
+  })
+}
+
+// `fix.json` do agente corretor. `regressionTest` é o teste que o MOD roda duas vezes, então é caminho e nada mais.
+export function parseFix(text: string): Fix | null {
+  return orNull(() => {
+    const o = recOf(jsonObjectIn(text), 'fix')
+    need(typeof o.retestable === 'boolean', 'retestable: precisa ser verdadeiro ou falso')
+    const reason = optionalTextAt(o, 'reason', '')
+    const regressionTest = o.regressionTest === undefined ? undefined : relPathAt(o, 'regressionTest', { required: true })
+    return { retestable: o.retestable, ...(reason === undefined ? {} : { reason }), ...(regressionTest === undefined ? {} : { regressionTest }) }
+  })
+}
+
+// Sessão salva do navegador (`auth/<perfil>.json`): é segredo. Nada aqui devolve nem cita um `value` em mensagem de erro.
+type Stored = { name: string; value: string }
+type Saved = { cookies: Rec[]; origins: { origin: string; local: Stored[]; session: Stored[] }[] }
+
+function storedAt(o: Rec, key: string, at: string): Stored[] {
+  return o[key] === undefined ? [] : listAt(o, key, at).map((e, i) => {
+    const r = recOf(e, `${at}${key}[${i}]`)
+    return { name: textAt(r, 'name', `${at}${key}[${i}].`), value: textAt(r, 'value', `${at}${key}[${i}].`) }
+  })
+}
+
+function savedOf(text: string): Saved {
+  const o = recOf(JSON.parse(text), 'sessão')
+  const cookies = listAt(o, 'cookies').map((c, i) => {
+    const at = `cookies[${i}].`
+    const r = recOf(c, `cookies[${i}]`)
+    textAt(r, 'name', at)
+    textAt(r, 'value', at)
+    textAt(r, 'domain', at)
+    need(typeof r.expires === 'number', `${at}expires: precisa ser número`)
+    return r
+  })
+  const origins = listAt(o, 'origins').map((x, i) => {
+    const at = `origins[${i}].`
+    const r = recOf(x, `origins[${i}]`)
+    return { origin: textAt(r, 'origin', at), local: storedAt(r, 'localStorage', at), session: storedAt(r, 'sessionStorage', at) }
+  })
+  return { cookies, origins }
+}
+
+// Só cookie que vale para o hostname da origem do app (`domain` igual ou com ponto na frente).
+function mineOf(text: string, origin: string): { cookies: Rec[]; origins: Saved['origins']; origin: string } {
+  const url = new URL(origin)
+  const saved = savedOf(text)
+  const cookies = saved.cookies.filter(c => c.domain === url.hostname || c.domain === `.${url.hostname}`)
+  return { cookies, origins: saved.origins, origin: url.origin }
+}
+
+// `now` em milissegundos; `expires` do arquivo em segundos, e -1 é cookie de sessão.
+export function authSummaryOf(text: string, origin: string, now: number): { cookies: number; expired: number } | null {
+  return orNull(() => {
+    const { cookies } = mineOf(text, origin)
+    return { cookies: cookies.length, expired: cookies.filter(c => c.expires !== -1 && (c.expires as number) * 1000 <= now).length }
+  })
+}
+
+// O que o mod injeta num navegador novo: `cookies` é o texto que `cookies set --curl <arquivo>` aceita.
+export function sessionLoadOf(text: string, origin: string): { cookies: string; storage: { kind: 'local' | 'session'; name: string; value: string }[] } | null {
+  return orNull(() => {
+    const mine = mineOf(text, origin)
+    const here = mine.origins.filter(x => orNull(() => new URL(x.origin).origin) === mine.origin)
+    return {
+      cookies: JSON.stringify(mine.cookies),
+      storage: [
+        ...here.flatMap(x => x.local.map(e => ({ kind: 'local' as const, ...e }))),
+        ...here.flatMap(x => x.session.map(e => ({ kind: 'session' as const, ...e }))),
+      ],
     }
   })
 }

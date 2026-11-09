@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   acceptFixOf,
   argvOf,
+  authSummaryOf,
   baseUrlAt,
   checkedDefectsOf,
   defectIdOf,
@@ -13,10 +14,12 @@ import {
   isUnstable,
   normalizedTextOf,
   parseMatrix,
+  parseFix,
   parseResult,
   parseVerdict,
   reportOf,
   retestCellsOf,
+  sessionLoadOf,
   signatureOf,
   startArgvOf,
 } from '../hooks/qa-evidence'
@@ -45,6 +48,7 @@ const matrixOf = (over: Partial<Matrix> = {}): Matrix => ({
   installCommand: 'npm ci',
   startCommand: 'npm run dev -- --port {QA_PORT}',
   testCommand: 'npm test',
+  testDir: 'e2e',
   backend: { containers: ['app-exemplo-api'] },
   profiles: ['admin', 'vendedor'],
   requirements: [{ id: 'r1', text: 'Salvar item', source: 'issue 1' }],
@@ -111,6 +115,17 @@ describe('parseMatrix', () => {
     ['installCommand com {QA_PORT}', { installCommand: 'npm ci --port {QA_PORT}' }, 'installCommand'],
     ['testCommand com {QA_PORT}', { testCommand: 'npm test {QA_PORT}' }, 'testCommand'],
     ['startCommand com outra chave', { startCommand: 'npm run dev {OUTRA}' }, 'startCommand'],
+    ['testDir que não é texto', { testDir: 5 }, 'testDir'],
+    ['testDir faltando', { testDir: undefined }, 'testDir'],
+    ['testDir absoluto', { testDir: '/e2e' }, 'testDir'],
+    ['testDir com ~', { testDir: '~/e2e' }, 'testDir'],
+    ['testDir com contrabarra', { testDir: 'web\\e2e' }, 'testDir'],
+    ['testDir com segmento ..', { testDir: 'web/../e2e' }, 'testDir'],
+    ['testDir só ..', { testDir: '..' }, 'testDir'],
+    ['testDir com segmento .', { testDir: 'web/./e2e' }, 'testDir'],
+    ['testDir com espaço', { testDir: 'meus testes' }, 'testDir'],
+    ['testDir com acento', { testDir: 'testés' }, 'testDir'],
+    ['testDir com $', { testDir: 'e2e$x' }, 'testDir'],
     ['campo faltando', { profiles: undefined }, 'profiles'],
     ['tipo errado', { cut: 'nada' }, 'cut'],
     ['sem células', { cells: [] }, 'cells'],
@@ -158,6 +173,15 @@ describe('parseMatrix', () => {
     expect(parseMatrix(mdOf(matrixOf({ installCommand: 'npm ci {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: 'npm test {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: '' }))).ok).toBe(true)
+  })
+})
+
+describe('testDir', () => {
+  test('vazio (sem Playwright) e pasta aninhada passam', () => {
+    for (const testDir of ['', 'e2e', 'web/tests-e2e_1/ui.v2']) {
+      const r = parseMatrix(mdOf(matrixOf({ testDir })))
+      expect(r.ok && r.value.testDir).toBe(testDir)
+    }
   })
 })
 
@@ -878,5 +902,149 @@ describe('fixReportOf', () => {
 
   test('lista vazia mostra contagem zero', () => {
     expect(fixReportOf([])).toContain('- corrigido: 0')
+  })
+})
+
+describe('parseFix', () => {
+  const fixText = (over: Record<string, unknown> = {}): string => JSON.stringify({ retestable: true, ...over })
+
+  test('aceita retestable com e sem reason e regressionTest', () => {
+    expect(parseFix(fixText())).toEqual({ retestable: true })
+    expect(parseFix(fixText({ retestable: false, reason: 'container do checkout principal' }))).toEqual({ retestable: false, reason: 'container do checkout principal' })
+    expect(parseFix(fixText({ regressionTest: 'e2e/c1-d1.spec.ts' }))).toEqual({ retestable: true, regressionTest: 'e2e/c1-d1.spec.ts' })
+  })
+
+  const bad: [string, Record<string, unknown>][] = [
+    ['retestable texto', { retestable: 'sim' }],
+    ['retestable faltando', { retestable: undefined }],
+    ['reason número', { reason: 5 }],
+    ['regressionTest número', { regressionTest: 5 }],
+    ['regressionTest vazio', { regressionTest: '' }],
+    ['regressionTest absoluto', { regressionTest: '/tmp/a.spec.ts' }],
+    ['regressionTest com ~', { regressionTest: '~/a.spec.ts' }],
+    ['regressionTest com contrabarra', { regressionTest: 'e2e\\a.spec.ts' }],
+    ['regressionTest com ..', { regressionTest: 'e2e/../../a.spec.ts' }],
+    ['regressionTest com .', { regressionTest: './a.spec.ts' }],
+    ['regressionTest com espaço', { regressionTest: 'e2e/a b.spec.ts' }],
+    ['regressionTest com $', { regressionTest: 'e2e/$HOME.spec.ts' }],
+  ]
+  for (const [name, patch] of bad) {
+    test(`recusa: ${name}`, () => expect(parseFix(fixText(patch))).toBeNull())
+  }
+
+  test('recusa texto que não é json', () => {
+    expect(parseFix('nada')).toBeNull()
+  })
+})
+
+describe('sessão salva do navegador', () => {
+  const NOW = 1_700_000_000_000
+  const cookieOf = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    name: 'sid', value: 'v1', domain: 'localhost', path: '/', expires: 1_800_000_000.5, size: 5, httpOnly: true, secure: false, session: false, sameSite: 'Lax', ...over,
+  })
+  const originOf = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    origin: 'http://localhost:3000', localStorage: [{ name: 'tema', value: 'v2' }], sessionStorage: [{ name: 'aba', value: 'v3' }], ...over,
+  })
+  const stateText = (over: Record<string, unknown> = {}): string => JSON.stringify({ cookies: [cookieOf()], origins: [originOf()], ...over })
+  const APP = 'http://localhost:3000'
+
+  const malformed: [string, string][] = [
+    ['texto que não é json', 'nada'],
+    ['json que não é objeto', '[]'],
+    ['sem cookies', stateText({ cookies: undefined })],
+    ['cookies que não é lista', stateText({ cookies: {} })],
+    ['cookie sem name', stateText({ cookies: [cookieOf({ name: undefined })] })],
+    ['cookie com value número', stateText({ cookies: [cookieOf({ value: 1 })] })],
+    ['cookie sem domain', stateText({ cookies: [cookieOf({ domain: undefined })] })],
+    ['expires texto', stateText({ cookies: [cookieOf({ expires: 'amanhã' })] })],
+    ['sem origins', stateText({ origins: undefined })],
+    ['origin sem origin', stateText({ origins: [originOf({ origin: undefined })] })],
+    ['localStorage que não é lista', stateText({ origins: [originOf({ localStorage: 'x' })] })],
+    ['entrada de storage sem value', stateText({ origins: [originOf({ sessionStorage: [{ name: 'aba' }] })] })],
+  ]
+  for (const [name, text] of malformed) {
+    test(`recusa: ${name}`, () => {
+      expect(authSummaryOf(text, APP, NOW)).toBeNull()
+      expect(sessionLoadOf(text, APP)).toBeNull()
+    })
+  }
+
+  test('origem que não abre com new URL dá null nas duas', () => {
+    expect(authSummaryOf(stateText(), 'localhost', NOW)).toBeNull()
+    expect(sessionLoadOf(stateText(), 'localhost')).toBeNull()
+  })
+
+  describe('authSummaryOf', () => {
+    test('conta só os cookies do hostname, com ou sem ponto na frente', () => {
+      const text = stateText({ cookies: [cookieOf(), cookieOf({ name: 'b', domain: '.localhost' }), cookieOf({ name: 'c', domain: 'accounts.exemplo.com' }), cookieOf({ name: 'd', domain: 'sublocalhost' })] })
+      expect(authSummaryOf(text, APP, NOW)).toEqual({ cookies: 2, expired: 0 })
+    })
+
+    test('expirado é expires em segundos <= now; -1 (sessão) nunca expira', () => {
+      const text = stateText({
+        cookies: [
+          cookieOf({ name: 'a', expires: NOW / 1000 }),
+          cookieOf({ name: 'b', expires: NOW / 1000 - 1 }),
+          cookieOf({ name: 'c', expires: NOW / 1000 + 0.5 }),
+          cookieOf({ name: 'd', expires: -1, session: true }),
+        ],
+      })
+      expect(authSummaryOf(text, APP, NOW)).toEqual({ cookies: 4, expired: 2 })
+    })
+
+    test('cookie de outro hostname vencido não conta', () => {
+      expect(authSummaryOf(stateText({ cookies: [cookieOf({ domain: 'accounts.exemplo.com', expires: 1 })] }), APP, NOW)).toEqual({ cookies: 0, expired: 0 })
+    })
+
+    test('origins vazio e sem cookies são válidos', () => {
+      expect(authSummaryOf(JSON.stringify({ cookies: [], origins: [] }), APP, NOW)).toEqual({ cookies: 0, expired: 0 })
+    })
+
+    test('o resumo não carrega valores', () => {
+      expect(JSON.stringify(authSummaryOf(stateText(), APP, NOW))).not.toMatch(/v1|v2|v3/)
+    })
+  })
+
+  describe('sessionLoadOf', () => {
+    test('cookies saem como array JSON com todos os campos como vieram', () => {
+      const r = sessionLoadOf(stateText(), APP)
+      expect(r && JSON.parse(r.cookies)).toEqual([cookieOf()])
+    })
+
+    test('guarda só cookie do hostname; o de outro domínio nunca sai', () => {
+      const text = stateText({ cookies: [cookieOf(), cookieOf({ name: 'x', value: 'v9', domain: 'accounts.exemplo.com' }), cookieOf({ name: 'y', domain: '.localhost' })] })
+      const r = sessionLoadOf(text, APP)
+      expect(r?.cookies).not.toContain('accounts.exemplo.com')
+      expect(r?.cookies).not.toContain('v9')
+      expect((JSON.parse(r?.cookies ?? '[]') as { name: string }[]).map(c => c.name)).toEqual(['sid', 'y'])
+    })
+
+    test('storage vem da origem exata, local e session; outras origens ficam de fora', () => {
+      const text = stateText({
+        origins: [
+          originOf({ origin: 'http://localhost:3001', localStorage: [{ name: 'outra', value: 'v8' }] }),
+          originOf(),
+          originOf({ origin: 'https://accounts.exemplo.com', sessionStorage: [{ name: 'conta', value: 'v7' }] }),
+        ],
+      })
+      const r = sessionLoadOf(text, 'http://localhost:3000')
+      expect(r?.storage).toEqual([
+        { kind: 'local', name: 'tema', value: 'v2' },
+        { kind: 'session', name: 'aba', value: 'v3' },
+      ])
+    })
+
+    test('compara a origem por new URL(x).origin (barra final e caminho não importam)', () => {
+      expect(sessionLoadOf(stateText({ origins: [originOf({ origin: 'http://localhost:3000/' })] }), 'http://localhost:3000/entrar')?.storage).toHaveLength(2)
+    })
+
+    test('localStorage ou sessionStorage faltando, ou origem sem entrada, dão storage vazio ou parcial', () => {
+      expect(sessionLoadOf(stateText({ origins: [originOf({ sessionStorage: undefined })] }), APP)?.storage).toEqual([{ kind: 'local', name: 'tema', value: 'v2' }])
+      expect(sessionLoadOf(stateText({ origins: [] }), APP)?.storage).toEqual([])
+    })
+
+    test('sem cookie do hostname, cookies é "[]"', () => {
+      expect(sessionLoadOf(stateText({ cookies: [cookieOf({ domain: 'accounts.exemplo.com' })] }), APP)?.cookies).toBe('[]')
+    })
   })
 })
