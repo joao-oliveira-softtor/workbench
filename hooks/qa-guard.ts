@@ -20,20 +20,35 @@ export type BashVerdict = { decision: 'allow' | 'deny' | 'pass'; reason: string 
 
 const GIT_DENIED = ['push', 'checkout', 'switch', 'merge', 'rebase', 'stash', 'reset', 'clean', 'worktree', 'config', 'remote']
 const GIT_ARG_OPTS = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--shallow-file']
-const GIT_WORKTREE_SUBS = ['add', 'commit', 'diff', 'status', 'log']
-const GIT_BANNED_LONG = ['--no-verify', '--ext-diff', '--no-index', '--output']
+// Git da worktree: lista fechada de opções por subcomando. `pos`: posicionais são caminhos, referências/caminhos ou nenhum.
+type GitSpec = { flags: readonly string[]; pos: 'paths' | 'refs' | 'none'; message?: true; count?: true }
+const GIT_SPECS = new Map<string, GitSpec>([
+  ['add', { flags: ['-A', '--all', '-u', '--update', '--'], pos: 'paths' }],
+  ['commit', { flags: ['-a', '--all', '-q', '--quiet'], pos: 'none', message: true }],
+  ['diff', { flags: ['--stat', '--name-only', '--name-status', '--cached', '--staged', '--'], pos: 'refs' }],
+  ['status', { flags: ['-s', '--short', '-b', '--branch', '--porcelain'], pos: 'refs' }],
+  ['log', { flags: ['--oneline', '--stat', '-p', '--patch'], pos: 'refs', count: true }],
+])
 const CURL_FLAGS = ['--silent', '--show-error', '--include', '--head', '--fail', '--insecure', '--verbose']
 const CURL_VALUED = ['-X', '--request', '-H', '--header', '-d', '--data', '--data-raw', '-m', '--max-time', '--connect-timeout', '-w', '--write-out']
 const CURL_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const DOCKER_VALUED = ['--since', '--until', '--tail', '-n']
-const AB_FLAGS = ['-i', '--interactive', '-c', '--compact', '--full', '--json', '--exact', '--clear']
-const AB_VALUED = ['-d', '--depth', '--name']
-const AB_NETWORK_VALUED = ['--filter', '--type', '--method', '--status']
+// Opções do agent-browser por subcomando (`--json` entra em todos, menos `network`): cada opção só vale no subcomando dela.
+type AbSpec = { flags: readonly string[]; valued: readonly string[] }
+const AB_SPECS = new Map<string, AbSpec>([
+  ['snapshot', { flags: ['-i', '--interactive', '-c', '--compact', '-u', '--urls'], valued: ['-d', '--depth', '-s', '--selector'] }],
+  ['screenshot', { flags: ['--full', '-f', '--annotate'], valued: [] }],
+  ['find', { flags: ['--exact'], valued: ['--name'] }],
+  ['console', { flags: ['--clear'], valued: [] }],
+  ['errors', { flags: ['--clear'], valued: [] }],
+  ['network', { flags: ['--clear'], valued: ['--filter', '--type', '--method', '--status'] }],
+  ['wait', { flags: [], valued: ['--load', '--text'] }],
+])
 const AB_ONE = ['click', 'dblclick', 'hover', 'focus', 'check', 'uncheck', 'scrollintoview', 'press', 'wait']
 const AB_NONE = ['snapshot', 'back', 'forward', 'reload', 'console', 'errors']
 const AB_GET = ['text', 'value', 'attr', 'title', 'url', 'count', 'box', 'styles']
-const AB_FIND_BY = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last', 'nth']
-const AB_FIND_DO = ['click', 'dblclick', 'fill', 'type', 'hover', 'focus', 'check', 'uncheck', 'text']
+const AB_FIND_BY = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last']
+const AB_FIND_DO = ['click', 'fill', 'check', 'hover', 'text']
 const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
 
 function workDirOf(role: QaRole, ctx: GuardCtx): string {
@@ -113,6 +128,14 @@ const programOf = (word: string): string => {
 
 const isBranchDelete = (w: string): boolean => /^-[A-Za-z]*[dD][A-Za-z]*$/.test(w) || (w.length > 2 && '--delete'.startsWith(w))
 
+function subDenyReason(ws: readonly string[], at: number): string | null {
+  const sub = ws[at]
+  if (sub === undefined) return null
+  if (GIT_DENIED.includes(sub)) return `git ${sub} é proibido para agentes de QA`
+  if (sub === 'branch' && ws.slice(at + 1).some(isBranchDelete)) return 'git branch com apagar é proibido para agentes de QA'
+  return null
+}
+
 function gitDenyReason(ws: readonly string[], at: number): string | null {
   let j = at + 1
   while (j < ws.length && (ws[j] ?? '').startsWith('-')) {
@@ -121,15 +144,11 @@ function gitDenyReason(ws: readonly string[], at: number): string | null {
     if (config?.toLowerCase().startsWith('alias.')) return 'git com alias é proibido (pode esconder um push)'
     const known = GIT_ARG_OPTS.includes(w)
     // opção desconhecida pode levar argumento: olha as duas palavras seguintes
-    const hides = !known && !w.includes('=') && [ws[j + 1], ws[j + 2]].some(x => x !== undefined && GIT_DENIED.includes(x))
-    if (hides) return `git com opção desconhecida ${w} antes de subcomando proibido`
+    const hidden = known || w.includes('=') ? null : (subDenyReason(ws, j + 1) ?? subDenyReason(ws, j + 2))
+    if (hidden !== null) return hidden
     j += known ? 2 : 1
   }
-  const sub = ws[j]
-  if (sub === undefined) return null
-  if (GIT_DENIED.includes(sub)) return `git ${sub} é proibido para agentes de QA`
-  if (sub === 'branch' && ws.slice(j + 1).some(isBranchDelete)) return 'git branch com apagar é proibido para agentes de QA'
-  return null
+  return subDenyReason(ws, j)
 }
 
 // Um candidato (palavra inteira ou o trecho depois do primeiro `=`) que parece caminho e cai no checkout principal.
@@ -196,7 +215,7 @@ function valueOk(v: string, role: QaRole, ctx: GuardCtx): boolean {
   if (SCHEME.test(v)) return urlOk(v, ctx)
   if (!v.includes('/') && v !== '..' && v !== '~') return true
   const p = resolveIn(v, workDirOf(role, ctx), ctx.home)
-  return isInside(p, ctx.runDir) || (role === 'fixer' && isInside(p, ctx.fixDir))
+  return isInside(p, ctx.runDir)
 }
 
 // Palavra inteira e, se houver `=`, o trecho depois dele.
@@ -207,19 +226,20 @@ function wordOk(w: string, role: QaRole, ctx: GuardCtx): boolean {
 
 const argsOk = (args: readonly string[], role: QaRole, ctx: GuardCtx): boolean => args.every(w => wordOk(w, role, ctx))
 
-// Opções do agent-browser: separa em posicionais e `null` se aparecer opção fora da lista.
-function abParts(rest: readonly string[], network: boolean): { pos: string[]; opts: string[] } | null {
+// Separa posicionais e opções (nome, valor) pela lista do subcomando; `null` se aparecer opção fora dela ou valor ruim.
+function abParts(sub: string, rest: readonly string[]): { pos: string[]; opts: Array<[string, string]> } | null {
+  const spec = AB_SPECS.get(sub) ?? { flags: [], valued: [] }
   const pos: string[] = []
-  const opts: string[] = []
+  const opts: Array<[string, string]> = []
   for (let i = 0; i < rest.length; i++) {
     const w = rest[i] ?? ''
-    if (AB_FLAGS.includes(w)) {
-      opts.push(w)
-    } else if (AB_VALUED.includes(w) || (network && AB_NETWORK_VALUED.includes(w))) {
+    if (spec.flags.includes(w) || (w === '--json' && sub !== 'network')) {
+      opts.push([w, ''])
+    } else if (spec.valued.includes(w)) {
       const v = rest[++i]
       const bad = v === undefined || v.startsWith('-') || ((w === '-d' || w === '--depth') && !/^\d+$/.test(v))
       if (bad) return null
-      opts.push(w)
+      opts.push([w, v])
     } else if (w.startsWith('-')) {
       return null
     } else {
@@ -229,6 +249,27 @@ function abParts(rest: readonly string[], network: boolean): { pos: string[]; op
   return { pos, opts }
 }
 
+// `wait`: um posicional, ou `--load <estado>`, ou `--text <texto>`; nada mais.
+function waitOk(pos: readonly string[], opts: ReadonlyArray<[string, string]>): boolean {
+  const [opt] = opts
+  if (opt === undefined) return pos.length === 1
+  return pos.length === 0 && opts.length === 1 && (opt[0] === '--text' || ['load', 'domcontentloaded', 'networkidle'].includes(opt[1]))
+}
+
+// `find <localizador> <valor> [ação] [texto]` ou `find nth <dígitos> <seletor> [ação] [texto]`; texto só com `fill`.
+function findOk(pos: readonly string[]): boolean {
+  const [by = '', val = '', ...rest] = pos
+  const isNth = by === 'nth'
+  if (!isNth && !AB_FIND_BY.includes(by)) return false
+  if (isNth && (!/^\d+$/.test(val) || rest.length === 0)) return false
+  const tail = isNth ? rest.slice(1) : rest
+  // `find nth 2 click`: sem seletor, `click` seria lido como seletor
+  if (isNth && tail.length === 0 && AB_FIND_DO.includes(rest[0] ?? '')) return false
+  const [action, text] = tail
+  if (action === undefined) return val !== ''
+  return AB_FIND_DO.includes(action) && tail.length <= 2 && (text === undefined || action === 'fill')
+}
+
 // `screenshot` só grava .png com caminho absoluto dentro de runDir.
 function screenshotOk(path: string | undefined, ctx: GuardCtx): boolean {
   if (path === undefined || !path.startsWith('/')) return false
@@ -236,11 +277,11 @@ function screenshotOk(path: string | undefined, ctx: GuardCtx): boolean {
   return p.endsWith('.png') && isInside(p, ctx.runDir)
 }
 
-function abFormOk(sub: string, pos: readonly string[], opts: readonly string[], ctx: GuardCtx): boolean {
+function abFormOk(sub: string, pos: readonly string[], opts: ReadonlyArray<[string, string]>, ctx: GuardCtx): boolean {
   const n = pos.length
   const first = pos[0] ?? ''
   if (AB_NONE.includes(sub)) return n === 0
-  if (AB_ONE.includes(sub)) return n === 1
+  if (AB_ONE.includes(sub) && sub !== 'wait') return n === 1
   switch (sub) {
     case 'open':
       return n === 1 && urlOk(first, ctx)
@@ -260,10 +301,12 @@ function abFormOk(sub: string, pos: readonly string[], opts: readonly string[], 
     case 'is':
       return n === 2 && ['visible', 'enabled', 'checked'].includes(first)
     case 'find':
-      return (n === 3 || n === 4) && AB_FIND_BY.includes(first) && AB_FIND_DO.includes(pos[2] ?? '')
+      return findOk(pos)
+    case 'wait':
+      return waitOk(pos, opts)
     case 'network':
-      // o JSON de `network requests` traz cabeçalhos (cookies, tokens)
-      return n === 1 && first === 'requests' && !opts.includes('--json')
+      // sem `--json` (não está na lista do `network`): o JSON de `network requests` traz cabeçalhos (cookies, tokens)
+      return n === 1 && first === 'requests'
     default:
       return false
   }
@@ -273,7 +316,7 @@ function abFormOk(sub: string, pos: readonly string[], opts: readonly string[], 
 function agentBrowserOk(args: readonly string[], ctx: GuardCtx): boolean {
   const [flag, session, sub, ...rest] = args
   if (flag !== '--session' || ctx.session === '' || session !== ctx.session || sub === undefined) return false
-  const parts = abParts(rest, sub === 'network')
+  const parts = abParts(sub, rest)
   return parts !== null && abFormOk(sub, parts.pos, parts.opts, ctx)
 }
 
@@ -304,7 +347,8 @@ function curlOk(args: readonly string[], ctx: GuardCtx): boolean {
       // `%output{arquivo}` no write-out grava arquivo
       const writes = (w === '-w' || w === '--write-out') && /%output/i.test(v ?? '')
       if (v === undefined || v.includes('@') || badMethod || writes) return false
-    } else if (w.startsWith('-') || !urlOk(w, ctx)) {
+    // `{a,b}` e `[1-9]` o curl expande sozinho, em várias requisições
+    } else if (w.startsWith('-') || !urlOk(w, ctx) || /[{}[\]]/.test(w)) {
       return false
     } else {
       urls++
@@ -333,25 +377,49 @@ function dockerLogsOk(args: readonly string[], ctx: GuardCtx): boolean {
   return names.length === 1 && ctx.containers.includes(names[0] ?? '')
 }
 
-// Opção proibida no git da worktree, inclusive abreviada (`--no-ver` vale como `--no-verify`).
-function gitOptionBanned(w: string, sub: string): boolean {
-  const name = w.split('=')[0] ?? ''
-  const long = name.length > 2 && name.startsWith('--') && (GIT_BANNED_LONG.some(b => b.startsWith(name)) || name.startsWith('--output'))
-  return w === '-c' || long || (sub === 'commit' && /^-[^-]*n/.test(w))
+// Posicional do git da worktree: add -> caminho dentro de fixDir; diff/status/log -> referência ou caminho simples.
+function gitPositionalOk(w: string, spec: GitSpec, ctx: GuardCtx): boolean {
+  const inFix = isInside(resolveIn(w, ctx.fixDir, ctx.home), ctx.fixDir)
+  switch (spec.pos) {
+    case 'none':
+      return false
+    case 'paths':
+      return inFix
+    case 'refs':
+      return /^[A-Za-z0-9._/-]+$/.test(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
+    default:
+      throw new Error('Caso não tratado: ' + String(spec.pos satisfies never))
+  }
 }
 
-function gitWorktreeOk(args: readonly string[], role: QaRole, ctx: GuardCtx): boolean {
+function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
   const [flag, dir, sub, ...rest] = args
   const sameDir = dir !== undefined && dir.startsWith('/') && ctx.fixDir !== '' && normalizePath(dir) === normalizePath(ctx.fixDir)
-  if (flag !== '-C' || !sameDir || sub === undefined || !GIT_WORKTREE_SUBS.includes(sub)) return false
-  const checked: string[] = []
+  const spec = sub === undefined ? undefined : GIT_SPECS.get(sub)
+  if (flag !== '-C' || !sameDir || spec === undefined) return false
+  let afterDashes = false
   for (let i = 0; i < rest.length; i++) {
     const w = rest[i] ?? ''
-    // a mensagem do commit é texto livre: não passa pela conferência de caminho nem de URL
-    if (sub === 'commit' && (w === '-m' || w === '--message')) i++
-    else if (!(sub === 'commit' && w.startsWith('--message='))) checked.push(w)
+    if (afterDashes) {
+      if (!gitPositionalOk(w, spec, ctx)) return false
+    } else if (w === '--' && spec.flags.includes(w)) {
+      afterDashes = true
+    } else if (spec.message && (w === '-m' || w === '--message')) {
+      // a mensagem do commit é texto livre: não passa pela conferência de caminho nem de URL
+      if (rest[++i] === undefined) return false
+    } else if (spec.message && w.startsWith('--message=')) {
+      continue
+    } else if (spec.flags.includes(w)) {
+      continue
+    } else if (spec.count && w === '-n') {
+      if (!/^\d+$/.test(rest[++i] ?? '')) return false
+    } else if (spec.count && /^(--max-count=|-)\d+$/.test(w)) {
+      continue
+    } else if (w.startsWith('-') || !gitPositionalOk(w, spec, ctx)) {
+      return false
+    }
   }
-  return !checked.some(w => gitOptionBanned(w, sub)) && argsOk([dir, sub, ...checked], role, ctx)
+  return true
 }
 
 function isAllowed(role: QaRole, command: string, ctx: GuardCtx): boolean {
@@ -362,7 +430,7 @@ function isAllowed(role: QaRole, command: string, ctx: GuardCtx): boolean {
   if (prog === ctx.impeccable) return impeccableOk(args, ctx)
   if (prog === 'curl') return curlOk(args, ctx)
   if (prog === 'docker') return role === 'observer' && dockerLogsOk(args, ctx) && argsOk(args, role, ctx)
-  if (prog === 'git') return role === 'fixer' && gitWorktreeOk(args, role, ctx)
+  if (prog === 'git') return role === 'fixer' && gitWorktreeOk(args, ctx)
   return false
 }
 

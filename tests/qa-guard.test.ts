@@ -73,6 +73,8 @@ describe('bashCheckOf: nega', () => {
     'git --shallow-file x push',
     'git --opcao-inventada push',
     'git --opcao-inventada x push',
+    'git --inventada x branch -D main',
+    'git --inventada x branch --delete main',
   ]
   for (const role of ROLES) {
     for (const command of denied) {
@@ -99,6 +101,8 @@ describe('bashCheckOf: nega', () => {
 
   test('fixer nega git add com caminho que sai da worktree', () => {
     expect(decision('fixer', `git -C ${FIX} add ../../src/a.ts`)).toBe('deny')
+    expect(decision('fixer', `git -C ${FIX} add ../x`)).toBe('deny')
+    expect(decision('fixer', `git -C ${FIX} diff ../x`)).toBe('deny')
   })
 })
 
@@ -241,6 +245,22 @@ describe('bashCheckOf: libera', () => {
     `${AB_S} find text Salvar click`,
     `${AB_S} find label Nome fill João`,
     `${AB_S} reload`,
+    `${AB_S} snapshot -i -c -d 3`,
+    `${AB_S} snapshot -s "#main"`,
+    `${AB_S} snapshot -u --json`,
+    `${AB_S} screenshot ${RUN}/x.png --full`,
+    `${AB_S} screenshot ${RUN}/x.png --annotate -f`,
+    `${AB_S} wait --load networkidle`,
+    `${AB_S} wait --text "Salvo"`,
+    `${AB_S} console --clear`,
+    `${AB_S} errors --clear`,
+    `${AB_S} network requests --clear`,
+    `${AB_S} find label "Nome" fill "Maria"`,
+    `${AB_S} find text "Entrar"`,
+    `${AB_S} find nth 2 ".card" hover`,
+    `${AB_S} find nth 2 ".card"`,
+    `${AB_S} find role heading text --name "Bem-vindo"`,
+    `${AB_S} find role button click --name Salvar --exact`,
     `${AB_S} console`,
     `${AB_S} back`,
     `${AB_S} wait 500`,
@@ -270,7 +290,18 @@ describe('bashCheckOf: libera', () => {
     expect(decision('fixer', `git -C ${FIX} diff`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} status`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} log`)).toBe('allow')
-    expect(decision('fixer', `git -C ${FIX} commit -F ${RUN}/msg.txt`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} add -A`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} add -u -- src/a.ts`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} commit -a -m x`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} commit --message=x -q`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} diff --stat`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} diff HEAD`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} diff --cached -- src/a.ts`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} status --short`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} status -s -b`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} log --oneline -n 5`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} log -5`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} log --max-count=3 -p src/a.ts`)).toBe('allow')
   })
   test('comando de testes exato como fixer', () => {
     expect(decision('fixer', 'npm test')).toBe('allow')
@@ -326,6 +357,31 @@ describe('bashCheckOf: não libera (pass)', () => {
     ['runner', `${AB_S} keyboard press a`],
     ['runner', `${AB_S} is hidden @e1`],
     ['runner', `${AB_S} find role button explode`],
+    ['runner', `${AB_S} find nth 2 click`],
+    ['runner', `${AB_S} find role button dblclick`],
+    ['runner', `${AB_S} find label "Nome" click "x"`],
+    ['runner', `${AB_S} find nada x`],
+    ['runner', `${AB_S} find role`],
+    ['runner', `${AB_S} find nth x ".card" hover`],
+    // opção só vale no subcomando dela
+    ['runner', `${AB_S} screenshot ${RUN}/x.png --name package.json`],
+    ['runner', `${AB_S} screenshot ${RUN}/x.png -d 3`],
+    ['runner', `${AB_S} click @e1 --name x`],
+    ['runner', `${AB_S} snapshot --full`],
+    ['runner', `${AB_S} get text body --clear`],
+    ['runner', `${AB_S} wait --fn "1"`],
+    ['runner', `${AB_S} wait --download /tmp/x`],
+    ['runner', `${AB_S} wait @e1 --state hidden`],
+    ['runner', `${AB_S} wait --load forever`],
+    ['runner', `${AB_S} wait --load networkidle @e1`],
+    ['runner', `${AB_S} wait --text`],
+    ['runner', `${AB_S} wait`],
+    ['runner', `${AB_S} wait a b`],
+    ['runner', `${AB_S} snapshot -d`],
+    ['runner', `${AB_S} snapshot -s --full`],
+    ['runner', `${AB_S} console --json --clear x`],
+    ['runner', `${AB_S} network requests --exact`],
+    ['runner', `${AB_S} find role button click --name --exact`],
     ['runner', `${AB_S} find role button click --name --headed`],
     ['runner', `/tmp/agent-browser --session ${S} snapshot`],
     // impeccable: só `detect` com a porta do mod
@@ -356,6 +412,8 @@ describe('bashCheckOf: não libera (pass)', () => {
     ['runner', 'curl -H "X: a@b" http://localhost:3000'],
     ['runner', `curl -w '%output{x}' http://localhost:3000`],
     ['runner', 'curl http://localhost:3000 localhost:3000'],
+    ['runner', 'curl "http://localhost:3000/{a,b}"'],
+    ['runner', 'curl "http://localhost:3000/[1-100000]"'],
     // docker logs
     ['runner', 'docker logs api'],
     ['fixer', 'docker logs api'],
@@ -380,6 +438,30 @@ describe('bashCheckOf: não libera (pass)', () => {
     ['fixer', `git -C ${FIX} show`],
     ['fixer', `git -C ${FIX} add /home/u/.bashrc`],
     ['fixer', `git -C ${FIX} commit -F ${SAVED}`],
+    ['fixer', `git -C ${FIX} commit -F ${RUN}/msg.txt`],
+    ['fixer', `git -C ${FIX} commit -F/etc/passwd`],
+    ['fixer', `git -C ${FIX} commit -F /etc/passwd`],
+    ['fixer', `git -C ${FIX} commit -F/home/u/.ssh/id_ed25519`],
+    ['fixer', `git -C ${FIX} commit -F/home/u/app/src/a.ts`],
+    ['fixer', `git -C ${FIX} commit -F../../x`],
+    ['fixer', `git -C ${FIX} commit -t/x`],
+    ['fixer', `git -C ${FIX} commit --amend -m x`],
+    ['fixer', `git -C ${FIX} commit -m`],
+    ['fixer', `git -C ${FIX} commit -m x extra`],
+    ['fixer', `git -C ${FIX} commit -am x`],
+    ['fixer', `git -C ${FIX} diff -O/etc/passwd`],
+    ['fixer', `git -C ${FIX} diff HEAD:x`],
+    ['fixer', `git -C ${FIX} diff -- --output=x`],
+    ['fixer', `git -C ${FIX} log --output=/tmp/x`],
+    ['fixer', `git -C ${FIX} log -n x`],
+    ['fixer', `git -C ${FIX} log --max-count=`],
+    ['fixer', `git -C ${FIX} log -`],
+    ['fixer', `git -C ${FIX} log -n5`],
+    ['fixer', `git -C ${FIX} log --`],
+    ['fixer', `git -C ${FIX} status --ignored`],
+    ['fixer', `git -C ${FIX} status --`],
+    ['fixer', `git -C ${FIX} add --pathspec-from-file=/etc/passwd`],
+    ['fixer', `git -C ${FIX} add --chmod=+x src/a.ts`],
     ['fixer', `git -C ${FIX}/src status`],
     ['fixer', 'git -C src status'],
     // testes e vazio
