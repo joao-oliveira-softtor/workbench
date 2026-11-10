@@ -1339,7 +1339,8 @@ describe('ub-mode: bordas da evidência', () => {
     const after = { c1: { result: null, verdict: verdictOf({ verdict: 'FAIL-APP', defects: [novo] }) } }
 
     test('sem antes (ausente ou sem veredito): o defeito fail do reteste é novo', () => {
-      for (const before of [{}, { c1: { result: null, verdict: null } }]) {
+      const befores: Record<string, Evidence>[] = [{}, { c1: { result: null, verdict: null } }]
+      for (const before of befores) {
         const r = acceptFixOf({ target: { cell: 'c1', defect: target }, cells: [cellOf()], before, after })
         expect(r.reasons).toContain('c1: defeito novo (rede||post /x)')
       }

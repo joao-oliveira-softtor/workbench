@@ -254,39 +254,30 @@ function screenshotOk(path: string | undefined, ctx: GuardCtx): boolean {
   return p.endsWith('.png') && isInside(p, ctx.runDir)
 }
 
+// Forma dos posicionais por subcomando (os de `AB_NONE` e `AB_ONE` ficam no `abFormOk`); subcomando fora da tabela é recusado.
+type AbForm = (pos: readonly string[], opts: ReadonlyArray<[string, string]>, ctx: GuardCtx) => boolean
+const exactly = (n: number): AbForm => pos => pos.length === n
+const AB_FORMS = new Map<string, AbForm>([
+  ['open', (pos, _, ctx) => pos.length === 1 && urlOk(pos[0] ?? '', ctx)],
+  ['fill', exactly(2)],
+  ['type', exactly(2)],
+  ['select', pos => pos.length >= 2],
+  ['keyboard', pos => pos.length === 2 && (pos[0] === 'type' || pos[0] === 'inserttext')],
+  ['scroll', pos => ['up', 'down', 'left', 'right'].includes(pos[0] ?? '') && (pos.length === 1 || (pos.length === 2 && /^\d+$/.test(pos[1] ?? '')))],
+  ['screenshot', (pos, _, ctx) => pos.length === 1 && screenshotOk(pos[0] ?? '', ctx)],
+  ['get', pos => pos.length >= 1 && AB_GET.includes(pos[0] ?? '')],
+  ['is', pos => pos.length === 2 && ['visible', 'enabled', 'checked'].includes(pos[0] ?? '')],
+  ['find', pos => findOk(pos)],
+  ['wait', (pos, opts) => waitOk(pos, opts)],
+  // sem `--json` (não está na lista do `network`): o JSON de `network requests` traz cabeçalhos (cookies, tokens)
+  ['network', pos => pos.length === 1 && pos[0] === 'requests'],
+])
+
 function abFormOk(sub: string, pos: readonly string[], opts: ReadonlyArray<[string, string]>, ctx: GuardCtx): boolean {
-  const n = pos.length
-  const first = pos[0] ?? ''
-  if (AB_NONE.includes(sub)) return n === 0
-  if (AB_ONE.includes(sub) && sub !== 'wait') return n === 1
-  switch (sub) {
-    case 'open':
-      return n === 1 && urlOk(first, ctx)
-    case 'fill':
-    case 'type':
-      return n === 2
-    case 'select':
-      return n >= 2
-    case 'keyboard':
-      return n === 2 && (first === 'type' || first === 'inserttext')
-    case 'scroll':
-      return ['up', 'down', 'left', 'right'].includes(first) && (n === 1 || (n === 2 && /^\d+$/.test(pos[1] ?? '')))
-    case 'screenshot':
-      return n === 1 && screenshotOk(first, ctx)
-    case 'get':
-      return n >= 1 && AB_GET.includes(first)
-    case 'is':
-      return n === 2 && ['visible', 'enabled', 'checked'].includes(first)
-    case 'find':
-      return findOk(pos)
-    case 'wait':
-      return waitOk(pos, opts)
-    case 'network':
-      // sem `--json` (não está na lista do `network`): o JSON de `network requests` traz cabeçalhos (cookies, tokens)
-      return n === 1 && first === 'requests'
-    default:
-      return false
-  }
+  if (AB_NONE.includes(sub)) return pos.length === 0
+  if (AB_ONE.includes(sub) && sub !== 'wait') return pos.length === 1
+  const form = AB_FORMS.get(sub)
+  return form !== undefined && form(pos, opts, ctx)
 }
 
 // Só a sessão que o mod preparou, subcomandos da lista e opções da lista: o domínio e a política são fixados pelo script.
@@ -368,29 +359,30 @@ function gitPathOk(w: string, ctx: GuardCtx): boolean {
 const REV = '(HEAD(~\\d+|\\^)?|[0-9a-f]{7,40})'
 const GIT_REV = new RegExp(`^${REV}(\\.\\.\\.?${REV})?$`)
 
-function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
-  const [flag, dir, sub, ...rest] = args
-  const sameDir = dir !== undefined && dir.startsWith('/') && ctx.fixDir !== '' && normalizePath(dir) === normalizePath(ctx.fixDir)
-  const spec = sub === undefined ? undefined : GIT_SPECS.get(sub)
-  if (flag !== '-C' || !sameDir || spec === undefined) return false
-  let afterDashes = false
-  for (let i = 0; i < rest.length; i++) {
-    const w = rest[i] ?? ''
-    if (afterDashes) {
-      if (!gitPathOk(w, ctx)) return false
-    } else if (w === '--' && spec.flags.includes(w)) {
-      afterDashes = true
-    } else if (spec.flags.includes(w)) {
-      continue
-    } else if (spec.count && w === '-n') {
-      if (!/^\d+$/.test(rest[++i] ?? '')) return false
-    } else if (spec.count && /^(--max-count=|-)\d+$/.test(w)) {
-      continue
-    } else if (!GIT_REV.test(w)) {
-      return false
-    }
+// Uma opção ou referência antes do `--`: da lista do subcomando, `-<dígitos>`/`--max-count=<dígitos>` onde há contagem, ou referência.
+const gitOptOk = (spec: GitSpec, w: string): boolean => spec.flags.includes(w) || (spec.count === true && /^(--max-count=|-)\d+$/.test(w)) || GIT_REV.test(w)
+
+// As palavras antes do `--`; onde há contagem, `-n` leva o número na palavra seguinte.
+function gitOptsOk(spec: GitSpec, opts: readonly string[]): boolean {
+  for (let i = 0; i < opts.length; i++) {
+    const w = opts[i] ?? ''
+    const ok = spec.count && w === '-n' ? /^\d+$/.test(opts[++i] ?? '') : gitOptOk(spec, w)
+    if (!ok) return false
   }
   return true
+}
+
+const isFixDir = (dir: string | undefined, ctx: GuardCtx): boolean =>
+  dir !== undefined && dir.startsWith('/') && ctx.fixDir !== '' && normalizePath(dir) === normalizePath(ctx.fixDir)
+
+function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
+  const [flag, dir, sub, ...rest] = args
+  const spec = sub === undefined ? undefined : GIT_SPECS.get(sub)
+  if (flag !== '-C' || !isFixDir(dir, ctx) || spec === undefined) return false
+  // o primeiro `--` (só onde a lista o aceita) separa as opções dos caminhos
+  const cut = spec.flags.includes('--') ? rest.indexOf('--') : -1
+  const [opts, paths] = cut < 0 ? [rest, []] : [rest.slice(0, cut), rest.slice(cut + 1)]
+  return gitOptsOk(spec, opts) && paths.every(w => gitPathOk(w, ctx))
 }
 
 // ---- Busca no código pelo Bash (só fixer): forma fechada, só caminho absoluto em fixDir ou runDir ----

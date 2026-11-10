@@ -1411,6 +1411,10 @@ describe('ub-mode: bordas da trava', () => {
 
   test('git da worktree: caminho absoluto fora dela depois de `--`', () => {
     expect(decision('fixer', `git -C ${FIX} diff -- /etc/passwd`)).toBe('pass')
+    // o `--` separa opções de caminhos: cada opção antes dele é conferida, e o `status` não tem `--`
+    expect(decision('fixer', `git -C ${FIX} diff HEAD~1 -- src/a.ts`)).toBe('allow')
+    expect(decision('fixer', `git -C ${FIX} diff --bad -- src/a.ts`)).toBe('pass')
+    expect(decision('fixer', `git -C ${FIX} status -s --stat`)).toBe('pass')
   })
 
   test('busca: arquivo oculto, padrão sem caminho, o primeiro argumento e valor de opção que parece opção', () => {

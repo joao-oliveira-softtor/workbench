@@ -725,42 +725,67 @@ export function diffCheckOf(nameStatus: string, patch: string): { migration: boo
 
 const NOT_CONCLUDED = new Set<Verdict>(['NÃO VERIFICADO', 'AMBIENTE', 'FAIL-AGENTE'])
 
+type Target = { cell: string; defect: Defect }
+
+// Os critérios que tinham prova antes e não têm no reteste.
+const lostProofsOf = (cell: Cell, old: CellVerdict | null | undefined, now: CellVerdict | null): number[] =>
+  cell.criteria.flatMap((_, i) => (old && hasProof(old, i) && !(now && hasProof(now, i)) ? [i] : []))
+
+// Regressões de uma célula: defeito fail que não existia antes e critério que tinha prova e perdeu.
+function regressionsOf(cell: Cell, old: CellVerdict | null | undefined, now: CellVerdict | null): string[] {
+  const oldFails = new Set((old?.defects ?? []).filter(d => d.severity === 'fail').map(signatureOf))
+  const fresh = (now?.defects ?? []).filter(d => d.severity === 'fail' && !oldFails.has(signatureOf(d)))
+  const lost = lostProofsOf(cell, old, now)
+  return [
+    ...fresh.map(d => `${cell.id}: defeito novo (${oneLine(signatureOf(d))})`),
+    ...lost.map(i => `${cell.id}: o critério ${i} tinha prova e perdeu no reteste`),
+  ]
+}
+
+// Motivos de recusa de uma célula retestada: não concluiu, o alvo continua e as regressões.
+function cellReasonsOf(cell: Cell, sig: string, before: Evidence | undefined, after: Evidence | undefined): string[] {
+  const now = after?.verdict ?? null
+  const final = finalVerdictOf(cell, now)
+  return [
+    ...(NOT_CONCLUDED.has(final) ? [`${cell.id}: o reteste não concluiu (${final})`] : []),
+    ...((now?.defects ?? []).some(d => signatureOf(d) === sig) ? [`${cell.id}: o defeito alvo continua (${oneLine(sig)})`] : []),
+    ...regressionsOf(cell, before?.verdict, now),
+  ]
+}
+
+// O texto do defeito alvo (normalizado) que não aparece mais na tela do reteste, em uma linha; `null` se não há texto ou ele continua.
+function lostTextOf(text: string | undefined, now: Evidence | undefined): string | null {
+  const wanted = normalizedTextOf(text ?? '')
+  const seen = normalizedTextOf(now?.result?.steps.map(s => s.text).join(' ') ?? '')
+  return wanted !== '' && !seen.includes(wanted) ? oneLine(text ?? '') : null
+}
+
+// Motivos de recusa da célula alvo: fora do reteste, sem evidência, critério alvo sem prova, texto que sumiu.
+function targetReasonsOf(target: Target, cells: readonly Cell[], now: Evidence | undefined): string[] {
+  const reasons: string[] = []
+  if (!cells.some(c => c.id === target.cell)) reasons.push(`${target.cell}: a célula alvo não foi retestada`)
+  if (!now) reasons.push(`${target.cell}: sem evidência do reteste da célula alvo`)
+  if (target.defect.source === 'criterio') {
+    const i = Number(target.defect.rule)
+    if (!now?.verdict || !hasProof(now.verdict, i)) reasons.push(`${target.cell}: o critério ${i} do defeito alvo continua sem prova`)
+  }
+  const lost = lostTextOf(target.defect.text, now)
+  if (lost !== null) reasons.push(`${target.cell}: o texto "${lost}" sumiu da tela no reteste`)
+  return reasons
+}
+
 export function acceptFixOf(input: {
-  target: { cell: string; defect: Defect } // o defeito que a tentativa quis corrigir (registro de ANTES)
+  target: Target // o defeito que a tentativa quis corrigir (registro de ANTES)
   cells: readonly Cell[] // as células retestadas
   before: Readonly<Record<string, Evidence>> // por id de célula, da execução original
   after: Readonly<Record<string, Evidence>> // por id de célula, do reteste
 }): { accepted: boolean; reasons: string[] } {
   const { target, cells, before, after } = input
-  const reasons: string[] = []
   const sig = signatureOf(target.defect)
-  const sigText = oneLine(sig)
-  for (const cell of cells) {
-    const now = own(after, cell.id)?.verdict ?? null
-    const final = finalVerdictOf(cell, now)
-    if (NOT_CONCLUDED.has(final)) reasons.push(`${cell.id}: o reteste não concluiu (${final})`)
-    const nowDefects = now?.defects ?? []
-    if (nowDefects.some(d => signatureOf(d) === sig)) reasons.push(`${cell.id}: o defeito alvo continua (${sigText})`)
-    const oldFails = new Set((own(before, cell.id)?.verdict?.defects ?? []).filter(d => d.severity === 'fail').map(signatureOf))
-    for (const d of nowDefects) {
-      if (d.severity === 'fail' && !oldFails.has(signatureOf(d))) reasons.push(`${cell.id}: defeito novo (${oneLine(signatureOf(d))})`)
-    }
-    const old = own(before, cell.id)?.verdict
-    cell.criteria.forEach((_, i) => {
-      if (old && hasProof(old, i) && !(now && hasProof(now, i))) reasons.push(`${cell.id}: o critério ${i} tinha prova e perdeu no reteste`)
-    })
-  }
-  const targetNow = own(after, target.cell)
-  if (!cells.some(c => c.id === target.cell)) reasons.push(`${target.cell}: a célula alvo não foi retestada`)
-  if (!targetNow) reasons.push(`${target.cell}: sem evidência do reteste da célula alvo`)
-  if (target.defect.source === 'criterio') {
-    const i = Number(target.defect.rule)
-    if (!targetNow?.verdict || !hasProof(targetNow.verdict, i)) reasons.push(`${target.cell}: o critério ${i} do defeito alvo continua sem prova`)
-  }
-  const wanted = normalizedTextOf(target.defect.text ?? '')
-  if (wanted !== '' && !normalizedTextOf(targetNow?.result?.steps.map(s => s.text).join(' ') ?? '').includes(wanted)) {
-    reasons.push(`${target.cell}: o texto "${oneLine(target.defect.text ?? '')}" sumiu da tela no reteste`)
-  }
+  const reasons = [
+    ...cells.flatMap(cell => cellReasonsOf(cell, sig, own(before, cell.id), own(after, cell.id))),
+    ...targetReasonsOf(target, cells, own(after, target.cell)),
+  ]
   return { accepted: reasons.length === 0, reasons }
 }
 
