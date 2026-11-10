@@ -26,7 +26,8 @@ Todo comando do Bash passa por uma trava estrita. O que ela não libera é **rec
 - Arquivos: Read lê a worktree, a pasta de saída e a pasta da skill do Impeccable; Write e Edit gravam só dentro de `W` (fora
   do `.git`) e de `SAIDA`. Arquivo `.env*` é sempre recusado, para ler e para gravar. As ferramentas Grep e Glob são recusadas.
 - Busca no código é pelo Bash, só nestas formas e só com caminho ABSOLUTO dentro de `W` (ou de `SAIDA`):
-  `ls -la <caminho>`; `rg -n '<padrão>' <caminho>` (opções `-n -i -l -F -w -c -o`, `-g '<glob>'`, `-t <tipo>`, `-A/-B/-C N`);
+  `ls -la <caminho>`; `rg -n '<padrão>' --iglob '!.env*' <caminho>` (opções `-n -i -l -F -w -c -o`, `-g '<glob>'`, `-t <tipo>`,
+  `-A/-B/-C N`; o `--iglob '!.env*'` é obrigatório e vem depois de todo `-g`; o caminho é sempre o último argumento);
   `grep -n '<padrão>' <arquivo>` (sem `-r`); `find <caminho> -name '<glob>' -type f -maxdepth N`. Para ler um arquivo, Read.
 - Você **não roda** `cd`, testes, Playwright, lint, build, `npm`, `npx`, `node`, `cat`, `rm`, nem instala nada. Os testes do
   projeto e o seu teste de regressão são rodados pelo mod depois; se falharem, o motivo volta na próxima tentativa.
@@ -47,7 +48,7 @@ git -C W diff --stat
 git -C W diff
 git -C W log --oneline -n 5
 ls -la W/src
-rg -n -F 'Salvar' W/src -g '*.tsx'
+rg -n -F 'Salvar' -g '*.tsx' --iglob '!.env*' W/src
 grep -n 'Salvar' W/src/app/clientes/novo/page.tsx
 find W/src -name '*.tsx' -type f -maxdepth 4
 ```
@@ -131,7 +132,7 @@ critérios do passo 4 bastam.
 ## Quando algo dá errado
 - **App da worktree fora do ar** (`open` com conexão recusada) ou **defeito não reproduzido:** não edite nada; `fix.json` só
   com `retestable: false` e `reason`.
-- **Elemento não achado:** novo `snapshot -i`; ainda nada, procure no código pelo texto do `repro` (`rg -n -F`).
+- **Elemento não achado:** novo `snapshot -i`; ainda nada, procure no código pelo texto do `repro` (`rg -n -F '<texto>' --iglob '!.env*' W`).
 - **A correção exige migração, mudar teste existente ou mexer fora da worktree:** não edite nada; `fix.json` só com
   `retestable: false` e `reason`.
 - **`reload` ou `wait` falhou:** `open` de novo a mesma URL e siga.

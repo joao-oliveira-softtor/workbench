@@ -398,11 +398,12 @@ function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
 const LS_LETTERS = /^-[aAlLhR1tSrdF]+$/
 // Busca por programa: só letras que não levam valor (conferidas no `rg --help` e no `grep --help` desta máquina) e as opções
 // com valor que cada um tem. Sem `r`/`R`: o grep recursivo leria o `.env`; o rg já é recursivo (nele `-r` é "replace").
-type SearchSpec = { letters: RegExp; numeric: readonly string[]; globs: readonly string[]; types: readonly string[] }
+// `envGlob`: exige o `--iglob '!.env*'` (só o rg).
+type SearchSpec = { letters: RegExp; numeric: readonly string[]; globs: readonly string[]; types: readonly string[]; envGlob: boolean }
 const SEARCH_SPECS = new Map<string, SearchSpec>([
   // no rg, `-E` é codificação e `-h` é ajuda
-  ['rg', { letters: /^-[nilFwcoHsvx]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count', '--max-depth'], globs: ['-g', '--glob'], types: ['-t', '--type'] }],
-  ['grep', { letters: /^-[nilFwcoHhsvxE]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count'], globs: ['--include', '--exclude', '--exclude-dir'], types: [] }],
+  ['rg', { letters: /^-[nilFwcoHsvx]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count', '--max-depth'], globs: ['-g', '--glob'], types: ['-t', '--type'], envGlob: true }],
+  ['grep', { letters: /^-[nilFwcoHhsvxE]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count'], globs: ['--include', '--exclude', '--exclude-dir'], types: [], envGlob: false }],
 ])
 // Glob e tipo passam por cima de "pular oculto" (e o glob, de "pular ignorado"): `*.env` acha `.env`, `*.local` acha `.env.local`.
 // Por isso só extensões de código, que nenhum `.env*` usa.
@@ -436,6 +437,11 @@ function lsOk(args: readonly string[], ctx: GuardCtx): boolean {
   return paths.length > 0 && !LS_LETTERS.test(last) && paths.every(w => !w.startsWith('-') && searchPathOk(w, ctx))
 }
 
+// O rg só passa com este glob depois de todo `-g`: o glob negativo da linha de comando, por último, vence os `-g` anteriores (senão
+// `-g '*.php'` acha `.env.local.php`) e os arquivos de ignorar (um `.ignore` versionado com `!.env` imprimiria o `.env`). Provado
+// no rg 14.1 (o do Claude Code) e no 15.0. Alvo que é o próprio `.env*` não depende dele: o caminho explícito ignora os globs.
+const RG_NO_ENV = '!.env*'
+
 // rg e grep: o primeiro posicional é o padrão (a não ser que haja -e); os demais são caminhos, e o último argumento é um deles.
 // `null` se a forma não for a liberada.
 // shortcut: padrão de busca com `|`, `<`, `>`, `$`, `\` ou `=>` é recusado pela regra "sem encadeador" (`isUnsafeShape`): o fixer busca
@@ -446,17 +452,19 @@ function searchPathsOf(prog: string, args: readonly string[]): string[] | null {
   const pos: string[] = []
   let hasPattern = false
   let lastIsPos = false
+  let isEnvHidden = !spec.envGlob
   for (let i = 0; i < args.length; i++) {
     const w = args[i] ?? ''
     lastIsPos = false
     if (spec.letters.test(w)) continue
-    if (spec.numeric.includes(w) || spec.globs.includes(w) || spec.types.includes(w) || w === '-e') {
-      const v = args[++i]
-      if (!optValueOk(v)) return null
-      if (spec.numeric.includes(w) && !/^\d+$/.test(v)) return null
-      if (spec.globs.includes(w) && !isCodeGlob(v)) return null
-      if (spec.types.includes(w) && !RG_TYPES.includes(v)) return null
+    if (spec.envGlob && w === '--iglob') {
+      if (args[++i] !== RG_NO_ENV) return null
+      isEnvHidden = true
+    } else if (takesValue(spec, w)) {
+      if (!optOk(spec, w, args[++i])) return null
       if (w === '-e') hasPattern = true
+      // um `-g` depois do glob negativo venceria ele
+      if (spec.envGlob && spec.globs.includes(w)) isEnvHidden = false
     } else if (w.startsWith('-')) {
       return null
     } else {
@@ -464,7 +472,18 @@ function searchPathsOf(prog: string, args: readonly string[]): string[] | null {
       lastIsPos = true
     }
   }
-  return lastIsPos ? (hasPattern ? pos : pos.slice(1)) : null
+  if (!lastIsPos || !isEnvHidden) return null
+  return hasPattern ? pos : pos.slice(1)
+}
+
+const takesValue = (spec: SearchSpec, w: string): boolean => spec.numeric.includes(w) || spec.globs.includes(w) || spec.types.includes(w) || w === '-e'
+
+// O valor de uma opção que leva valor (`-e` aceita qualquer um que não pareça opção).
+function optOk(spec: SearchSpec, w: string, v: string | undefined): boolean {
+  if (!optValueOk(v)) return false
+  if (spec.numeric.includes(w)) return /^\d+$/.test(v)
+  if (spec.globs.includes(w)) return isCodeGlob(v)
+  return !spec.types.includes(w) || RG_TYPES.includes(v)
 }
 
 function grepOk(prog: string, args: readonly string[], ctx: GuardCtx): boolean {

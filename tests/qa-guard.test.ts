@@ -215,13 +215,15 @@ describe('bashCheckOf: nunca libera comando encadeado, expandido ou com aspas so
   })
 })
 
+// O rg do fixer sempre leva o glob que esconde os `.env*` (depois de qualquer `-g`).
+const NOENV = "--iglob '!.env*'"
 const SEARCHES = [
   `ls -la ${FIX}/src`,
   `ls ${RUN}`,
   `ls -R ${FIX} ${RUN}`,
-  `rg -n "useState" ${FIX}/src`,
-  `rg -n -g "*.tsx" -e "foo bar" ${FIX}`,
-  `rg -in -A 3 "foo" ${FIX}/src ${RUN}`,
+  `rg -n "useState" ${NOENV} ${FIX}/src`,
+  `rg -n -g "*.tsx" -e "foo bar" ${NOENV} ${FIX}`,
+  `rg -in -A 3 "foo" ${NOENV} ${FIX}/src ${RUN}`,
   `grep -n --include "*.css" "overflow" ${FIX}/src/a.css`,
   `grep -n -m 2 "x" ${FIX}/src/a.css ${FIX}/src/b.css`,
   `grep -in x ${FIX}/src/a.css`,
@@ -831,7 +833,7 @@ describe('guardDecisionOf', () => {
   })
 
   test('Bash: busca com caminho absoluto em fixDir libera; sem caminho nega', () => {
-    expect(guard('fixer', bash(`rg -n "useState" ${FIX}/src`)).decision).toBe('allow')
+    expect(guard('fixer', bash(`rg -n "useState" ${NOENV} ${FIX}/src`)).decision).toBe('allow')
     expect(guard('fixer', bash('rg -n foo')).decision).toBe('deny')
     expect(guard('fixer', bash(`rg -n foo ${CWD}/src`)).decision).toBe('deny')
   })
@@ -913,14 +915,35 @@ describe('rodada 4: a busca não abre arquivo oculto nem ignorado', () => {
       `grep -n --exclude "*.env" "=" ${FIX}/src/a.css`,
       `grep -n --exclude-dir node_modules "=" ${FIX}/src/a.css`,
     ]) expect(fx(c)).toBe('pass')
-    expect(fx(`rg -n -g "**/*.css" X ${FIX}`)).toBe('allow')
-    expect(fx(`rg -n --glob "*.ts" X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n -g "**/*.css" X ${NOENV} ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n --glob "*.ts" X ${NOENV} ${FIX}`)).toBe('allow')
+  })
+
+  // `-g '*.php'` acharia `.env.local.php`, e um `.ignore` versionado com `!.env` faria a busca na pasta imprimir o `.env`; o glob
+  // negativo da linha de comando, por último, vence os dois (provado no rg 14.1 e no 15.0).
+  test('rg sem o glob que esconde os .env*, ou com um -g depois dele, não libera', () => {
+    for (const c of [
+      `rg -n X ${FIX}`,
+      `rg -n -g "*.php" X ${FIX}`,
+      `rg -n ${NOENV} -g "*.php" X ${FIX}`,
+      `rg -n ${NOENV} --glob "*.php" X ${FIX}`,
+      `rg -n --iglob '!.e*' X ${FIX}`,
+      `rg -n --iglob '*.ts' X ${FIX}`,
+      `rg -n --iglob X ${FIX}`,
+    ]) expect(`${c} → ${fx(c)}`).toBe(`${c} → pass`)
+    expect(fx(`rg -n -g "*.php" ${NOENV} X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n -t php ${NOENV} X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n ${NOENV} ${NOENV} X ${FIX}`)).toBe('allow')
+  })
+
+  test('rg com o alvo direto num .env* segue negado (com o caminho explícito o rg ignora os globs)', () => {
+    for (const c of [`rg -n ${NOENV} X ${FIX}/.env`, `rg -n ${NOENV} X ${FIX}/.env.local.php`, `rg -n ${NOENV} X ${FIX}/.ENV`]) expect(fx(c)).not.toBe('allow')
   })
 
   test('tipo do rg só da lista (o tipo sh inclui .env e passa por cima de "pular oculto")', () => {
     expect(fx(`rg -n -t sh "=" ${FIX}`)).toBe('pass')
     expect(fx(`rg -n --type sh "=" ${FIX}`)).toBe('pass')
-    expect(fx(`rg -n -t ts X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n -t ts X ${NOENV} ${FIX}`)).toBe('allow')
   })
 
   test('cada opção com valor só no programa que a tem', () => {
@@ -928,14 +951,14 @@ describe('rodada 4: a busca não abre arquivo oculto nem ignorado', () => {
     expect(fx(`grep -n -g "*.css" X ${FIX}/src/a.css`)).toBe('pass')
     expect(fx(`grep -n -t ts X ${FIX}/src/a.css`)).toBe('pass')
     expect(fx(`grep -n --max-depth 2 X ${FIX}/src/a.css`)).toBe('pass')
-    expect(fx(`rg -n --max-depth 2 X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n --max-depth 2 X ${NOENV} ${FIX}`)).toBe('allow')
   })
 
   test('letras: no rg, E e h não são letras soltas (-E leva valor)', () => {
     expect(fx(`rg -v -n -E utf-8 ${FIX}`)).toBe('pass')
     expect(fx(`rg -nE X ${FIX}`)).toBe('pass')
     expect(fx(`rg -h X ${FIX}`)).toBe('pass')
-    expect(fx(`rg -nilFwcoHsvx X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -nilFwcoHsvx X ${NOENV} ${FIX}`)).toBe('allow')
     expect(fx(`grep -nilFwcoHhsvxE X ${FIX}/src/a.css`)).toBe('allow')
   })
 
@@ -965,8 +988,8 @@ describe('rodada 4: a busca não abre arquivo oculto nem ignorado', () => {
 
   test('regressão: buscas comuns continuam liberadas', () => {
     for (const c of [
-      `rg -n "useState" ${FIX}/src`,
-      `rg -n -g "*.tsx" -e "foo bar" ${FIX}`,
+      `rg -n "useState" ${NOENV} ${FIX}/src`,
+      `rg -n -g "*.tsx" -e "foo bar" ${NOENV} ${FIX}`,
       `grep -n --include "*.css" "overflow" ${FIX}/src/a.css`,
       `find ${FIX}/src -name "*.tsx" -type f -maxdepth 3`,
       `ls -la ${FIX}/src`,
@@ -1188,13 +1211,13 @@ describe('rodada 5: busca sem extensão que guarda segredo ou saída', () => {
     }
     for (const t of ['json', 'yaml', 'toml', 'txt', 'java']) expect(fx(`rg -n -t ${t} X ${FIX}`)).toBe('pass')
     for (const g of ['.x.ts', '.*.ts', '**/.*.ts', '**/.x/*.ts']) expect(fx(`rg -n -g "${g}" X ${FIX}`)).toBe('pass')
-    expect(fx(`rg -n -g "*.ts" X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n -g "*.ts" X ${NOENV} ${FIX}`)).toBe('allow')
   })
 
   test('regressão da rodada 4 continua liberada', () => {
     for (const c of [
-      `rg -n "useState" ${FIX}/src`,
-      `rg -n -g "*.tsx" -e "foo bar" ${FIX}`,
+      `rg -n "useState" ${NOENV} ${FIX}/src`,
+      `rg -n -g "*.tsx" -e "foo bar" ${NOENV} ${FIX}`,
       `grep -n --include "*.css" "overflow" ${FIX}/src/a.css`,
       `find ${FIX}/src -name "*.tsx" -type f -maxdepth 3`,
       `ls -la ${FIX}/src`,
@@ -1203,7 +1226,7 @@ describe('rodada 5: busca sem extensão que guarda segredo ou saída', () => {
   })
 
   test('texto de busca git passa para o fixer; gh, cd e git seguido de subcomando proibido não', () => {
-    expect(fx(`rg -n git ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n git ${NOENV} ${FIX}`)).toBe('allow')
     for (const p of ['gh', 'cd', 'pushd', '"git push"']) expect(fx(`rg -n ${p} ${FIX}`)).toBe('deny')
   })
 })
@@ -1247,7 +1270,7 @@ describe('rodada 5: o caminho real decide junto com o pedido', () => {
     expect(run_('Bash', { command: `grep -n x ${FIX}/src/nao-existe.ts` })).toBe('deny')
     expect(run_('Bash', { command: `grep -n x ${FIX}/src/a.ts` })).toBe('allow')
     expect(run_('Bash', { command: `grep -n -e "/api" ${FIX}/src/a.ts` })).toBe('allow')
-    expect(run_('Bash', { command: `rg -n x ${FIX}/src` })).toBe('allow')
+    expect(run_('Bash', { command: `rg -n x ${NOENV} ${FIX}/src` })).toBe('allow')
   })
 })
 
