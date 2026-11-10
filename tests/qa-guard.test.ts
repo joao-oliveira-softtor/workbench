@@ -618,8 +618,8 @@ describe('writeCheckOf', () => {
   test('fixer não escapa de fixDir com ..', () => {
     expect(wc('fixer', `${FIX}/../../src/a.ts`, CTX)).toBe('deny')
   })
-  test('barra invertida vale como barra', () => {
-    expect(wc('fixer', `${FIX}\\src\\a.ts`, CTX)).toBe('allow')
+  test('barra invertida nega', () => {
+    expect(wc('fixer', `${FIX}\\src\\a.ts`, CTX)).toBe('deny')
     expect(wc('fixer', `${FIX}\\..\\..\\src\\a.ts`, CTX)).toBe('deny')
     expect(wc('fixer', `${FIX}\\.git\\config`, CTX)).toBe('deny')
   })
@@ -704,10 +704,10 @@ describe('readCheckOf', () => {
       expect(rc(role, `${RUN}/../x`)).toBe('deny')
     }
   })
-  test('caminho relativo vale contra a pasta da sessão e barra invertida vale como barra', () => {
+  test('caminho relativo vale contra a pasta da sessão e barra invertida nega', () => {
     expect(rc('fixer', 'src/a.ts')).toBe('deny')
     expect(rc('fixer', 'src/a.ts', CTX, FIX)).toBe('allow')
-    expect(rc('fixer', `${FIX}\\src\\a.ts`)).toBe('allow')
+    expect(rc('fixer', `${FIX}\\src\\a.ts`)).toBe('deny')
   })
   test('pastas vazias não liberam nada', () => {
     const ctx = { ...CTX, runDir: '', fixDir: '', readDirs: [''] }
@@ -1114,6 +1114,12 @@ describe('rodada 5: .. e .git', () => {
       expect(edit(tool, `${FIX}/node_modules/../src/a.ts`)).toBe('deny')
       expect(edit(tool, `${FIX}/src/a..b.ts`)).toBe('allow')
     }
+  })
+
+  test('Read e Write: caminho com barra invertida nega (no Linux ela é parte do nome e o arquivo cai fora da pasta)', () => {
+    expect(wc('fixer', `${FIX}\\src\\a.ts`)).toBe('deny')
+    expect(rc('fixer', `${FIX}\\src\\a.ts`)).toBe('deny')
+    expect(wc('runner', `${RUN}/a\\b.png`)).toBe('deny')
   })
 
   test('Write e Edit: segmento .git em qualquer pasta nega', () => {

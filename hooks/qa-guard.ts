@@ -532,9 +532,10 @@ export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx, cwd: s
 const isIgnoreFile = (p: string): boolean => ['.ignore', '.rgignore', '.gitignore'].includes(p.slice(p.lastIndexOf('/') + 1).toLowerCase())
 
 // Caminho absoluto do pedido, ou `null`: vazio, com til (o bash não o expande entre aspas e os agentes recebem caminhos absolutos)
-// ou com `..` (que sai da pasta quando o segmento anterior é link simbólico).
+// com `..` (que sai da pasta quando o segmento anterior é link simbólico) ou com barra invertida (no Linux ela é parte do nome:
+// `<fixDir>\src\a.ts` gravaria um arquivo ao lado da worktree).
 function filePathOf(filePath: string, ctx: GuardCtx, cwd: string): string | null {
-  if (filePath === '' || filePath.startsWith('~') || hasSegment(filePath.replace(/\\/g, '/'), '..')) return null
+  if (filePath === '' || filePath.startsWith('~') || filePath.includes('\\') || hasSegment(filePath, '..')) return null
   return resolveIn(filePath, cwd, ctx.home)
 }
 
