@@ -6,6 +6,7 @@ import {
   authSummaryOf,
   baseUrlAt,
   checkedDefectsOf,
+  commitMessageOf,
   defectIdOf,
   diffCheckOf,
   finalVerdictOf,
@@ -23,7 +24,7 @@ import {
   signatureOf,
   startArgvOf,
 } from '../hooks/qa-evidence'
-import type { Cell, CellOutcome, CellResult, CellVerdict, Defect, Evidence, FixResult, Matrix, Verdict } from '../hooks/qa-evidence'
+import type { Cell, CellOutcome, CellResult, CellVerdict, Defect, Evidence, Fix, FixResult, Matrix, Verdict } from '../hooks/qa-evidence'
 
 const crit = { given: 'logado', when: 'clica em Salvar', then: 'vê a confirmação' }
 
@@ -937,6 +938,19 @@ describe('parseFix', () => {
     ['regressionTest com segmento vazio', { regressionTest: 'e2e//a.spec.ts' }],
     ['regressionTest com barra no fim', { regressionTest: 'e2e/' }],
     ['regressionTest só de pontos', { regressionTest: '...' }],
+    ['subject número', { subject: 5 }],
+    ['subject vazio', { subject: '' }],
+    ['subject só espaços', { subject: '   ' }],
+    ['subject com quebra de linha', { subject: 'a\nb' }],
+    ['subject com retorno de carro', { subject: 'a\rb' }],
+    ['subject com 121 caracteres', { subject: 'a'.repeat(121) }],
+    ['body sem subject', { body: ['porque'] }],
+    ['body que não é lista', { subject: 's', body: 'porque' }],
+    ['body com número', { subject: 's', body: [1] }],
+    ['body com parágrafo vazio', { subject: 's', body: [' '] }],
+    ['body com quebra de linha', { subject: 's', body: ['a\nb'] }],
+    ['body com parágrafo de 501 caracteres', { subject: 's', body: ['a'.repeat(501)] }],
+    ['body com 11 parágrafos', { subject: 's', body: Array.from({ length: 11 }, (_, i) => `p${i}`) }],
   ]
   for (const [name, patch] of bad) {
     test(`recusa: ${name}`, () => expect(parseFix(fixText(patch))).toBeNull())
@@ -944,6 +958,40 @@ describe('parseFix', () => {
 
   test('recusa texto que não é json', () => {
     expect(parseFix('nada')).toBeNull()
+  })
+
+  test('aceita subject e body nos limites (120 caracteres, 10 parágrafos de 500)', () => {
+    const subject = 'a'.repeat(120)
+    const body = Array.from({ length: 10 }, () => 'b'.repeat(500))
+    expect(parseFix(fixText({ subject, body }))).toEqual({ retestable: true, subject, body })
+    expect(parseFix(fixText({ subject: 'corrige o botão' }))).toEqual({ retestable: true, subject: 'corrige o botão' })
+    expect(parseFix(fixText({ subject: 's', body: [] }))).toEqual({ retestable: true, subject: 's', body: [] })
+  })
+})
+
+describe('commitMessageOf', () => {
+  const fix = (over: Partial<Fix> = {}): Fix => ({ retestable: true, subject: 'Corrige o botão Salvar', ...over })
+
+  test('devolve o assunto e os parágrafos, na ordem', () => {
+    expect(commitMessageOf(fix({ body: ['por quê', 'o que mudou'] }))).toEqual(['Corrige o botão Salvar', 'por quê', 'o que mudou'])
+  })
+
+  test('sem body devolve só o assunto', () => {
+    expect(commitMessageOf(fix())).toEqual(['Corrige o botão Salvar'])
+  })
+
+  test('parágrafo de atribuição sai, em qualquer caixa', () => {
+    const body = ['por quê', 'Co-Authored-By: Alguém <a@b.c>', 'o que mudou', 'GENERATED WITH uma ferramenta', 'como provei']
+    expect(commitMessageOf(fix({ body }))).toEqual(['Corrige o botão Salvar', 'por quê', 'o que mudou', 'como provei'])
+  })
+
+  test('atribuição no assunto invalida a mensagem', () => {
+    expect(commitMessageOf(fix({ subject: 'Corrige (co-authored-by: x)' }))).toBeNull()
+    expect(commitMessageOf(fix({ subject: 'Generated with x' }))).toBeNull()
+  })
+
+  test('sem subject é null', () => {
+    expect(commitMessageOf({ retestable: true })).toBeNull()
   })
 })
 

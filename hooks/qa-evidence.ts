@@ -67,7 +67,7 @@ export type CellVerdict = {
 export type CellOutcome = { final: Verdict; verdict: CellVerdict | null }
 export type Evidence = { result: CellResult | null; verdict: CellVerdict | null }
 export type FixStatus = 'corrigido' | 'não reverificado' | 'não reproduzido na worktree' | 'desistiu'
-export type Fix = { retestable: boolean; reason?: string; regressionTest?: string }
+export type Fix = { retestable: boolean; reason?: string; regressionTest?: string; subject?: string; body?: string[] }
 export type FixResult = {
   defect: string
   status: FixStatus
@@ -313,14 +313,39 @@ export function parseResult(text: string): CellResult | null {
 }
 
 // `fix.json` do agente corretor. `regressionTest` é o teste que o MOD roda duas vezes, então é caminho e nada mais.
+// Texto de uma linha só, não vazio e de até `max` caracteres (o commit sai por código, a partir disto).
+function lineOf(v: unknown, max: number, at: string): string {
+  need(typeof v === 'string' && v.trim() !== '' && v.length <= max && !/[\r\n]/.test(v), `${at}: precisa ser texto de uma linha, não vazio, com até ${max} caracteres`)
+  return v
+}
+
 export function parseFix(text: string): Fix | null {
   return orNull(() => {
     const o = recOf(jsonObjectIn(text), 'fix')
     need(typeof o.retestable === 'boolean', 'retestable: precisa ser verdadeiro ou falso')
     const reason = optionalTextAt(o, 'reason', '')
     const regressionTest = o.regressionTest === undefined ? undefined : relPathAt(o, 'regressionTest', { required: true })
-    return { retestable: o.retestable, ...(reason === undefined ? {} : { reason }), ...(regressionTest === undefined ? {} : { regressionTest }) }
+    const subject = o.subject === undefined ? undefined : lineOf(o.subject, 120, 'subject')
+    const rawBody = o.body === undefined ? undefined : listAt(o, 'body')
+    need(rawBody === undefined || subject !== undefined, 'body: precisa de subject')
+    need(rawBody === undefined || rawBody.length <= 10, 'body: no máximo 10 parágrafos')
+    const body = rawBody?.map((p, i) => lineOf(p, 500, `body[${i}]`))
+    return {
+      retestable: o.retestable,
+      ...(reason === undefined ? {} : { reason }),
+      ...(regressionTest === undefined ? {} : { regressionTest }),
+      ...(subject === undefined ? {} : { subject }),
+      ...(body === undefined ? {} : { body }),
+    }
   })
+}
+
+const ATTRIBUTION = /co-authored-by:|generated with/i
+
+// Parágrafos da mensagem do commit; o mod commita, então a atribuição nunca entra (no assunto, invalida).
+export function commitMessageOf(fix: Fix): string[] | null {
+  if (fix.subject === undefined || ATTRIBUTION.test(fix.subject)) return null
+  return [fix.subject, ...(fix.body ?? []).filter(p => !ATTRIBUTION.test(p))]
 }
 
 // Sessão salva do navegador (`auth/<perfil>.json`): é segredo. Nada aqui devolve nem cita um `value` em mensagem de erro.
