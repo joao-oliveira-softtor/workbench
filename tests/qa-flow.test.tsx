@@ -1028,6 +1028,20 @@ describe('QA: fase Corrigir', () => {
     ['4b mudança sem descrição', () => ({}), JSON.stringify({ retestable: true }), ' M a.ts', 'mudança sem descrição de commit'],
     ['4b nada mudou', () => ({}), FIX_OK, '', 'o corretor não mudou nada'],
     ['4c teste alterado', () => ({ run: a => (a.includes('--name-status') ? { exitCode: 0, stdout: 'M\te2e/velho.spec.ts\n' } : undefined) }), FIX_OK, ' M a.ts', 'teste ou configuração de teste alterado'],
+    // Como o git: um `.gitattributes` com `-diff` faz o patch dizer só "Binary files … differ", a não ser com `--text` e sem
+    // diff externo nem textconv.
+    [
+      '4e supressão escondida por .gitattributes',
+      () => ({
+        run: a =>
+          a.includes('-U0')
+            ? { exitCode: 0, stdout: ['--text', '--no-ext-diff', '--no-textconv'].every(f => a.includes(f)) ? 'diff --git a/a.ts b/a.ts\n+++ b/a.ts\n@@ -0,0 +1 @@\n+// eslint-disable-next-line\n' : 'Binary files a/a.ts and b/a.ts differ\n' }
+            : undefined,
+      }),
+      FIX_OK,
+      ' M a.ts',
+      'supressão de regra (eslint-disable)',
+    ],
     ['4f testes do projeto', () => ({ run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU x' } : undefined) }), FIX_OK, ' M a.ts', 'FALHOU x'],
     ['4g passa no original', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 0, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não falhou no app original'],
     ['4g falha na worktree', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 1, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não passou no app da worktree'],

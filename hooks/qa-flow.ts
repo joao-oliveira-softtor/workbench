@@ -555,7 +555,8 @@ async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixChe
   if (message === null) return undone(refuse('mudança sem descrição de commit'))
   await run($, wtGit(o.fixDir, 'add', '-A'))
   const nameStatus = (await run($, wtGit(o.fixDir, '-c', 'core.quotepath=off', 'diff', '--cached', '--name-status', o.sha))) ?? ''
-  const patch = (await run($, wtGit(o.fixDir, 'diff', '--cached', '-U0', o.sha))) ?? ''
+  // `--text` e sem diff externo nem textconv: um `.gitattributes` com `-diff` não esconde do diffCheckOf as linhas do patch.
+  const patch = (await run($, wtGit(o.fixDir, 'diff', '--cached', '--text', '--no-ext-diff', '--no-textconv', '-U0', o.sha))) ?? ''
   const checked = diffCheckOf(nameStatus, patch)
   if (checked.migration) return undone({ kind: 'unverified', reason: 'a correção cria migração' })
   if (checked.reasons.length > 0) return undone(refuse(checked.reasons.join('; ')))
