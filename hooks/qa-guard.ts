@@ -1,6 +1,6 @@
 // A trava dos agentes de QA: regra pura que diz se um comando de Bash ou uma gravação de arquivo é liberada, negada ou deixada
 // para a decisão normal. É por padrões, não interpreta shell de verdade: na dúvida, recusa (deny) ou não opina (pass).
-import { isInside, normalizePath } from './model'
+import { isInside, normalizePath } from './model.ts'
 
 export type QaRole = 'runner' | 'observer' | 'fixer'
 export type GuardCtx = {
@@ -8,26 +8,24 @@ export type GuardCtx = {
   repoRoot: string
   fixDir: string
   runDir: string
+  readDirs: readonly string[]
   agentBrowser: string
   impeccable: string
   session: string
   cdpPort: number | null
   origins: readonly string[]
-  testCommand: string
   containers: readonly string[]
 }
 export type BashVerdict = { decision: 'allow' | 'deny' | 'pass'; reason: string }
 
 const GIT_DENIED = ['push', 'checkout', 'switch', 'merge', 'rebase', 'stash', 'reset', 'clean', 'worktree', 'config', 'remote']
 const GIT_ARG_OPTS = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--shallow-file']
-// Git da worktree: lista fechada de opções por subcomando. `pos`: posicionais são caminhos, referências/caminhos ou nenhum.
-type GitSpec = { flags: readonly string[]; pos: 'paths' | 'refs' | 'none'; message?: true; count?: true }
+// Git da worktree do fixer: só leitura, com lista fechada de opções por subcomando (`count`: aceita -n, -<dígitos>).
+type GitSpec = { flags: readonly string[]; count?: true }
 const GIT_SPECS = new Map<string, GitSpec>([
-  ['add', { flags: ['-A', '--all', '-u', '--update', '--'], pos: 'paths' }],
-  ['commit', { flags: ['-a', '--all', '-q', '--quiet'], pos: 'none', message: true }],
-  ['diff', { flags: ['--stat', '--name-only', '--name-status', '--cached', '--staged', '--'], pos: 'refs' }],
-  ['status', { flags: ['-s', '--short', '-b', '--branch', '--porcelain'], pos: 'refs' }],
-  ['log', { flags: ['--oneline', '--stat', '-p', '--patch'], pos: 'refs', count: true }],
+  ['diff', { flags: ['--stat', '--name-only', '--name-status', '--cached', '--staged', '--'] }],
+  ['status', { flags: ['-s', '--short', '-b', '--branch', '--porcelain'] }],
+  ['log', { flags: ['--oneline', '--stat', '-p', '--patch'], count: true }],
 ])
 const CURL_FLAGS = ['--silent', '--show-error', '--include', '--head', '--fail', '--insecure', '--verbose']
 const CURL_VALUED = ['-X', '--request', '-H', '--header', '-d', '--data', '--data-raw', '-m', '--max-time', '--connect-timeout', '-w', '--write-out']
@@ -51,19 +49,7 @@ const AB_FIND_BY = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'tes
 const AB_FIND_DO = ['click', 'fill', 'check', 'hover', 'text']
 const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
 
-function workDirOf(role: QaRole, ctx: GuardCtx): string {
-  switch (role) {
-    case 'fixer':
-      return ctx.fixDir !== '' ? ctx.fixDir : ctx.repoRoot
-    case 'runner':
-    case 'observer':
-      return ctx.repoRoot
-    default:
-      throw new Error('Caso não tratado: ' + String(role satisfies never))
-  }
-}
-
-// `~` e `~/x` contra a home; `~user` contra a pasta ao lado da home (aproximação); relativo contra a pasta de trabalho.
+// `~` e `~/x` contra a home; `~user` contra a pasta ao lado da home (aproximação); relativo contra `base` (a pasta da sessão).
 function resolveIn(path: string, base: string, home: string): string {
   const p = path.replace(/\\/g, '/')
   if (p.startsWith('/')) return normalizePath(p)
@@ -71,8 +57,6 @@ function resolveIn(path: string, base: string, home: string): string {
   if (p.startsWith('~')) return normalizePath(`${home}/../${p.slice(1)}`)
   return normalizePath(`${base}/${p}`)
 }
-
-const isOp = (t: string): boolean => t.length === 1 && ';&|()<>\n'.includes(t)
 
 // Palavras de shell: aspas agrupam e trechos colados se juntam; sem escape (a forma insegura já foi barrada antes).
 function shellWords(command: string): string[] {
@@ -152,48 +136,36 @@ function gitDenyReason(ws: readonly string[], at: number): string | null {
 }
 
 // Um candidato (palavra inteira ou o trecho depois do primeiro `=`) que parece caminho e cai no checkout principal.
-function checkoutPathReason(word: string, role: QaRole, ctx: GuardCtx): string | null {
+function checkoutPathReason(word: string, ctx: GuardCtx, cwd: string): string | null {
   const w = word.replace(/\\/g, '/')
   const eq = w.indexOf('=')
   for (const c of eq < 0 ? [w] : [w, w.slice(eq + 1)]) {
     const pathy = /^(\/|~|\.\/|\.\.\/)/.test(c) || c.split('/').includes('..')
     if (!pathy || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(c)) continue
-    const p = resolveIn(c, workDirOf(role, ctx), ctx.home)
+    const p = resolveIn(c, cwd, ctx.home)
     if (isInside(p, ctx.repoRoot) && !isInside(p, ctx.fixDir)) return `caminho do checkout principal é proibido: ${c}`
   }
   return null
 }
 
-function cdDenyReason(tokens: readonly string[], at: number, role: QaRole, ctx: GuardCtx): string | null {
-  const next = tokens[at + 1]
-  const dest = next === undefined || isOp(next) ? '~' : next
-  const stays = role === 'fixer' && !dest.startsWith('-') && !dest.includes('$') && isInside(resolveIn(dest, workDirOf(role, ctx), ctx.home), ctx.fixDir)
-  if (stays) return null
-  return role === 'fixer' ? `${tokens[at]} para fora da worktree de correção é proibido` : `${tokens[at]} é proibido para runner e observer`
-}
-
-function denyReason(role: QaRole, command: string, ctx: GuardCtx): string | null {
-  const tokens = command.match(/[^\s'"`;&|()<>]+|[;&|()<>\n]/g) ?? []
-  for (const ws of [tokens.filter(t => !isOp(t)), shellWords(command)]) {
+function denyReason(role: QaRole, command: string, ctx: GuardCtx, cwd: string): string | null {
+  // palavras cruas, e palavras de shell (aspas juntadas: `g""it`, `c''d`)
+  const raw = command.split(/[\s'"`;&|()<>]+/).filter(w => w !== '')
+  for (const ws of [raw, shellWords(command)]) {
     for (let i = 0; i < ws.length; i++) {
       const w = ws[i] ?? ''
       const name = programOf(w)
       const reason =
         name === 'gh'
           ? 'gh (GitHub CLI) é proibido para agentes de QA'
-          : name === 'git'
-            ? role === 'fixer'
-              ? gitDenyReason(ws, i)
-              : 'git é proibido para runner e observer'
-            : checkoutPathReason(w, role, ctx)
+          : name === 'cd' || name === 'pushd'
+            ? 'cd e pushd são proibidos para agentes de QA (não valem para a chamada seguinte)'
+            : name === 'git'
+              ? role === 'fixer'
+                ? gitDenyReason(ws, i)
+                : 'git é proibido para runner e observer'
+              : checkoutPathReason(w, ctx, cwd)
       if (reason !== null) return reason
-    }
-  }
-  // `tokens` guarda os operadores (`cd && x` vai para a home); `shellWords` junta as aspas (`c''d`)
-  for (const ws of [tokens, shellWords(command)]) {
-    for (let i = 0; i < ws.length; i++) {
-      const cd = ws[i] === 'cd' || ws[i] === 'pushd' ? cdDenyReason(ws, i, role, ctx) : null
-      if (cd !== null) return cd
     }
   }
   return null
@@ -211,20 +183,19 @@ function urlOk(w: string, ctx: GuardCtx): boolean {
   }
 }
 
-function valueOk(v: string, role: QaRole, ctx: GuardCtx): boolean {
+function valueOk(v: string, ctx: GuardCtx, cwd: string): boolean {
   if (SCHEME.test(v)) return urlOk(v, ctx)
   if (!v.includes('/') && v !== '..' && v !== '~') return true
-  const p = resolveIn(v, workDirOf(role, ctx), ctx.home)
-  return isInside(p, ctx.runDir)
+  return isInside(resolveIn(v, cwd, ctx.home), ctx.runDir)
 }
 
 // Palavra inteira e, se houver `=`, o trecho depois dele.
-function wordOk(w: string, role: QaRole, ctx: GuardCtx): boolean {
+function wordOk(w: string, ctx: GuardCtx, cwd: string): boolean {
   const eq = w.indexOf('=')
-  return valueOk(w, role, ctx) && (eq < 0 || valueOk(w.slice(eq + 1), role, ctx))
+  return valueOk(w, ctx, cwd) && (eq < 0 || valueOk(w.slice(eq + 1), ctx, cwd))
 }
 
-const argsOk = (args: readonly string[], role: QaRole, ctx: GuardCtx): boolean => args.every(w => wordOk(w, role, ctx))
+const argsOk = (args: readonly string[], ctx: GuardCtx, cwd: string): boolean => args.every(w => wordOk(w, ctx, cwd))
 
 // Separa posicionais e opções (nome, valor) pela lista do subcomando; `null` se aparecer opção fora dela ou valor ruim.
 function abParts(sub: string, rest: readonly string[]): { pos: string[]; opts: Array<[string, string]> } | null {
@@ -250,7 +221,9 @@ function abParts(sub: string, rest: readonly string[]): { pos: string[]; opts: A
 }
 
 // `wait`: um posicional, ou `--load <estado>`, ou `--text <texto>`; nada mais.
-function waitOk(pos: readonly string[], opts: ReadonlyArray<[string, string]>): boolean {
+function waitOk(pos: readonly string[], allOpts: ReadonlyArray<[string, string]>): boolean {
+  // `--json` não conta como opção de espera
+  const opts = allOpts.filter(([name]) => name !== '--json')
   const [opt] = opts
   if (opt === undefined) return pos.length === 1
   return pos.length === 0 && opts.length === 1 && (opt[0] === '--text' || ['load', 'domcontentloaded', 'networkidle'].includes(opt[1]))
@@ -377,19 +350,10 @@ function dockerLogsOk(args: readonly string[], ctx: GuardCtx): boolean {
   return names.length === 1 && ctx.containers.includes(names[0] ?? '')
 }
 
-// Posicional do git da worktree: add -> caminho dentro de fixDir; diff/status/log -> referência ou caminho simples.
-function gitPositionalOk(w: string, spec: GitSpec, ctx: GuardCtx): boolean {
+// Posicional do git da worktree: referência ou caminho simples; com `/` ou começando com `.` tem que ficar dentro de fixDir.
+function gitPositionalOk(w: string, ctx: GuardCtx): boolean {
   const inFix = isInside(resolveIn(w, ctx.fixDir, ctx.home), ctx.fixDir)
-  switch (spec.pos) {
-    case 'none':
-      return false
-    case 'paths':
-      return inFix
-    case 'refs':
-      return /^[A-Za-z0-9._/-]+$/.test(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
-    default:
-      throw new Error('Caso não tratado: ' + String(spec.pos satisfies never))
-  }
+  return /^[A-Za-z0-9._/-]+$/.test(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
 }
 
 function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
@@ -401,54 +365,217 @@ function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
   for (let i = 0; i < rest.length; i++) {
     const w = rest[i] ?? ''
     if (afterDashes) {
-      if (!gitPositionalOk(w, spec, ctx)) return false
+      if (!gitPositionalOk(w, ctx)) return false
     } else if (w === '--' && spec.flags.includes(w)) {
       afterDashes = true
-    } else if (spec.message && (w === '-m' || w === '--message')) {
-      // a mensagem do commit é texto livre: não passa pela conferência de caminho nem de URL
-      if (rest[++i] === undefined) return false
-    } else if (spec.message && w.startsWith('--message=')) {
-      continue
     } else if (spec.flags.includes(w)) {
       continue
     } else if (spec.count && w === '-n') {
       if (!/^\d+$/.test(rest[++i] ?? '')) return false
     } else if (spec.count && /^(--max-count=|-)\d+$/.test(w)) {
       continue
-    } else if (w.startsWith('-') || !gitPositionalOk(w, spec, ctx)) {
+    } else if (w.startsWith('-') || !gitPositionalOk(w, ctx)) {
       return false
     }
   }
   return true
 }
 
-function isAllowed(role: QaRole, command: string, ctx: GuardCtx): boolean {
+// ---- Busca no código pelo Bash (só fixer): forma fechada, só caminho absoluto em fixDir ou runDir ----
+
+const LS_LETTERS = /^-[aAlLhR1tSrdF]+$/
+// sem `r`/`R`: o grep recursivo leria o `.env` copiado para a worktree; o rg já é recursivo (e nele `-r` é "replace")
+const GREP_LETTERS = /^-[nilFwcoHhsvxE]+$/
+const GREP_NUMERIC = ['-A', '-B', '-C', '-m', '--max-count', '--max-depth']
+const GREP_TEXT = ['-e', '-g', '--glob', '--include', '--exclude', '--exclude-dir', '-t', '--type']
+const FIND_TESTS = ['-name', '-iname', '-path']
+
+const isSecretPath = (p: string): boolean => p.split('/').some(seg => seg.startsWith('.env'))
+
+function searchPathOk(w: string, ctx: GuardCtx): boolean {
+  if (!w.startsWith('/')) return false
+  const p = normalizePath(w)
+  return !isSecretPath(p) && (isInside(p, ctx.fixDir) || isInside(p, ctx.runDir))
+}
+
+const optValueOk = (v: string | undefined): v is string => v !== undefined && !v.startsWith('-')
+
+function lsOk(args: readonly string[], ctx: GuardCtx): boolean {
+  const paths = args.filter(w => !LS_LETTERS.test(w))
+  return paths.length > 0 && paths.every(w => !w.startsWith('-') && searchPathOk(w, ctx))
+}
+
+// rg e grep: o primeiro posicional é o padrão (a não ser que haja -e); os demais são caminhos, e pelo menos um é obrigatório.
+function grepOk(args: readonly string[], ctx: GuardCtx): boolean {
+  const pos: string[] = []
+  let hasPattern = false
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i] ?? ''
+    if (GREP_LETTERS.test(w)) continue
+    const numeric = GREP_NUMERIC.includes(w)
+    if (numeric || GREP_TEXT.includes(w)) {
+      const v = args[++i]
+      if (!optValueOk(v) || (numeric && !/^\d+$/.test(v))) return false
+      if (w === '-e') hasPattern = true
+    } else if (w.startsWith('-')) {
+      return false
+    } else {
+      pos.push(w)
+    }
+  }
+  const paths = hasPattern ? pos : pos.slice(1)
+  return paths.length > 0 && paths.every(w => searchPathOk(w, ctx))
+}
+
+// find: caminhos primeiro; depois só -name/-iname/-path, -type f|d|l, -maxdepth/-mindepth e -not.
+function findCmdOk(args: readonly string[], ctx: GuardCtx): boolean {
+  let i = 0
+  while (i < args.length && !(args[i] ?? '').startsWith('-')) {
+    if (!searchPathOk(args[i] ?? '', ctx)) return false
+    i++
+  }
+  if (i === 0) return false
+  for (; i < args.length; i++) {
+    const w = args[i] ?? ''
+    const v = args[i + 1]
+    if (w === '-not') continue
+    const ok = FIND_TESTS.includes(w)
+      ? optValueOk(v)
+      : w === '-type'
+        ? ['f', 'd', 'l'].includes(v ?? '')
+        : (w === '-maxdepth' || w === '-mindepth') && /^\d+$/.test(v ?? '')
+    if (!ok) return false
+    i++
+  }
+  return true
+}
+
+function isAllowed(role: QaRole, command: string, ctx: GuardCtx, cwd: string): boolean {
   const [prog, ...args] = shellWords(command)
   if (prog === undefined || prog === '' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) return false
-  if (role === 'fixer' && ctx.testCommand !== '' && command.trim() === ctx.testCommand) return true
   if (prog === ctx.agentBrowser) return agentBrowserOk(args, ctx)
   if (prog === ctx.impeccable) return impeccableOk(args, ctx)
   if (prog === 'curl') return curlOk(args, ctx)
-  if (prog === 'docker') return role === 'observer' && dockerLogsOk(args, ctx) && argsOk(args, role, ctx)
-  if (prog === 'git') return role === 'fixer' && gitWorktreeOk(args, ctx)
-  return false
+  if (prog === 'docker') return role === 'observer' && dockerLogsOk(args, ctx) && argsOk(args, ctx, cwd)
+  if (role !== 'fixer') return false
+  if (prog === 'git') return gitWorktreeOk(args, ctx)
+  if (prog === 'ls') return lsOk(args, ctx)
+  if (prog === 'rg' || prog === 'grep') return grepOk(args, ctx)
+  return prog === 'find' && findCmdOk(args, ctx)
 }
 
-export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx): BashVerdict {
-  const denied = denyReason(role, command, ctx)
+// `cwd` é a pasta da sessão do usuário (todo agente roda nela): é contra ela que se resolve caminho relativo.
+export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx, cwd: string): BashVerdict {
+  const denied = denyReason(role, command, ctx, cwd)
   if (denied !== null) return { decision: 'deny', reason: denied }
   if (isUnsafeShape(command)) return { decision: 'pass', reason: 'comando com encadeamento, expansão ou aspas que a trava não interpreta' }
-  return isAllowed(role, command, ctx)
+  return isAllowed(role, command, ctx, cwd)
     ? { decision: 'allow', reason: 'comando liberado pela trava de QA' }
-    : { decision: 'pass', reason: 'comando fora da lista liberada' }
+    : { decision: 'pass', reason: 'comando fora da lista liberada pela trava de QA' }
 }
 
 // Gravar só no runDir (qualquer papel) ou, para o fixer, na worktree de correção (menos o `.git`, que aponta para outro repositório).
-export function writeCheckOf(role: QaRole, filePath: string, ctx: GuardCtx): 'allow' | 'deny' {
+export function writeCheckOf(role: QaRole, filePath: string, ctx: GuardCtx, cwd: string): 'allow' | 'deny' {
   // o bash não expande `~` entre aspas e os agentes recebem caminhos absolutos
   if (filePath === '' || filePath.startsWith('~')) return 'deny'
-  const p = resolveIn(filePath, workDirOf(role, ctx), ctx.home)
+  const p = resolveIn(filePath, cwd, ctx.home)
+  // mudar o `.env` da cópia faria o reteste passar sem corrigir o código
+  if (isSecretPath(p)) return 'deny'
   if (isInside(p, ctx.runDir)) return 'allow'
   const inFix = role === 'fixer' && isInside(p, ctx.fixDir) && !isInside(p, `${normalizePath(ctx.fixDir)}/.git`)
   return inFix ? 'allow' : 'deny'
+}
+
+// Ler: runDir, pastas de leitura extras e, só para o fixer, a worktree; nunca `.env*`.
+export function readCheckOf(role: QaRole, filePath: string, ctx: GuardCtx, cwd: string): 'allow' | 'deny' {
+  if (filePath === '' || filePath.startsWith('~')) return 'deny'
+  const p = resolveIn(filePath, cwd, ctx.home)
+  if (isSecretPath(p)) return 'deny'
+  const inside = isInside(p, ctx.runDir) || ctx.readDirs.some(dir => isInside(p, dir)) || (role === 'fixer' && isInside(p, ctx.fixDir))
+  return inside ? 'allow' : 'deny'
+}
+
+// ---- O que o hook de comando chama ----
+
+const isRole = (v: unknown): v is QaRole => v === 'runner' || v === 'observer' || v === 'fixer'
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
+const STRING_FIELDS = ['home', 'repoRoot', 'fixDir', 'runDir', 'agentBrowser', 'impeccable', 'session'] as const
+const LIST_FIELDS = ['readDirs', 'origins', 'containers'] as const
+
+// O contexto vem de um arquivo: confere cada campo.
+function ctxOf(raw: unknown): GuardCtx | null {
+  if (!isRecord(raw)) return null
+  const okStrings = STRING_FIELDS.every(k => typeof raw[k] === 'string')
+  const okLists = LIST_FIELDS.every(k => isStrings(raw[k]))
+  const port = raw['cdpPort']
+  if (!okStrings || !okLists || !(port === null || typeof port === 'number')) return null
+  return {
+    home: String(raw['home']),
+    repoRoot: String(raw['repoRoot']),
+    fixDir: String(raw['fixDir']),
+    runDir: String(raw['runDir']),
+    readDirs: raw['readDirs'] as string[],
+    agentBrowser: String(raw['agentBrowser']),
+    impeccable: String(raw['impeccable']),
+    session: String(raw['session']),
+    cdpPort: port,
+    origins: raw['origins'] as string[],
+    containers: raw['containers'] as string[],
+  }
+}
+
+type GuardState = { role: QaRole; agentId: string | null; ctx: GuardCtx }
+
+function stateOf(text: string | null): GuardState | null {
+  if (text === null) return null
+  const raw: unknown = JSON.parse(text)
+  if (!isRecord(raw) || !isRole(raw['role'])) return null
+  const agentId = raw['agentId']
+  const ctx = ctxOf(raw['ctx'])
+  if (ctx === null || !(agentId === null || typeof agentId === 'string')) return null
+  return { role: raw['role'], agentId, ctx }
+}
+
+type Decision = { decision: 'allow' | 'deny'; reason: string }
+const deny = (reason: string): Decision => ({ decision: 'deny', reason })
+
+function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unknown>, ctx: GuardCtx, cwd: string): Decision {
+  const command = toolInput['command']
+  const path = toolInput['file_path']
+  switch (tool) {
+    case 'Bash': {
+      if (typeof command !== 'string') return deny('Bash sem comando em texto')
+      const v = bashCheckOf(role, command, ctx, cwd)
+      return v.decision === 'allow' ? { decision: 'allow', reason: v.reason } : deny(v.reason)
+    }
+    case 'Write':
+    case 'Edit':
+      if (typeof path !== 'string') return deny(`${tool} sem file_path em texto`)
+      return writeCheckOf(role, path, ctx, cwd) === 'allow' ? { decision: 'allow', reason: 'gravação dentro da pasta liberada' } : deny(`gravar em ${path} é proibido para agentes de QA`)
+    case 'Read':
+      if (typeof path !== 'string') return deny('Read sem file_path em texto')
+      return readCheckOf(role, path, ctx, cwd) === 'allow' ? { decision: 'allow', reason: 'leitura dentro da pasta liberada' } : deny(`ler ${path} é proibido para agentes de QA`)
+    default:
+      return deny(`a ferramenta ${tool} não é liberada para agentes de QA`)
+  }
+}
+
+// Decisão estrita do hook PreToolUse: o que a trava não libera é negado. Nunca lança.
+export function guardDecisionOf(role: string, input: unknown, stateText: string | null): Decision {
+  try {
+    if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
+    const state = stateOf(stateText)
+    if (state === null) return deny('arquivo de contexto da trava ausente ou inválido')
+    if (state.role !== role) return deny('o papel do arquivo de contexto é outro: agente fora de vez')
+    if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
+    const { tool_name: tool, tool_input: toolInput, cwd, agent_id: agentId } = input
+    if (typeof tool !== 'string' || !isRecord(toolInput) || typeof cwd !== 'string' || !cwd.startsWith('/')) {
+      return deny('entrada do hook com forma inesperada')
+    }
+    if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
+    return toolDecision(role, tool, toolInput, state.ctx, cwd)
+  } catch (error) {
+    return deny(`erro interno na trava de QA: ${error instanceof Error ? error.message : 'desconhecido'}`)
+  }
 }

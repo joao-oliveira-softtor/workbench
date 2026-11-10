@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bashCheckOf, writeCheckOf } from '../hooks/qa-guard'
+import { bashCheckOf, guardDecisionOf, readCheckOf, writeCheckOf } from '../hooks/qa-guard'
 import type { GuardCtx, QaRole } from '../hooks/qa-guard'
 
 const ROLES: QaRole[] = ['runner', 'observer', 'fixer']
@@ -11,24 +11,29 @@ const SAVED = '/home/u/.claude/workbench-qa/app/auth/s.json'
 const AB = '/home/u/.claude/workbench-qa/bin/agent-browser'
 const IMP = '/home/u/.claude/workbench-qa/bin/impeccable'
 const S = 'qa-c01'
+const REF = '/home/u/.claude/skills/ref'
+const CWD = '/home/u/app' // a pasta da sessão do usuário: o cwd que o hook recebe
 
 const CTX: GuardCtx = {
   home: '/home/u',
   repoRoot: '/home/u/app',
   fixDir: FIX,
   runDir: RUN,
+  readDirs: [REF],
   agentBrowser: AB,
   impeccable: IMP,
   session: S,
   cdpPort: 45655,
   origins: ['http://localhost:3000'],
-  testCommand: 'npm test',
   containers: ['api'],
 }
 
 const AB_S = `${AB} --session ${S}`
 
-const decision = (role: QaRole, command: string, ctx: GuardCtx = CTX) => bashCheckOf(role, command, ctx).decision
+const verdict = (role: QaRole, command: string, ctx: GuardCtx = CTX, cwd: string = CWD) => bashCheckOf(role, command, ctx, cwd)
+const decision = (role: QaRole, command: string, ctx: GuardCtx = CTX, cwd: string = CWD) => verdict(role, command, ctx, cwd).decision
+const wc = (role: QaRole, path: string, ctx: GuardCtx = CTX, cwd: string = CWD) => writeCheckOf(role, path, ctx, cwd)
+const rc = (role: QaRole, path: string, ctx: GuardCtx = CTX, cwd: string = CWD) => readCheckOf(role, path, ctx, cwd)
 
 describe('bashCheckOf: nega', () => {
   const denied = [
@@ -85,61 +90,52 @@ describe('bashCheckOf: nega', () => {
   }
 
   test('o motivo da negação vem em português e diz o que foi negado', () => {
-    expect(bashCheckOf('runner', 'git push', CTX).reason).toContain('git')
-    expect(bashCheckOf('fixer', 'git push', CTX).reason).toContain('push')
-    expect(bashCheckOf('runner', 'gh pr list', CTX).reason).toContain('gh')
-    expect(bashCheckOf('runner', 'cat /home/u/app/a', CTX).reason).toContain('/home/u/app/a')
+    expect(verdict('runner', 'git push').reason).toContain('git')
+    expect(verdict('fixer', 'git push').reason).toContain('push')
+    expect(verdict('runner', 'gh pr list').reason).toContain('gh')
+    expect(verdict('runner', 'cat /home/u/app/a').reason).toContain('/home/u/app/a')
   })
 
-  test('fixer nega caminho relativo que sai da worktree para o checkout principal', () => {
-    expect(decision('fixer', 'cat ../../src/a.ts')).toBe('deny')
+  test('caminho relativo vale contra a pasta da sessão, para o fixer também', () => {
+    expect(decision('fixer', 'cat ../../src/a.ts', CTX, FIX)).toBe('deny')
+    expect(decision('fixer', 'cat ./src/a.ts')).toBe('deny')
+    expect(decision('fixer', 'cat src/a.ts')).toBe('pass')
+    expect(decision('fixer', 'cat ./src/a.ts', CTX, FIX)).toBe('pass')
   })
 
   test('caminho relativo do runner vale contra o checkout principal', () => {
     expect(decision('runner', `${AB_S} screenshot ./shot.png`)).toBe('deny')
   })
 
-  test('fixer nega git add com caminho que sai da worktree', () => {
-    expect(decision('fixer', `git -C ${FIX} add ../../src/a.ts`)).toBe('deny')
-    expect(decision('fixer', `git -C ${FIX} add ../x`)).toBe('deny')
-    expect(decision('fixer', `git -C ${FIX} diff ../x`)).toBe('deny')
+  test('caminho que sai da worktree para o checkout é negado, não só deixado passar', () => {
+    expect(decision('fixer', `ls ${FIX}/../../x`)).toBe('deny')
+    expect(decision('fixer', `git -C ${FIX} commit -F../../x`)).toBe('deny')
+  })
+
+  test('fixer nega git diff com caminho que sai da worktree para o checkout', () => {
+    expect(decision('fixer', `git -C ${FIX} diff ${CWD}/src/a.ts`)).toBe('deny')
+    expect(decision('fixer', `git -C ${FIX} diff ../../src/a.ts`, CTX, FIX)).toBe('deny')
+    expect(decision('fixer', `git -C ${FIX} diff ../x`)).toBe('pass')
   })
 })
 
 describe('bashCheckOf: nega cd e pushd', () => {
-  test('fixer nega cd para fora da worktree', () => {
-    expect(decision('fixer', 'cd /tmp')).toBe('deny')
-    expect(decision('fixer', 'cd ../..')).toBe('deny')
-    expect(decision('fixer', 'cd')).toBe('deny')
-    expect(decision('fixer', 'cd && ls')).toBe('deny')
-    expect(decision('fixer', 'cd -')).toBe('deny')
-    expect(decision('fixer', 'pushd ~')).toBe('deny')
+  const cds = ['cd /tmp', 'cd ../..', 'cd', 'cd && ls', 'cd -', 'pushd ~', 'cd src', `cd ${FIX}`, `cd ${FIX}/src`, "c''d /tmp", 'c""d /', "pu''shd /tmp"]
+  for (const role of ROLES) {
+    for (const command of cds) {
+      test(`${role} nega: ${command}`, () => {
+        expect(decision(role, command)).toBe('deny')
+      })
+    }
+  }
+
+  test('o motivo diz que cd é proibido', () => {
+    expect(verdict('fixer', `cd ${FIX}/src`).reason).toContain('cd')
   })
 
-  test('cd escrito com aspas no meio também é visto', () => {
-    expect(decision('fixer', "c''d /tmp")).toBe('deny')
-    expect(decision('fixer', 'c""d /')).toBe('deny')
-    expect(decision('runner', "c''d /tmp")).toBe('deny')
-    expect(decision('fixer', "pu''shd /tmp")).toBe('deny')
-  })
-
-  test('runner e observer negam todo cd', () => {
-    expect(decision('runner', 'cd src')).toBe('deny')
-    expect(decision('observer', 'cd src')).toBe('deny')
-    expect(decision('runner', `cd ${FIX}`)).toBe('deny')
-  })
-
-  test('o motivo do cd de runner e observer não fala em worktree de correção', () => {
-    const reason = bashCheckOf('runner', 'cd src', CTX).reason
-    expect(reason).toContain('cd')
-    expect(reason).not.toContain('worktree')
-    expect(bashCheckOf('fixer', 'cd /tmp', CTX).reason).toContain('worktree')
-  })
-
-  test('fixer sem fixDir nega qualquer caminho dentro do checkout principal e qualquer cd', () => {
+  test('fixer sem fixDir nega qualquer caminho dentro do checkout principal', () => {
     const ctx = { ...CTX, fixDir: '' }
     expect(decision('fixer', `cat ${FIX}/a`, ctx)).toBe('deny')
-    expect(decision('fixer', 'cd src', ctx)).toBe('deny')
   })
 })
 
@@ -163,9 +159,6 @@ describe('bashCheckOf: não nega quando o subcomando é outro', () => {
   })
   test('caminho dentro da worktree como fixer', () => {
     expect(decision('fixer', `cat ${FIX}/src/a.ts`)).not.toBe('deny')
-  })
-  test('cd para dentro da worktree como fixer', () => {
-    expect(decision('fixer', `cd ${FIX}/src`)).not.toBe('deny')
   })
   test('URL não é caminho', () => {
     expect(decision('runner', 'curl http://localhost:3000/../x')).not.toBe('deny')
@@ -220,6 +213,20 @@ describe('bashCheckOf: nunca libera comando encadeado, expandido ou com aspas so
   })
 })
 
+const SEARCHES = [
+  `ls -la ${FIX}/src`,
+  `ls ${RUN}`,
+  `ls -R ${FIX} ${RUN}`,
+  `rg -n "useState" ${FIX}/src`,
+  `rg -n -g "*.tsx" -e "foo bar" ${FIX}`,
+  `rg -in -A 3 "foo" ${FIX}/src ${RUN}`,
+  `grep -n --include "*.css" "overflow" ${FIX}/src/a.css`,
+  `grep -n -m 2 "x" ${FIX}/src/a.css ${FIX}/src/b.css`,
+  `grep -in x ${FIX}/src/a.css`,
+  `find ${FIX}/src -name "*.tsx" -type f -maxdepth 3`,
+  `find ${FIX} ${RUN} -iname "*.png" -not -path "*/node_modules/*" -mindepth 1`,
+]
+
 describe('bashCheckOf: libera', () => {
   const allowed = [
     `${AB_S} open http://localhost:3000/login`,
@@ -251,6 +258,9 @@ describe('bashCheckOf: libera', () => {
     `${AB_S} screenshot ${RUN}/x.png --full`,
     `${AB_S} screenshot ${RUN}/x.png --annotate -f`,
     `${AB_S} wait --load networkidle`,
+    `${AB_S} wait 500 --json`,
+    `${AB_S} wait --load networkidle --json`,
+    `${AB_S} wait --text Salvo --json`,
     `${AB_S} wait --text "Salvo"`,
     `${AB_S} console --clear`,
     `${AB_S} errors --clear`,
@@ -282,18 +292,10 @@ describe('bashCheckOf: libera', () => {
     expect(decision('observer', 'docker logs --since 2026-11-09T10:00:00 --tail 200 api')).toBe('allow')
     expect(decision('observer', 'docker logs --tail=50 -t api')).toBe('allow')
   })
-  test('git da worktree como fixer', () => {
-    expect(decision('fixer', `git -C ${FIX} add src/a.ts`)).toBe('allow')
-    expect(
-      decision('fixer', `git -C ${FIX} commit -m "Corrige estouro em /estouro" -m "Como foi provado: reteste"`),
-    ).toBe('allow')
+  test('git da worktree como fixer, só leitura', () => {
     expect(decision('fixer', `git -C ${FIX} diff`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} status`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} log`)).toBe('allow')
-    expect(decision('fixer', `git -C ${FIX} add -A`)).toBe('allow')
-    expect(decision('fixer', `git -C ${FIX} add -u -- src/a.ts`)).toBe('allow')
-    expect(decision('fixer', `git -C ${FIX} commit -a -m x`)).toBe('allow')
-    expect(decision('fixer', `git -C ${FIX} commit --message=x -q`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} diff --stat`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} diff HEAD`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} diff --cached -- src/a.ts`)).toBe('allow')
@@ -303,9 +305,8 @@ describe('bashCheckOf: libera', () => {
     expect(decision('fixer', `git -C ${FIX} log -5`)).toBe('allow')
     expect(decision('fixer', `git -C ${FIX} log --max-count=3 -p src/a.ts`)).toBe('allow')
   })
-  test('comando de testes exato como fixer', () => {
-    expect(decision('fixer', 'npm test')).toBe('allow')
-    expect(decision('fixer', '  npm test  ')).toBe('allow')
+  test('busca no código pelo Bash, só para o fixer, só com caminho absoluto em fixDir ou runDir', () => {
+    for (const command of SEARCHES) expect(decision('fixer', command)).toBe('allow')
   })
 })
 
@@ -443,7 +444,6 @@ describe('bashCheckOf: não libera (pass)', () => {
     ['fixer', `git -C ${FIX} commit -F /etc/passwd`],
     ['fixer', `git -C ${FIX} commit -F/home/u/.ssh/id_ed25519`],
     ['fixer', `git -C ${FIX} commit -F/home/u/app/src/a.ts`],
-    ['fixer', `git -C ${FIX} commit -F../../x`],
     ['fixer', `git -C ${FIX} commit -t/x`],
     ['fixer', `git -C ${FIX} commit --amend -m x`],
     ['fixer', `git -C ${FIX} commit -m`],
@@ -464,11 +464,71 @@ describe('bashCheckOf: não libera (pass)', () => {
     ['fixer', `git -C ${FIX} add --chmod=+x src/a.ts`],
     ['fixer', `git -C ${FIX}/src status`],
     ['fixer', 'git -C src status'],
-    // testes e vazio
-    ['fixer', 'npm test -- x'],
+    // add e commit saíram: quem commita é o mod
+    ['fixer', `git -C ${FIX} add x`],
+    ['fixer', `git -C ${FIX} add -A`],
+    ['fixer', `git -C ${FIX} commit -m x`],
+    ['fixer', `git -C ${FIX} commit -m "Corrige estouro em /estouro" -m "Como foi provado: reteste"`],
+    // busca fora da forma fechada
+    ['fixer', 'rg -n foo'],
+    ['fixer', 'rg foo src'],
+    ['fixer', 'rg foo /etc'],
+    ['fixer', 'ls'],
+    ['fixer', 'ls -la'],
+    ['fixer', 'ls src'],
+    ['fixer', `ls ${FIX}/.env`],
+    ['fixer', `ls ${FIX}/.env.local`],
+    ['fixer', `ls ~/x`],
+    ['fixer', `ls -la --color=always ${FIX}`],
+    ['fixer', `ls -z ${FIX}`],
+    ['fixer', `rg --pre cat foo ${FIX}`],
+    ['fixer', `rg -f /etc/passwd ${FIX}`],
+    ['fixer', `grep -f/etc/passwd x ${FIX}`],
+    ['fixer', `grep -f /etc/passwd x ${FIX}`],
+    ['fixer', `rg -A x foo ${FIX}`],
+    ['fixer', `ls ${FIX.slice(1)}/src`],
+    ['fixer', `rg foo ${FIX.slice(1)}`],
+    ['fixer', `find ${FIX.slice(1)} -name x`],
+    ['fixer', `rg -m x foo ${FIX}`],
+    ['fixer', `rg --max-depth 2x foo ${FIX}`],
+    ['fixer', `rg -e -foo ${FIX}`],
+    ['fixer', `rg -n foo`],
+    // recursão do grep e opções do rg que mostram oculto/ignorado (o `.env` copiado para a worktree)
+    ['fixer', `grep -rn x ${FIX}/src`],
+    ['fixer', `grep -R x ${FIX}`],
+    ['fixer', `grep -r x ${FIX}`],
+    ['fixer', `grep -nR x ${FIX}`],
+    ['fixer', `rg -rn x ${FIX}`],
+    ['fixer', `rg -r x foo ${FIX}`],
+    ['fixer', `rg -R x ${FIX}`],
+    ['fixer', `rg --hidden x ${FIX}`],
+    ['fixer', `rg -u x ${FIX}`],
+    ['fixer', `rg -uu x ${FIX}`],
+    ['fixer', `rg --no-ignore x ${FIX}`],
+    ['fixer', `grep -rn --include "*.css" "overflow" ${FIX}/src`],
+    ['fixer', `rg -n ${FIX}`],
+    ['fixer', `rg -g ${FIX}`],
+    ['fixer', `grep -rn --include=*.css x ${FIX}`],
+    ['fixer', `find ${FIX} -delete`],
+    ['fixer', `find ${FIX} -fprint /tmp/x`],
+    ['fixer', `find ${FIX} -type x`],
+    ['fixer', `find ${FIX} -maxdepth x`],
+    ['fixer', `find ${FIX} -name`],
+    ['fixer', `find ${FIX} -name x y`],
+    ['fixer', `find -name x`],
+    ['fixer', `find -L ${FIX}`],
+    ['fixer', `find src -name x`],
+    ['fixer', `find /etc -name x`],
+    ['fixer', `find ${FIX} -exec rm x`],
+    ['fixer', `ls ${FIX}/.env/x`],
+    ['runner', `ls -la ${FIX}/src`],
+    ['observer', `ls ${RUN}`],
+    ['runner', `rg -n "useState" ${FIX}/src`],
+    ['observer', `grep -rn "x" ${FIX}`],
+    ['runner', `find ${FIX}/src -name "*.tsx"`],
+    // vazio
+    ['fixer', 'npm test'],
     ['fixer', ''],
-    ['runner', 'npm test'],
-    ['observer', 'npm test'],
     ['runner', ''],
     ['runner', 'ls'],
   ]
@@ -499,10 +559,9 @@ describe('bashCheckOf: não libera (pass)', () => {
     expect(decision('runner', 'curl http://localhost:3000', ctx)).toBe('pass')
   })
 
-  test('testCommand vazio não libera comando vazio nem nada', () => {
-    const ctx = { ...CTX, testCommand: '' }
-    expect(decision('fixer', '', ctx)).toBe('pass')
-    expect(decision('fixer', '   ', ctx)).toBe('pass')
+  test('comando vazio ou só espaços não libera nada', () => {
+    expect(decision('fixer', '')).toBe('pass')
+    expect(decision('fixer', '   ')).toBe('pass')
   })
 
   test('binário fixado vazio não libera palavra vazia', () => {
@@ -520,67 +579,306 @@ describe('bashCheckOf: não libera (pass)', () => {
 describe('writeCheckOf', () => {
   for (const role of ROLES) {
     test(`${role} escreve dentro de runDir`, () => {
-      expect(writeCheckOf(role, `${RUN}/shot.png`, CTX)).toBe('allow')
+      expect(wc(role, `${RUN}/shot.png`, CTX)).toBe('allow')
     })
   }
   for (const role of ['runner', 'observer'] as const) {
     test(`${role} não escreve fora de runDir`, () => {
       for (const path of [SAVED, AB, '/home/u/app/src/a.ts', `${FIX}/a.ts`, '/tmp/x', 'rel.txt', '/home/u/.bashrc']) {
-        expect(writeCheckOf(role, path, CTX)).toBe('deny')
+        expect(wc(role, path, CTX)).toBe('deny')
       }
     })
   }
   test('fixer escreve dentro de fixDir', () => {
-    expect(writeCheckOf('fixer', `${FIX}/src/a.ts`, CTX)).toBe('allow')
+    expect(wc('fixer', `${FIX}/src/a.ts`, CTX)).toBe('allow')
   })
   test('fixer não escreve no checkout principal fora de fixDir', () => {
-    expect(writeCheckOf('fixer', '/home/u/app/src/a.ts', CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', '/home/u/app/.worktrees/qa-10/a.ts', CTX)).toBe('deny')
+    expect(wc('fixer', '/home/u/app/src/a.ts', CTX)).toBe('deny')
+    expect(wc('fixer', '/home/u/app/.worktrees/qa-10/a.ts', CTX)).toBe('deny')
+  })
+  test('nega arquivo .env* em qualquer pasta, inclusive fixDir e runDir', () => {
+    for (const path of [`${FIX}/.env`, `${FIX}/.env.local`, `${FIX}/apps/api/.env`, `${FIX}/.envrc`, `${RUN}/.env`, `${RUN}/x/.env.test`]) {
+      expect(wc('fixer', path)).toBe('deny')
+    }
+    expect(wc('runner', `${RUN}/.env`)).toBe('deny')
+    expect(wc('fixer', `${FIX}/src/env.ts`)).toBe('allow')
+    expect(wc('fixer', `${FIX}/environment.ts`)).toBe('allow')
   })
   test('fixer não escreve em .git da worktree', () => {
-    expect(writeCheckOf('fixer', `${FIX}/.git`, CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', `${FIX}/.git/config`, CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', `${FIX}/src/../.git`, CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', `${FIX}/.gitignore`, CTX)).toBe('allow')
+    expect(wc('fixer', `${FIX}/.git`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}/.git/config`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}/src/../.git`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}/.gitignore`, CTX)).toBe('allow')
   })
   test('fixer não escapa de fixDir com ..', () => {
-    expect(writeCheckOf('fixer', `${FIX}/../../src/a.ts`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}/../../src/a.ts`, CTX)).toBe('deny')
   })
   test('barra invertida vale como barra', () => {
-    expect(writeCheckOf('fixer', `${FIX}\\src\\a.ts`, CTX)).toBe('allow')
-    expect(writeCheckOf('fixer', `${FIX}\\..\\..\\src\\a.ts`, CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', `${FIX}\\.git\\config`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}\\src\\a.ts`, CTX)).toBe('allow')
+    expect(wc('fixer', `${FIX}\\..\\..\\src\\a.ts`, CTX)).toBe('deny')
+    expect(wc('fixer', `${FIX}\\.git\\config`, CTX)).toBe('deny')
   })
-  test('caminho relativo do fixer vale contra fixDir, o do runner contra repoRoot', () => {
-    expect(writeCheckOf('fixer', 'src/a.ts', CTX)).toBe('allow')
-    expect(writeCheckOf('fixer', '../a.ts', CTX)).toBe('deny')
-    expect(writeCheckOf('fixer', '.git/config', CTX)).toBe('deny')
-    expect(writeCheckOf('runner', 'src/a.ts', CTX)).toBe('deny')
+  test('caminho relativo vale contra a pasta da sessão, para todo papel', () => {
+    expect(wc('fixer', 'src/a.ts')).toBe('deny')
+    expect(wc('fixer', 'src/a.ts', CTX, FIX)).toBe('allow')
+    expect(wc('fixer', '../a.ts', CTX, FIX)).toBe('deny')
+    expect(wc('fixer', '.git/config', CTX, FIX)).toBe('deny')
+    expect(wc('runner', 'src/a.ts')).toBe('deny')
+    expect(wc('runner', 'x.png', CTX, RUN)).toBe('allow')
+    expect(wc('observer', '../x.png', CTX, RUN)).toBe('deny')
   })
   test('caminho que começa com til é negado, mesmo apontando para o runDir', () => {
     for (const role of ROLES) {
-      expect(writeCheckOf(role, '~/.claude/workbench-qa/app/20261109-1000/x', CTX)).toBe('deny')
-      expect(writeCheckOf(role, '~/.bashrc', CTX)).toBe('deny')
-      expect(writeCheckOf(role, '~', CTX)).toBe('deny')
-      expect(writeCheckOf(role, '~u/x', CTX)).toBe('deny')
+      expect(wc(role, '~/.claude/workbench-qa/app/20261109-1000/x', CTX)).toBe('deny')
+      expect(wc(role, '~/.bashrc', CTX)).toBe('deny')
+      expect(wc(role, '~', CTX)).toBe('deny')
+      expect(wc(role, '~u/x', CTX)).toBe('deny')
     }
   })
   test('fixDir vazio não libera nada ao fixer', () => {
     const ctx = { ...CTX, fixDir: '' }
-    expect(writeCheckOf('fixer', `${FIX}/a.ts`, ctx)).toBe('deny')
-    expect(writeCheckOf('fixer', 'a.ts', ctx)).toBe('deny')
-    expect(writeCheckOf('fixer', `${RUN}/a`, ctx)).toBe('allow')
+    expect(wc('fixer', `${FIX}/a.ts`, ctx)).toBe('deny')
+    expect(wc('fixer', 'a.ts', ctx, FIX)).toBe('deny')
+    expect(wc('fixer', `${RUN}/a`, ctx)).toBe('allow')
   })
   test('runDir vazio não libera nada', () => {
     const ctx = { ...CTX, runDir: '' }
     for (const role of ROLES) {
-      expect(writeCheckOf(role, '/x', ctx)).toBe('deny')
-      expect(writeCheckOf(role, '', ctx)).toBe('deny')
+      expect(wc(role, '/x', ctx)).toBe('deny')
+      expect(wc(role, '', ctx)).toBe('deny')
     }
-    expect(writeCheckOf('runner', 'x', ctx)).toBe('deny')
-    expect(writeCheckOf('fixer', `${FIX}/a.ts`, ctx)).toBe('allow')
+    expect(wc('runner', 'x', ctx, RUN)).toBe('deny')
+    expect(wc('fixer', `${FIX}/a.ts`, ctx)).toBe('allow')
   })
   test('caminho vazio é negado', () => {
-    expect(writeCheckOf('fixer', '', CTX)).toBe('deny')
+    expect(wc('fixer', '', CTX)).toBe('deny')
+  })
+})
+
+describe('bashCheckOf: a busca no código é só do fixer', () => {
+  for (const role of ['runner', 'observer'] as const) {
+    test(`${role} não libera a busca`, () => {
+      for (const command of SEARCHES) expect(decision(role, command)).toBe('pass')
+    })
+  }
+  test('o checkout principal continua negado pela regra de caminho', () => {
+    expect(decision('fixer', `rg -n x ${CWD}/src`)).toBe('deny')
+    expect(decision('fixer', `ls ${CWD}`)).toBe('deny')
+  })
+})
+
+describe('readCheckOf', () => {
+  test('libera runDir, readDirs e, só para o fixer, fixDir', () => {
+    for (const role of ROLES) {
+      expect(rc(role, `${RUN}/shot.png`)).toBe('allow')
+      expect(rc(role, `${REF}/SKILL.md`)).toBe('allow')
+      expect(rc(role, REF)).toBe('allow')
+    }
+    expect(rc('fixer', `${FIX}/src/a.ts`)).toBe('allow')
+    expect(rc('runner', `${FIX}/src/a.ts`)).toBe('deny')
+    expect(rc('observer', `${FIX}/src/a.ts`)).toBe('deny')
+  })
+  test('nega arquivo .env em qualquer pasta liberada', () => {
+    for (const role of ROLES) {
+      expect(rc(role, `${RUN}/.env`)).toBe('deny')
+      expect(rc(role, `${REF}/.env.local`)).toBe('deny')
+    }
+    expect(rc('fixer', `${FIX}/.env`)).toBe('deny')
+    expect(rc('fixer', `${FIX}/.envrc`)).toBe('deny')
+    expect(rc('fixer', `${FIX}/sub/.env.production`)).toBe('deny')
+    expect(rc('fixer', `${FIX}/.environment/x.ts`)).toBe('deny')
+    expect(rc('fixer', `${FIX}/env.ts`)).toBe('allow')
+  })
+  test('nega til, vazio, o checkout principal e o resto', () => {
+    for (const role of ROLES) {
+      expect(rc(role, '~/.claude/workbench-qa/app/20261109-1000/x')).toBe('deny')
+      expect(rc(role, '~')).toBe('deny')
+      expect(rc(role, '')).toBe('deny')
+      expect(rc(role, `${CWD}/src/a.ts`)).toBe('deny')
+      expect(rc(role, '/etc/passwd')).toBe('deny')
+      expect(rc(role, `${RUN}/../x`)).toBe('deny')
+    }
+  })
+  test('caminho relativo vale contra a pasta da sessão e barra invertida vale como barra', () => {
+    expect(rc('fixer', 'src/a.ts')).toBe('deny')
+    expect(rc('fixer', 'src/a.ts', CTX, FIX)).toBe('allow')
+    expect(rc('fixer', `${FIX}\\src\\a.ts`)).toBe('allow')
+  })
+  test('pastas vazias não liberam nada', () => {
+    const ctx = { ...CTX, runDir: '', fixDir: '', readDirs: [''] }
+    for (const role of ROLES) expect(rc(role, '/x', ctx)).toBe('deny')
+    expect(rc('fixer', 'x', ctx, '/')).toBe('deny')
+  })
+})
+
+describe('guardDecisionOf', () => {
+  const stateOf = (over: Record<string, unknown> = {}) => JSON.stringify({ role: 'fixer', agentId: null, ctx: CTX, ...over })
+  const inputOf = (tool_name: unknown, tool_input: unknown, over: Record<string, unknown> = {}) => ({
+    agent_id: 'a1',
+    agent_type: 'qa-fixer',
+    cwd: CWD,
+    tool_name,
+    tool_input,
+    ...over,
+  })
+  const bash = (command: unknown) => inputOf('Bash', { command })
+  const guard = (role: string, input: unknown, text: string | null = stateOf()) => guardDecisionOf(role, input, text)
+
+  test('libera o que a trava libera e devolve um motivo', () => {
+    const d = guard('fixer', bash(`git -C ${FIX} status`))
+    expect(d.decision).toBe('allow')
+    expect(d.reason).not.toBe('')
+  })
+
+  test('nega papel desconhecido', () => {
+    expect(guard('boss', bash('curl http://localhost:3000')).decision).toBe('deny')
+    expect(guard('', bash('curl http://localhost:3000')).decision).toBe('deny')
+    expect(guard('Fixer', bash('curl http://localhost:3000')).decision).toBe('deny')
+  })
+
+  test('nega arquivo de contexto ausente, que não é JSON ou com forma errada', () => {
+    expect(guard('fixer', bash('curl http://localhost:3000'), null).decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), '{').decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), '').decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), 'null').decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), '[]').decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), JSON.stringify({ role: 'fixer', agentId: null })).decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), stateOf({ role: 'boss' })).decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), stateOf({ agentId: 7 })).decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), stateOf({ agentId: undefined })).decision).toBe('deny')
+    expect(guard('fixer', bash('curl http://localhost:3000'), stateOf({ ctx: null })).decision).toBe('deny')
+  })
+
+  test('nega contexto com qualquer campo errado', () => {
+    const bad: Array<[string, unknown]> = [
+      ['home', 1],
+      ['repoRoot', null],
+      ['fixDir', undefined],
+      ['runDir', 2],
+      ['readDirs', 'x'],
+      ['readDirs', [1]],
+      ['agentBrowser', {}],
+      ['impeccable', false],
+      ['session', 3],
+      ['cdpPort', '45655'],
+      ['cdpPort', undefined],
+      ['origins', 'http://localhost:3000'],
+      ['origins', [1]],
+      ['containers', null],
+      ['containers', ['api', 2]],
+    ]
+    for (const [key, value] of bad) {
+      const text = stateOf({ ctx: { ...CTX, [key]: value } })
+      expect(guard('fixer', bash('curl http://localhost:3000'), text).decision).toBe('deny')
+    }
+  })
+
+  test('aceita cdpPort nulo e listas vazias', () => {
+    const text = stateOf({ ctx: { ...CTX, cdpPort: null, readDirs: [], origins: ['http://localhost:3000'], containers: [] } })
+    expect(guard('fixer', bash('curl -sS http://localhost:3000/x'), text).decision).toBe('allow')
+  })
+
+  test('nega agente de outro papel', () => {
+    expect(guard('runner', bash('curl -sS http://localhost:3000/x'), stateOf()).decision).toBe('deny')
+    expect(guard('fixer', bash('curl -sS http://localhost:3000/x'), stateOf({ role: 'runner' })).decision).toBe('deny')
+  })
+
+  test('agentId do arquivo: nulo aceita qualquer agente do papel; igual aceita; diferente ou ausente nega', () => {
+    const cmd = bash('curl -sS http://localhost:3000/x')
+    expect(guard('fixer', cmd, stateOf({ agentId: null })).decision).toBe('allow')
+    expect(guard('fixer', cmd, stateOf({ agentId: 'a1' })).decision).toBe('allow')
+    expect(guard('fixer', cmd, stateOf({ agentId: 'a2' })).decision).toBe('deny')
+    const semId = inputOf('Bash', { command: 'curl -sS http://localhost:3000/x' }, { agent_id: undefined })
+    expect(guard('fixer', semId, stateOf({ agentId: 'a1' })).decision).toBe('deny')
+    expect(guard('fixer', semId, stateOf({ agentId: null })).decision).toBe('allow')
+  })
+
+  test('nega entrada com forma errada', () => {
+    const cmd = { command: 'curl -sS http://localhost:3000/x' }
+    expect(guard('fixer', null).decision).toBe('deny')
+    expect(guard('fixer', 'texto').decision).toBe('deny')
+    expect(guard('fixer', [bash('x')]).decision).toBe('deny')
+    expect(guard('fixer', inputOf(7, cmd)).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', 'curl x')).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', null)).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', ['curl'])).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', cmd, { cwd: 'app' })).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', cmd, { cwd: undefined })).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', cmd, { cwd: 3 })).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', {})).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', { command: 3 })).decision).toBe('deny')
+  })
+
+  test('Bash: o pass vira deny com o motivo da lista liberada', () => {
+    const d = guard('fixer', bash('ls'))
+    expect(d.decision).toBe('deny')
+    expect(d.reason).toContain('comando fora da lista liberada pela trava de QA')
+    expect(guard('fixer', bash('echo oi')).decision).toBe('deny')
+    expect(guard('fixer', bash('git push')).decision).toBe('deny')
+  })
+
+  test('Bash: busca com caminho absoluto em fixDir libera; sem caminho nega', () => {
+    expect(guard('fixer', bash(`rg -n "useState" ${FIX}/src`)).decision).toBe('allow')
+    expect(guard('fixer', bash('rg -n foo')).decision).toBe('deny')
+    expect(guard('fixer', bash(`rg -n foo ${CWD}/src`)).decision).toBe('deny')
+  })
+
+  test('Bash: o cwd da entrada vale para caminhos relativos', () => {
+    expect(guard('fixer', inputOf('Bash', { command: 'cat ./src/a.ts' }, { cwd: CWD })).decision).toBe('deny')
+    expect(guard('fixer', inputOf('Bash', { command: 'curl -sS -H x ../app/x' }, { cwd: CWD })).decision).toBe('deny')
+  })
+
+  test('Write e Edit: dentro de runDir libera, fora nega; o fixer também na worktree', () => {
+    for (const tool of ['Write', 'Edit']) {
+      expect(guard('runner', inputOf(tool, { file_path: `${RUN}/x.json` }), stateOf({ role: 'runner' })).decision).toBe('allow')
+      expect(guard('runner', inputOf(tool, { file_path: `${FIX}/x.ts` }), stateOf({ role: 'runner' })).decision).toBe('deny')
+      expect(guard('fixer', inputOf(tool, { file_path: `${FIX}/src/a.ts` })).decision).toBe('allow')
+      expect(guard('fixer', inputOf(tool, { file_path: `${CWD}/src/a.ts` })).decision).toBe('deny')
+      expect(guard('fixer', inputOf(tool, { file_path: `${FIX}/.git/config` })).decision).toBe('deny')
+      expect(guard('fixer', inputOf(tool, { file_path: 7 })).decision).toBe('deny')
+      expect(guard('fixer', inputOf(tool, {})).decision).toBe('deny')
+    }
+  })
+
+  test('Write e Edit de .env* na worktree nega, de env.ts libera', () => {
+    for (const tool of ['Write', 'Edit']) {
+      for (const path of [`${FIX}/.env`, `${FIX}/.env.local`, `${FIX}/apps/api/.env`]) {
+        expect(guard('fixer', inputOf(tool, { file_path: path })).decision).toBe('deny')
+      }
+      expect(guard('fixer', inputOf(tool, { file_path: `${FIX}/src/env.ts` })).decision).toBe('allow')
+    }
+  })
+
+  test('Read: runDir, readDirs, fixDir só para o fixer, .env e fora', () => {
+    const asRunner = (path: string) => guard('runner', inputOf('Read', { file_path: path }), stateOf({ role: 'runner' })).decision
+    const asFixer = (path: string) => guard('fixer', inputOf('Read', { file_path: path })).decision
+    expect(asRunner(`${RUN}/shot.png`)).toBe('allow')
+    expect(asRunner(`${REF}/SKILL.md`)).toBe('allow')
+    expect(asRunner(`${FIX}/src/a.ts`)).toBe('deny')
+    expect(asFixer(`${FIX}/src/a.ts`)).toBe('allow')
+    expect(asFixer(`${FIX}/.env`)).toBe('deny')
+    expect(asFixer(`${CWD}/src/a.ts`)).toBe('deny')
+    expect(asFixer('/etc/passwd')).toBe('deny')
+    expect(guard('fixer', inputOf('Read', {})).decision).toBe('deny')
+  })
+
+  test('qualquer outra ferramenta nega', () => {
+    for (const tool of ['MultiEdit', 'Grep', 'Glob', 'NotebookEdit', 'WebFetch', 'Agent', 'bash', '']) {
+      expect(guard('fixer', inputOf(tool, { file_path: `${FIX}/a`, command: 'curl http://localhost:3000' })).decision).toBe('deny')
+    }
+  })
+
+  test('nunca lança: erro interno vira deny', () => {
+    const hostile = { agent_id: 'a1', cwd: CWD, tool_input: { command: 'ls' } }
+    Object.defineProperty(hostile, 'tool_name', {
+      get() {
+        throw new Error('boom')
+      },
+    })
+    const d = guard('fixer', hostile)
+    expect(d.decision).toBe('deny')
+    expect(d.reason).not.toBe('')
+    const proxy = new Proxy({}, { get: () => { throw new Error('boom') }, getPrototypeOf: () => { throw new Error('boom') } })
+    expect(guard('fixer', proxy).decision).toBe('deny')
   })
 })
