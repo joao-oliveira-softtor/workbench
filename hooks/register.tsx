@@ -108,7 +108,7 @@ import {
   writeReport,
   writeScripts,
 } from './qa-flow'
-import type { QaApp, QaEnv } from './qa-flow'
+import type { FixCheck, QaApp, QaEnv } from './qa-flow'
 import { bandOf, fetchAgeLabel, freedKb, handoffTable, idleDays, isFetchStale, lineOf, pushLabel, settle, sizeLabel, sortRows, summaryOf } from './model'
 import { DELEGATE_CONTEXT, formatRoute, isUserOrigin, parseRoute, shouldDelegate, tierOf } from './route'
 import {
@@ -882,15 +882,7 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   }
   const runId = runIdIn(flow.runDir)
   const fixDir = fixDirOf(env.root, runId)
-  if ((await read($, qaJob)) !== null) return
-  const now = await $.clock.now()
-  const armedAt = (await read($, qaArmed))?.at
-  if (armedAt === undefined || now - armedAt > ARM_MS) {
-    await update($, qaArmed, () => ({ at: now }))
-    $.ui.toast(fixConfirmTextOf(matrix, fixDir))
-    return
-  }
-  await update($, qaArmed, () => null)
+  if ((await read($, qaJob)) !== null || !(await isFixConfirmed($, matrix, fixDir))) return
   const stops = qaStops
   const ready = await setupWorktree($, env, matrix, { runDir: flow.runDir, defect: left[0] ?? '', fixDir }, fixBranchOf(runId))
   if ('error' in ready) {
@@ -907,6 +899,19 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], matrix, defects: all }))
   await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null })
   void refresh($, true).catch(() => {})
+}
+
+// Primeiro clique (ou fora do prazo): mostra os comandos e arma. Segundo clique em até ARM_MS: desarma e segue.
+async function isFixConfirmed($: EngineInterface, matrix: Matrix, fixDir: string): Promise<boolean> {
+  const now = await $.clock.now()
+  const armedAt = (await read($, qaArmed))?.at
+  if (armedAt === undefined || now - armedAt > ARM_MS) {
+    await update($, qaArmed, () => ({ at: now }))
+    $.ui.toast(fixConfirmTextOf(matrix, fixDir))
+    return false
+  }
+  await update($, qaArmed, () => null)
+  return true
 }
 
 type FixPart = Pick<SpawnInput, 'defect' | 'worktree' | 'testDir' | 'attempt' | 'reasons'>
@@ -1188,14 +1193,18 @@ async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | nu
   if (next === null) await teardownQa($, f.env, null)
 }
 
+// Mudança que o mod não deixou (um corretor cortado no meio): o próximo commit a levaria junto. Para a fase e avisa, sem
+// commitar nem desfazer: o usuário decide.
+async function isLeftover($: EngineInterface, f: FixCtx): Promise<boolean> {
+  if ((await statusOf($, f.fixDir)) === (await read($, qaFix))?.baseline) return false
+  await update($, qaJob, () => null)
+  $.ui.toast(`QA: a worktree ${f.fixDir} tem mudanças que nenhum commit levou (de um corretor cortado no meio?); a fase parou sem commitar nem desfazer. Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
+  return true
+}
+
 async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Promise<QaCurrent | null> {
   await assertFixDir($, f.fixDir)
-  // Mudança que o mod não deixou (um corretor cortado no meio): o próximo commit a levaria junto. O usuário decide.
-  if ((await statusOf($, f.fixDir)) !== (await read($, qaFix))?.baseline) {
-    await update($, qaJob, () => null)
-    $.ui.toast(`QA: a worktree ${f.fixDir} tem mudanças que nenhum commit levou (de um corretor cortado no meio?); a fase parou sem commitar nem desfazer. Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
-    return null
-  }
+  if (await isLeftover($, f)) return null
   const target = await targetOf($, baseDirOf(f.runDir), f.matrix, defectId)
   if (target === null) {
     $.ui.toast(`QA: o defeito ${defectId} não está mais no veredito da execução; ficou de fora.`)
@@ -1204,13 +1213,19 @@ async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Pro
   await update($, qaFix, x => (x === null ? null : { ...x, regression: null, pending: [] }))
   const sha = await headOf($, f.fixDir)
   const c: QaCurrent = { item: defectId, role: 'runner', attempt: 0, agentId: null, at: await $.clock.now(), isEnded: false, cell: target.cell.id, sha, port: 0, session: '', cdpPort: null, reasons: [] }
-  const port = await freePortOf($)
-  qaApp = port === null ? null : await startApp($, f.matrix, f.fixDir, port)
-  if (port === null || qaApp === null) return finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], [])
+  qaApp = await startFreshApp($, f)
+  if (qaApp === null) return finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], [])
+  const port = qaApp.port
   const base = await read($, qaRunBase)
   // A execução viu outra árvore (suja ou outro HEAD): antes de corrigir, confere se o defeito aparece na worktree.
   const isCheck = base === null || base.isDirty || base.head !== sha
   return isCheck ? startRetest($, f, { ...c, port }, target.cell.id, 0) : startFixer($, f, { ...c, port, attempt: 1 }, target)
+}
+
+// O app da worktree numa porta livre; null = não subiu.
+async function startFreshApp($: EngineInterface, f: FixCtx): Promise<QaApp | null> {
+  const port = await freePortOf($)
+  return port === null ? null : startApp($, f.matrix, f.fixDir, port)
 }
 
 // O defeito acabou: para o app e grava `correcoes/<defeito>.json`.
@@ -1326,10 +1341,16 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
   }
 }
 
-async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
+// As conferências do corretor, a partir do HEAD do começo da tentativa; depois delas a linha de base é o que deixaram.
+async function checkAttempt($: EngineInterface, f: FixCtx, c: QaCurrent): Promise<FixCheck> {
   const fix = await read($, qaFix)
   const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? '', port: c.port })
   await rebaseline($, f)
+  return check
+}
+
+async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
+  const check = await checkAttempt($, f, c)
   switch (check.kind) {
     case 'refuse':
       return judged($, f, c, target, [], { accepted: false, reasons: [check.reason], detail: check.detail })
