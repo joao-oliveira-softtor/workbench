@@ -117,8 +117,11 @@ async function readText($: EngineInterface, path: string): Promise<string | null
 }
 
 // Processo sem shell; qualquer falha (rejeição ou saída diferente de 0) vira null.
-async function run($: EngineInterface, argv: string[], cwd?: string): Promise<string | null> {
-  const ran = await settle(() => $.process.run(argv, cwd === undefined ? {} : { cwd }))
+type EnvRun = { argv: string[]; env: Record<string, string> }
+
+async function run($: EngineInterface, cmd: string[] | EnvRun, cwd?: string): Promise<string | null> {
+  const { argv, env } = Array.isArray(cmd) ? { argv: cmd, env: undefined } : cmd
+  const ran = await settle(() => $.process.run(argv, { ...(cwd === undefined ? {} : { cwd }), ...(env === undefined ? {} : { env }) }))
   return ran.ok && ran.value.exitCode === 0 ? ran.value.stdout : null
 }
 
@@ -337,7 +340,11 @@ const outputOf = (command: string, ran: Ran): string => `saída de ${command}: $
 const git = (dir: string, ...args: string[]): string[] => ['git', '-C', dir, ...args]
 // Todo git na worktree de correção passa por aqui. O teto (a pasta `.worktrees` que a contém) impede o git de subir até o
 // repositório da raiz quando a pasta perdeu o `.git`: ele falha com "not a git repository" em vez de mexer no checkout do usuário.
-const wtGit = (fixDir: string, ...args: string[]): string[] => ['env', `GIT_CEILING_DIRECTORIES=${fixDir.slice(0, fixDir.lastIndexOf('/'))}`, 'git', '-C', fixDir, ...args]
+const wtGit = (fixDir: string, ...args: string[]): EnvRun => ({
+  // `git` fica como primeira palavra (é assim que o engine reconhece o git e desliga os hooks do repositório); o teto vai pelo ambiente.
+  argv: ['git', '-C', fixDir, ...args],
+  env: { GIT_CEILING_DIRECTORIES: fixDir.slice(0, fixDir.lastIndexOf('/')) },
+})
 
 // A pasta da worktree sem o `.git`: a fase para sem rodar nada destrutivo (quem pega é o passo da fase, no register.tsx).
 export class LostWorktree extends Error {}

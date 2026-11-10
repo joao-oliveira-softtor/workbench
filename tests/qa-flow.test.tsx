@@ -180,11 +180,14 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('session.cwd', () => ({ value: REPO }))
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? (over.home ?? HOME) : undefined }))
   on('process.run', async (_$, e) => {
-    if (over.hold?.(e.argv.join(' ')) === true) await clock.sleep(HOLD_MS)
-    if (over.stall?.(e.argv.join(' ')) === true) await clock.sleep(1e12)
-    log.runs.push([...e.argv])
+    // O teto do git vai pelo ambiente; aqui ele é escrito na frente do comando, para cada teste conferir comando e teto juntos.
+    const ceiling = e.init?.env?.GIT_CEILING_DIRECTORIES
+    const argv = ceiling === undefined ? [...e.argv] : ['env', `GIT_CEILING_DIRECTORIES=${ceiling}`, ...e.argv]
+    if (over.hold?.(argv.join(' ')) === true) await clock.sleep(HOLD_MS)
+    if (over.stall?.(argv.join(' ')) === true) await clock.sleep(1e12)
+    log.runs.push(argv)
     log.full.push({ argv: [...e.argv], cwd: e.init?.cwd ?? '', env: { ...e.init?.env } })
-    const r = over.run?.(e.argv, e.init?.cwd, e.init?.env) ?? answer(e.argv, e.init?.env)
+    const r = over.run?.(argv, e.init?.cwd, e.init?.env) ?? answer(argv, e.init?.env)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.exists', (_$, e) => ({ value: files.has(e.path) || dirs.has(e.path) }))
