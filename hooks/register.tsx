@@ -1143,12 +1143,12 @@ async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: Qa
   if (undone?.ok === false) $.ui.toast(`QA: ${undone.error.slice(0, 200)}`)
 }
 
-// A worktree perdeu o `.git` no meio do passo: a fase para (trava `{}`, navegador e app fechados) sem desfazer nada nela.
+// A worktree perdeu o `.git` no meio do passo: a fase para (trava `{}` e app parado) sem desfazer nada nela. A conferência roda
+// sempre sem navegador aberto (antes do defeito, depois de fechar a sessão do agente, no fim da fila).
 async function lostFix($: EngineInterface, env: QaEnv, err: unknown): Promise<void> {
   if (!(err instanceof LostWorktree)) throw err
-  const current = (await read($, qaJob))?.current ?? null
   await update($, qaJob, () => null)
-  await teardownFix($, env, '', current === null ? null : { ...current, sha: '' })
+  await teardownFix($, env, '', null)
   $.ui.toast(`QA: ${err.message}`)
 }
 
