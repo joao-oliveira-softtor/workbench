@@ -496,13 +496,20 @@ describe('qaAgentsOf', () => {
     expect(by('qa-fixer')).toMatchObject({
       model: 'opus',
       skills: ['workbench:qa-corrigir', 'impeccable', 'superpowers:systematic-debugging'],
-      tools: ['Read', 'Bash', 'Write', 'Edit', 'Skill'],
+      tools: ['Read', 'Bash', 'Write', 'Edit'],
       maxTurns: 200,
     })
   })
 
   test('o fixer carrega o CLAUDE.md (sem o campo) e os outros não', () => {
     expect(by('qa-fixer')).not.toHaveProperty('omitClaudeMd')
+  })
+
+  test('nos tipos travados, toda ferramenta passa pela trava (casa com o matcher do hook)', () => {
+    for (const s of specs.filter(x => x.hooks !== undefined)) {
+      const matcher = new RegExp(`^(?:${/"matcher":"([^"]+)"/.exec(JSON.stringify(s.hooks))?.[1] ?? ''})$`)
+      for (const t of s.tools ?? []) expect(`${s.name} ${t} ${matcher.test(t)}`).toBe(`${s.name} ${t} true`)
+    }
   })
 
   test('nenhum tipo tem Agent, Grep, Glob, MultiEdit nem ferramenta mcp', () => {

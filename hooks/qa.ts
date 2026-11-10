@@ -344,7 +344,7 @@ export function qaAgentsOf(hook: (role: QaRole) => string): AgentSpec[] {
       prompt: promptOf('fixer', 'workbench:qa-corrigir'),
       model: 'opus',
       skills: ['workbench:qa-corrigir', 'impeccable', 'superpowers:systematic-debugging'],
-      tools: ['Read', 'Bash', 'Write', 'Edit', 'Skill'],
+      tools: ['Read', 'Bash', 'Write', 'Edit'],
       hooks: hooksOf(hook('fixer')),
       maxTurns: 200,
     },

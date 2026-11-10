@@ -56,8 +56,8 @@ Para seguir o `repro` também valem as ações do navegador: `click @eN`, `fill 
 `press Enter`, `wait --load networkidle` (sempre com `snapshot -i` logo antes, porque as referências `@eN` mudam).
 
 ## Procedimento
-1. **Regras.** Leia `W/CLAUDE.md` e `W/AGENTS.md` se existirem. Se a skill `ub-mode` estiver disponível, siga-a (menor mudança,
-   teste que falha antes). Tentativa 2 ou mais: leia os motivos da recusa anterior e trate **cada um**.
+1. **Regras.** Leia `W/CLAUDE.md` e `W/AGENTS.md` se existirem. Siga a menor mudança e o teste que falha antes (é o que a
+   `ub-mode` pede; você não chama skill: as que valem já vêm carregadas). Tentativa 2 ou mais: leia os motivos da recusa anterior e trate **cada um**.
 2. **Reproduzir.** Abra a tela do defeito (`open 'APP<route da célula>'`), siga os passos do `repro` (sem repetir à toa os que mudam dados) e
    grave `screenshot SAIDA/antes.png`. Defeito de design: meça com `IMP detect` e confira que a regra do defeito aparece no
    mesmo seletor. Não reproduziu: não corrija às cegas (veja "Quando algo dá errado").
