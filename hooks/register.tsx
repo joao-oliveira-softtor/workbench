@@ -74,7 +74,6 @@ import {
   authReplyOf,
   assertFixDir,
   baseDirOf,
-  fixGuardCtxOf,
   checkFix,
   commitPassTests,
   fixQueueAt,
@@ -830,7 +829,7 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
     if (gate.back) await setFlow($, () => ({ ...flow, step: 'login' }))
     return
   }
-  const refusal = guardRefusalOf(guardCtxOf(env, matrix, flow.runDir, '', null))
+  const refusal = guardRefusalOf(guardCtxOf(env, matrix, { runDir: flow.runDir, outDir: cellDirOf(flow.runDir, matrix.cells[0]?.id ?? '', 1) }, '', null), flow.runDir)
   if (refusal !== null) {
     $.ui.toast(`QA: a trava recusaria o contexto desta execução (${refusal}); confira HOME (${env.home}) e a raiz do repositório (${env.root}).`)
     return
@@ -842,7 +841,7 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   const runBase = await runBaseOf($, env.root)
   await update($, qaRunBase, () => runBase)
   const queue = await pendingCellsOf($, flow.runDir, matrix)
-  await update($, qaJob, cur => cur ?? { phase: 'run' as const, queue, total: queue.length, current: null })
+  await update($, qaJob, cur => cur ?? { phase: 'run' as const, queue, total: queue.length, current: null, matrix })
 }
 
 // Portão da matriz em todo clique fora do `plan`: ausente volta ao começo; inválida avisa e fica.
@@ -914,9 +913,8 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   }
   const root = await rootSnapOf($, env.root)
   await setFlow($, f => ({ ...f, fixDir: ready.fixDir }))
-  // A matriz (comandos, URL, células) fica no estado: a fase nunca mais relê o matriz.md.
-  await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], matrix, defects: all }))
-  await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null })
+  await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], defects: all }))
+  await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null, matrix })
   void refresh($, true).catch(() => {})
 }
 
@@ -989,13 +987,16 @@ async function startCell($: EngineInterface, env: QaEnv, runDir: string, matrix:
     $.ui.toast(`QA: não deu para abrir o navegador da célula ${cellId}; ela fica sem veredito.`)
     return null
   }
-  const ctx = guardCtxOf(env, matrix, runDir, session, cdpPort)
+  const ctx = guardCtxOf(env, matrix, { runDir, outDir }, session, cdpPort)
   if (!(await guardWritten($, env, guardStateTextOf('runner', null, ctx), { cell: cellId, session }))) return null
   const prompt = spawnPromptOf('runner', spawnInputOf({ env, matrix, cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '' }))
   const spawned = await spawnQa($, 'runner', prompt, `QA ${cellId}`)
   const item: QaCurrent = { item: cellId, role: 'runner', attempt, agentId: null, at: now, isEnded: false, cell: cellId, sha: '', port: 0, session, cdpPort, reasons: [] }
   return launchedOf($, env, id => guardStateTextOf('runner', id, ctx), spawned, item)
 }
+
+// O contexto da trava de um item da fase Executar: só a pasta da célula (ou da repetição) é gravável.
+const runCtxOf = (env: QaEnv, matrix: Matrix, runDir: string, c: QaCurrent): GuardCtx => guardCtxOf(env, matrix, { runDir, outDir: cellDirOf(runDir, c.cell, c.attempt) }, c.session, c.cdpPort)
 
 // O agente do item acabou: runner → observer na mesma sessão; observer → fecha a sessão e repete uma vez se falhou.
 async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent): Promise<QaCurrent | null> {
@@ -1006,7 +1007,7 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
   }
   switch (c.role) {
     case 'runner':
-      return launchObserver($, env, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort), matrix, cell, cellDirOf(runDir, c.cell, c.attempt), c)
+      return launchObserver($, env, runCtxOf(env, matrix, runDir, c), matrix, cell, cellDirOf(runDir, c.cell, c.attempt), c)
     case 'observer': {
       await closeSession($, env, c.session)
       const final = finalVerdictOf(cell, await cellVerdictOf($, runDir, c.cell, c.attempt))
@@ -1066,32 +1067,12 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
   const job = await read($, qaJob)
   if (job === null) return
   const flow = await read($, qaFlow)
-  const matrix = await jobMatrixOf($, flow, job)
-  if (matrix === null) {
-    await update($, qaJob, () => null)
-    await teardownJob($, env, flow, job)
-    $.ui.toast('QA: a matriz sumiu ou mudou no meio da execução; o trabalho parou.')
-    return
-  }
+  const matrix = job.matrix
   switch (job.phase) {
     case 'run':
       return stepRun($, env, flow.runDir, matrix, job)
     case 'fix':
       return stepFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix }, job).catch(err => lostFix($, env, err))
-    default:
-      throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
-  }
-}
-
-// Executar relê o matriz.md a cada passo; Corrigir usa a matriz guardada no clique (o corretor não a troca no meio).
-async function jobMatrixOf($: EngineInterface, flow: QaFlow, job: QaJob): Promise<Matrix | null> {
-  switch (job.phase) {
-    case 'run': {
-      const loaded = await loadMatrix($, flow.runDir)
-      return loaded.kind === 'ok' ? loaded.matrix : null
-    }
-    case 'fix':
-      return (await read($, qaFix))?.matrix ?? null
     default:
       throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
   }
@@ -1136,7 +1117,7 @@ async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matri
     case 'wait':
       return
     case 'adopt':
-      return adoptAgent($, env, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort), c, step.agentId)
+      return adoptAgent($, env, runCtxOf(env, matrix, runDir, c), c, step.agentId)
     case 'ended':
       if (c.agentId === null) await guardLive($)
       return setCurrent($, env, await advanceCell($, env, runDir, matrix, c))
@@ -1151,8 +1132,20 @@ type FixCtx = { env: QaEnv; runDir: string; fixDir: string; matrix: Matrix }
 type Target = { cell: Cell; defect: Defect }
 
 // O contexto da trava de um item da fase Corrigir: a origem é a do app da worktree, a worktree é a pasta do corretor e só a
-// pasta do defeito é gravável.
-const fixCtxOf = (f: FixCtx, c: QaCurrent): GuardCtx => fixGuardCtxOf(f.env, appMatrixOf(f.matrix, c.port), { runDir: f.runDir, defect: c.item, fixDir: f.fixDir }, c.session, c.cdpPort)
+// pasta do defeito (corretor) ou a do reteste da célula (runner e observer) é gravável.
+const fixCtxOf = (f: FixCtx, c: QaCurrent): GuardCtx => guardCtxOf(f.env, appMatrixOf(f.matrix, c.port), { runDir: f.runDir, outDir: fixOutOf(f.runDir, c), fixDir: f.fixDir }, c.session, c.cdpPort)
+
+function fixOutOf(runDir: string, c: QaCurrent): string {
+  switch (c.role) {
+    case 'fixer':
+      return fixOutDirOf(runDir, c.item)
+    case 'runner':
+    case 'observer':
+      return retestDirOf(runDir, c.item, c.attempt, c.cell)
+    default:
+      throw new Error('Caso não tratado: ' + String(c.role satisfies never))
+  }
+}
 
 async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: QaCurrent | null): Promise<void> {
   await teardownQa($, env, c)

@@ -18,6 +18,7 @@ import {
   wrapperOf,
 } from '../hooks/qa'
 import type { Matrix } from '../hooks/qa-evidence'
+import { writeCheckOf } from '../hooks/qa-guard'
 import { ARM_MS } from '../hooks/stale'
 
 // O fluxo de QA pelo engine: a faixa montada, o botão QA, o timer de 3 s e hooks do teste no lugar do engine para env,
@@ -518,7 +519,7 @@ describe('QA: fase Executar', () => {
     const { t } = await running($, on)
     const runDir = t.runDir()
     expect(types(t)).toEqual([QA_RUNNER])
-    expect(t.guard()).toMatchObject({ role: 'runner', agentId: null, ctx: { runDir, session: expect.stringContaining('c1'), cdpPort: 9333, origins: ['http://localhost:3000'], containers: ['api'], fixDir: '' } })
+    expect(t.guard()).toMatchObject({ role: 'runner', agentId: null, ctx: { runDir: `${runDir}/celulas/c1`, session: expect.stringContaining('c1'), cdpPort: 9333, origins: ['http://localhost:3000'], containers: ['api'], fixDir: '' } })
     const ab = t.log.runs.filter(a => a[0] === AB).map(a => a.slice(3).join(' '))
     expect(ab).toEqual(['open http://localhost:3000/entrar', expect.stringMatching(/^cookies set --curl .*\/auth\//), 'storage local set tok SEGREDO2', 'set viewport 1280 800', 'get cdp-url'])
     expect([...t.files.keys()].some(k => k.includes('.cookies-'))).toBe(false)
@@ -557,6 +558,7 @@ describe('QA: fase Executar', () => {
     expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER, QA_RUNNER])
     expect(t.dirs.has(`${runDir}/celulas/c1/r2`)).toBe(true)
     expect(t.guard().ctx.session).toContain('r2')
+    expect(t.guard().ctx.runDir).toBe(`${runDir}/celulas/c1/r2`)
     await finish('a3')
     await finish('a4', [`${runDir}/celulas/c1/r2/veredito.json`, verdictOf('c1', 'PASS')])
     await $.turn.start({ text: 'trabalhando', turnId: 'm1' })
@@ -570,6 +572,36 @@ describe('QA: fase Executar', () => {
     await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 'm1', reason: 'answer' })
     await tick(t)
     expect(t.log.submits.at(-1)).toContain(`${runDir}/relatorio.md`)
+  })
+
+  test('runner e observer gravam só na pasta da célula: a matriz e o veredito de outra célula, nunca (a execução só é lida)', async ($, on) => {
+    const { t } = await running($, on)
+    const runDir = t.runDir()
+    const canWrite = (path: string) => writeCheckOf(t.guard().role, path, t.guard().ctx, REPO)
+    for (const role of ['runner', 'observer']) {
+      expect(t.guard().role).toBe(role)
+      expect(t.guard().ctx.readDirs).toContain(runDir)
+      expect(canWrite(`${runDir}/celulas/c1/veredito.json`)).toBe('allow')
+      expect(canWrite(`${runDir}/matriz.md`)).toBe('deny')
+      expect(canWrite(`${runDir}/celulas/c2/veredito.json`)).toBe('deny')
+      await tick(t)
+      await ended($, `a${t.log.spawns.length}`)
+      await tick(t)
+    }
+  })
+
+  test('matriz reescrita ou apagada no meio da execução não vale: a trava segue a matriz lida no clique', async ($, on) => {
+    const { t, ui } = await running($, on)
+    const runDir = t.runDir()
+    t.files.set(`${runDir}/matriz.md`, mdOf({ ...MATRIX, baseUrl: 'http://127.0.0.1:2375', backend: { containers: ['postgres'] } }))
+    await tick(t)
+    await ended($, 'a1')
+    await tick(t)
+    expect(t.guard()).toMatchObject({ role: 'observer', ctx: { origins: ['http://localhost:3000'], containers: ['api'] } })
+    t.files.delete(`${runDir}/matriz.md`)
+    await tick(t)
+    expect(t.guard()).toMatchObject({ role: 'observer', agentId: 'a2', ctx: { containers: ['api'] } })
+    expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
   })
 
   test('adoção: lançamento sem agentId adota o agente vivo do tipo, que entra na trava e em qaGuarded', async ($, on) => {
@@ -1438,12 +1470,15 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.log.spawns[2]?.prompt).toContain('fix.json ausente ou inválido')
   })
 
-  test('o corretor só grava na pasta do defeito; a pasta da execução inteira só é lida', async ($, on) => {
+  test('o corretor só grava na pasta do defeito e o reteste só na pasta da célula dele; a pasta da execução inteira só é lida', async ($, on) => {
     const { t } = await fixing($, on)
     const fixer = JSON.parse(t.log.guards.find(g => g.includes('"role":"fixer"')) ?? '{}')
     expect(fixer.ctx.runDir).toBe(outOf(t))
     expect(fixer.ctx.readDirs).toContain(t.runDir())
     expect(t.dirs.has(outOf(t))).toBe(true)
+    await fixerEnds($, t)
+    expect(t.guard()).toMatchObject({ role: 'runner', ctx: { runDir: `${outOf(t)}/reteste-1/c1` } })
+    expect(t.guard().ctx.readDirs).toContain(t.runDir())
   })
 
   test('matriz e vereditos da execução reescritos no meio da fase não valem: tudo foi lido no clique', async ($, on) => {

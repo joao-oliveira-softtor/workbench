@@ -230,13 +230,15 @@ export async function prepareSession($: EngineInterface, env: QaEnv, matrix: Mat
   return null
 }
 
-export function guardCtxOf(env: QaEnv, matrix: Matrix, runDir: string, session: string, cdpPort: number | null, fixDir = ''): GuardCtx {
+// O agente grava só em `at.outDir`, a pasta de saída do passo (a da célula, a `r2/` da repetição, a do reteste ou, para o
+// corretor, a do defeito); a pasta da execução inteira (matriz, vereditos das outras células) só é lida.
+export function guardCtxOf(env: QaEnv, matrix: Matrix, at: { runDir: string; outDir: string; fixDir?: string }, session: string, cdpPort: number | null): GuardCtx {
   return {
     home: env.home,
     repoRoot: env.root,
-    fixDir,
-    runDir,
-    readDirs: [`${env.home}/.claude/skills/impeccable`],
+    fixDir: at.fixDir ?? '',
+    runDir: at.outDir,
+    readDirs: [`${env.home}/.claude/skills/impeccable`, at.runDir],
     agentBrowser: wrapperOf(env.qaRoot, 'ab'),
     impeccable: wrapperOf(env.qaRoot, 'imp'),
     session,
@@ -246,17 +248,10 @@ export function guardCtxOf(env: QaEnv, matrix: Matrix, runDir: string, session: 
   }
 }
 
-// Fase Corrigir: os agentes gravam só na pasta do defeito (`correcoes/<defeito>`, onde fica também o reteste); a pasta da
-// execução inteira (matriz, vereditos, resultado dos outros defeitos) só é lida.
-export function fixGuardCtxOf(env: QaEnv, matrix: Matrix, at: { runDir: string; defect: string; fixDir: string }, session: string, cdpPort: number | null): GuardCtx {
-  const ctx = guardCtxOf(env, matrix, fixOutDirOf(at.runDir, at.defect), session, cdpPort, at.fixDir)
-  return { ...ctx, readDirs: [...ctx.readDirs, at.runDir] }
-}
-
 // A validação da própria trava sobre um contexto de exemplo (o runner lendo a matriz; o corretor lendo um arquivo da worktree):
 // o motivo da recusa, null = aceita. O exemplo não toca o disco: cada caminho é o próprio caminho real e todo alvo é arquivo.
-export function guardRefusalOf(ctx: GuardCtx, role: QaRole = 'runner'): string | null {
-  const probe = { tool_name: 'Read', tool_input: { file_path: probeFileOf(role, ctx.runDir, ctx.fixDir) }, cwd: ctx.repoRoot, agent_id: '' }
+export function guardRefusalOf(ctx: GuardCtx, runDir: string, role: QaRole = 'runner'): string | null {
+  const probe = { tool_name: 'Read', tool_input: { file_path: probeFileOf(role, runDir, ctx.fixDir) }, cwd: ctx.repoRoot, agent_id: '' }
   const asIs = { realOf: (p: string) => p, isFile: () => true }
   const got = guardDecisionOf(role, probe, guardStateTextOf(role, null, ctx), asIs)
   return got.decision === 'allow' ? null : got.reason
@@ -440,7 +435,7 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   const made = await worktreeOf($, env.root, at.fixDir, branch)
   if (made !== null) return { error: made }
   const real = (await run($, ['realpath', at.fixDir]))?.trim() || at.fixDir
-  const refusal = guardRefusalOf(fixGuardCtxOf(env, matrix, { ...at, fixDir: real }, '', null), 'fixer')
+  const refusal = guardRefusalOf(guardCtxOf(env, matrix, { runDir: at.runDir, outDir: fixOutDirOf(at.runDir, at.defect), fixDir: real }, '', null), at.runDir, 'fixer')
   if (refusal !== null) return { error: `a trava recusaria o corretor na worktree ${real} (${refusal})` }
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }

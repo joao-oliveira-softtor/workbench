@@ -126,7 +126,7 @@ describe('qaLabelOf', () => {
     reasons: [],
     ...over,
   })
-  const job = (over: Partial<QaJob> = {}): QaJob => ({ phase: 'run', queue: ['c04', 'c05', 'c06', 'c07', 'c08'], total: 8, current: current(), ...over })
+  const job = (over: Partial<QaJob> = {}): QaJob => ({ phase: 'run', queue: ['c04', 'c05', 'c06', 'c07', 'c08'], total: 8, current: current(), matrix: matrixOf(), ...over })
 
   test('sem trabalho em curso, o rótulo é o da etapa', () => {
     expect(qaLabelOf(QA_START, null)).toBe('QA')

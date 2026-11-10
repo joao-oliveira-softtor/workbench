@@ -28,8 +28,9 @@ export type QaCurrent = {
   cdpPort: number | null
   reasons: string[] // fix: motivos de recusa das tentativas anteriores
 }
-// `queue` guarda o que ainda não começou (o item em curso já saiu dela); `total` conta todos.
-export type QaJob = { phase: 'run' | 'fix'; queue: string[]; total: number; current: QaCurrent | null }
+// `queue` guarda o que ainda não começou (o item em curso já saiu dela); `total` conta todos. `matrix`: a lida e conferida no
+// clique; os passos nunca relêem o matriz.md, que os agentes podem ler.
+export type QaJob = { phase: 'run' | 'fix'; queue: string[]; total: number; current: QaCurrent | null; matrix: Matrix }
 
 export const MAX_ATTEMPTS = 3
 export const AGENT_TIMEOUT_MS = 20 * 60_000

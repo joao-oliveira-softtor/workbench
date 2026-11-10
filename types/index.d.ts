@@ -103,8 +103,10 @@ declare module 'claude-code' {
       refining: boolean
       // QA: etapa do botão e as pastas; não zera no session.start.
       qaFlow: { step: 'plan' | 'login' | 'run' | 'fix'; runDir: string; fixDir: string }
-      // QA: o trabalho em curso (fila e item); não zera no session.start, é o que permite retomar.
-      // O contrato não importa nada: a forma repete a de `QaJob`/`QaCurrent` do hooks/qa.ts (o tsc confere as duas).
+      // QA: o trabalho em curso (fila, item e a matriz lida no clique: os passos não relêem o matriz.md); não zera no
+      // session.start, é o que permite retomar.
+      // O contrato não importa nada: a forma repete a de `QaJob`/`QaCurrent` do hooks/qa.ts e, em `matrix`, a de `Matrix` do
+      // hooks/qa-evidence.ts (o tsc confere).
       qaJob: {
         phase: 'run' | 'fix'
         queue: string[]
@@ -123,26 +125,6 @@ declare module 'claude-code' {
           cdpPort: number | null
           reasons: string[]
         } | null
-      } | null
-      // QA: todo agentId de QA já lançado; nunca diminui (o relatório deles é suprimido e nenhum é adotado de novo).
-      qaGuarded: string[]
-      // QA: HEAD e estado da árvore do app no começo do Executar.
-      qaRunBase: { head: string; isDirty: boolean } | null
-      // QA: o código do nome do arquivo da trava; criado uma vez, não zera no session.start (o agente lançado antes de um
-      // reload continua lendo o mesmo arquivo, e o stop e o fim da execução chegam nele).
-      qaGuardToken: string | null
-      // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
-      qaArmed: { at: number } | null
-      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o resumo (tamanho e hash, `statusSumOf`) do `git status` que o
-      // mod deixou na worktree, o HEAD do começo da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e o que o clique leu da execução (a
-      // matriz e a fila inteira de defeitos): a fase não relê o matriz.md. Não zera no session.start (é o que permite retomar).
-      // `matrix` repete a forma de `Matrix` do hooks/qa-evidence.ts (o tsc confere as duas).
-      qaFix: {
-        root: string
-        baseline: string
-        attemptSha: string
-        regression: string | null
-        pending: string[]
         matrix: {
           baseUrl: string
           loginRoute: string
@@ -169,6 +151,25 @@ declare module 'claude-code' {
           }[]
           cut: string[]
         }
+      } | null
+      // QA: todo agentId de QA já lançado; nunca diminui (o relatório deles é suprimido e nenhum é adotado de novo).
+      qaGuarded: string[]
+      // QA: HEAD e estado da árvore do app no começo do Executar.
+      qaRunBase: { head: string; isDirty: boolean } | null
+      // QA: o código do nome do arquivo da trava; criado uma vez, não zera no session.start (o agente lançado antes de um
+      // reload continua lendo o mesmo arquivo, e o stop e o fim da execução chegam nele).
+      qaGuardToken: string | null
+      // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
+      qaArmed: { at: number } | null
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o resumo (tamanho e hash, `statusSumOf`) do `git status` que o
+      // mod deixou na worktree, o HEAD do começo da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e a fila inteira de defeitos lida no clique
+      // (a matriz fica no `qaJob`). Não zera no session.start (é o que permite retomar).
+      qaFix: {
+        root: string
+        baseline: string
+        attemptSha: string
+        regression: string | null
+        pending: string[]
         defects: string[]
       } | null
     }
