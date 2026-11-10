@@ -444,7 +444,7 @@ export type Removal = { at: number; agentId: string | null; allowed: string[] }
 export type Listed = { id: string; type: string; status: string }
 export type RemovalStep = { step: 'wait' } | { step: 'adopt'; agentId: string } | { step: 'finish' }
 
-const ENDED = new Set(['completed', 'failed', 'killed', 'idle'])
+export const ENDED = new Set(['completed', 'failed', 'killed', 'idle'])
 
 // Ciclo de vida da remoção, sem timeout que solte a trava com o agente vivo (o maxTurns o limita).
 // `listed` é o `$.agent.list()` reduzido, ou null quando a consulta falhou.
