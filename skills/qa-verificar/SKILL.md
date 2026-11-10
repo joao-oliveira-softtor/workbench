@@ -45,7 +45,8 @@ abaixo basta.
    Registre a prova de todo critério atendido, em qualquer veredito.
 3. **Rede.** Um `expectedStatus` confere quando ALGUMA requisição com aquele caminho trouxe o status esperado. Vira defeito
    `rede` só quando nenhuma trouxe (`rule` = o status visto, em texto: `"500"`) ou quando a requisição não aconteceu
-   (`rule` = `"ausente"`). Qualquer 5xx do app também vira defeito `rede`. `where` = `MÉTODO caminho` (`POST /api/clientes`).
+   (`rule` = `"ausente"`). Qualquer 5xx do app também vira defeito `rede`. `where` = `MÉTODO caminho` (`POST /api/clientes`);
+   na requisição ausente, só o caminho (`/api/clientes`): a célula não diz o método, e o `where` entra na assinatura do defeito.
 4. **Console.** Cada mensagem de tipo `error` e cada item de `pageErrors` vira defeito `console`, com `where` =
    `console: <primeira linha da mensagem>`, SEM URL e sem nome de arquivo (mudam a cada build e fariam o mesmo defeito
    parecer novo). Aviso (`warning`) não é defeito.

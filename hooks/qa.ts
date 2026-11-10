@@ -202,7 +202,8 @@ export const statusSumOf = (status: string): string => `${status.length}:${hashO
 
 export const qaRootOf = (home: string, root: string): string => `${qaHomeOf(home)}/${projectSlugOf(root)}`
 
-// Chaves do `$.store` por repositório: a etapa do botão e o código do arquivo da trava sobrevivem a fechar o Claude Code.
+// Chave do `$.store` por repositório: a etapa do botão sobrevive a fechar o Claude Code (o código do arquivo da trava não: é um
+// por processo, no estado da sessão).
 export const qaFlowKeyOf = (root: string): string => `qa:flow:${projectSlugOf(root)}`
 
 const QA_STEPS: readonly unknown[] = ['plan', 'login', 'run', 'fix'] satisfies QaStep[]

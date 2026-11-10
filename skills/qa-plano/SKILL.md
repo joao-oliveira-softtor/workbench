@@ -59,8 +59,9 @@ por código: campo faltando ou com tipo errado torna a matriz inteira inválida.
    - `backend.containers`: nomes dos contêineres do backend (`docker-compose.yml`); `[]` se não há.
    Regras dos três comandos (o mod os roda sem shell; fora delas, a matriz inteira é recusada):
    - só letras, dígitos, espaço e `_ . : / = @ + , -`: nada de aspas, `&&`, `|`, `$`, `>` ou `cd`;
-   - o primeiro termo não pode ser `curl`, `wget`, um shell (`bash`, `sh`, `zsh`…), `sudo`, `ssh`, `scp`, `rsync`, `nc`, `rm`,
-     `mv`, `dd`, `chmod`, `chown`, `git`, `gh`, `eval`, `exec`, `env`, `xargs`, `nohup`, `kill`;
+   - o primeiro termo não pode ser `curl`, `wget`, `bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `sudo`, `su`, `doas`, `ssh`,
+     `scp`, `sftp`, `rsync`, `nc`, `ncat`, `netcat`, `telnet`, `rm`, `mv`, `dd`, `chmod`, `chown`, `git`, `gh`, `eval`, `exec`,
+     `env`, `xargs`, `nohup`, `setsid`, `kill`, `pkill`;
    - nada de `VARIAVEL=valor` antes do programa: a porta chega pela variável `QA_PORT` ou pelo texto `{QA_PORT}` num argumento;
    - script do projeto entra pelo gerenciador de pacotes (`npm run qa:start`), nunca por `bash script.sh`.
    Se o projeto precisa de mais, aponte um script do projeto pelo gerenciador ou explique em `cut`.
