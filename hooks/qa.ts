@@ -194,8 +194,6 @@ export const qaRootOf = (home: string, root: string): string => `${qaHomeOf(home
 
 // Chaves do `$.store` por repositório: a etapa do botão e o código do arquivo da trava sobrevivem a fechar o Claude Code.
 export const qaFlowKeyOf = (root: string): string => `qa:flow:${projectSlugOf(root)}`
-export const qaTokenKeyOf = (root: string): string => `qa:guard:${projectSlugOf(root)}`
-export const isGuardToken = (raw: unknown): raw is string => typeof raw === 'string' && /^[a-z0-9]{1,16}$/.test(raw)
 
 const QA_STEPS: readonly unknown[] = ['plan', 'login', 'run', 'fix'] satisfies QaStep[]
 const isQaStep = (raw: unknown): raw is QaStep => QA_STEPS.includes(raw)

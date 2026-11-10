@@ -46,14 +46,12 @@ import {
   guardStateTextOf,
   handbackAgentOf,
   hookCommandOf,
-  isGuardToken,
   nextFixOf,
   nextRunOf,
   qaFlowKeyOf,
   qaLabelOf,
   qaLoginPromptOf,
   qaPlanPromptOf,
-  qaTokenKeyOf,
   retestDirOf,
   runDirOf,
   runDonePromptOf,
@@ -1478,14 +1476,11 @@ async function drainQa($: EngineInterface): Promise<void> {
 }
 
 // O código do arquivo da trava fica no estado, criado uma vez: um reload não troca o arquivo que os agentes já lançados leem.
-// Também fica no `$.store` deste repositório: fechar e reabrir o Claude Code reaproveita o arquivo, sem deixar guard-*.json velhos.
-async function guardTokenOf($: EngineInterface, root: string): Promise<string> {
-  const key = qaTokenKeyOf(root)
-  const stored = await settle(() => $.store.get(key))
-  const fresh = stored.ok && isGuardToken(stored.value) ? stored.value : Math.random().toString(36).slice(2, 10)
-  const token = (await update($, qaGuardToken, cur => cur ?? fresh)) ?? fresh
-  await settle(() => $.store.set(key, token))
-  return token
+// Um código por processo, de propósito: duas sessões abertas no mesmo repositório não podem dividir o arquivo (a segunda, ao
+// subir, gravaria `{}` por cima da trava de um agente que a primeira tem rodando). Os arquivos de processos antigos ficam com `{}`.
+async function guardTokenOf($: EngineInterface): Promise<string> {
+  const fresh = Math.random().toString(36).slice(2, 10)
+  return (await update($, qaGuardToken, cur => cur ?? fresh)) ?? fresh
 }
 
 // Toda mudança da etapa vai também ao `$.store` deste repositório: o `$.state` não sobrevive a fechar o Claude Code.
@@ -1621,7 +1616,7 @@ export const register: Register = on => {
     qaApp = null
     await update($, qaArmed, () => null)
     // Cada item num settle: o QA que falha fica desligado com o motivo, sem derrubar o painel.
-    const env = await settle(async () => qaEnvOf($, root => guardTokenOf($, root)))
+    const env = await settle(async () => qaEnvOf($, () => guardTokenOf($)))
     if (env.ok && env.value !== null) {
       const ready = env.value
       qaEnv = ready

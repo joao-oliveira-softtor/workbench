@@ -14,7 +14,6 @@ import {
   qaFlowKeyOf,
   qaLoginPromptOf,
   qaRootOf,
-  qaTokenKeyOf,
   toolsDirOf,
   wrapperOf,
 } from '../hooks/qa'
@@ -821,7 +820,6 @@ async function fixerEnds($: Engine, t: T, fix: string | null = FIX_OK, status = 
 
 // Fechar e reabrir o Claude Code: o `$.state` volta ao inicial, o `$.store` fica e o session.start roda de novo.
 const FLOW_KEY = qaFlowKeyOf(REPO)
-const TOKEN_KEY = qaTokenKeyOf(REPO)
 const RUN_DIR = `${QA_ROOT}/20261110-1200`
 async function reopen($: Engine, t: T) {
   t.proc.isNew = true
@@ -882,17 +880,13 @@ describe('QA: fechar e reabrir', () => {
     expect(await label(await mount($))).toBe('QA: Executar')
   })
 
-  test('o código do arquivo da trava é reaproveitado depois de reabrir; o guardado inválido é trocado', async ($, on) => {
+  test('cada processo tem o seu arquivo da trava: reabrir troca o código (duas sessões no mesmo repositório não dividem a trava)', async ($, on) => {
     const t = await boot($, on)
     await reopen($, t)
     const [first, second] = guardFiles(t)
     expect(first).toMatch(/^[a-z0-9]+$/)
-    expect(second).toBe(first)
-    expect(t.store.get(TOKEN_KEY)).toBe(first)
-    t.store.set(TOKEN_KEY, '../x')
-    await reopen($, t)
-    expect(guardFiles(t)[2]).toMatch(/^[a-z0-9]+$/)
-    expect(t.store.get(TOKEN_KEY)).toBe(guardFiles(t)[2])
+    expect(second).toMatch(/^[a-z0-9]+$/)
+    expect(second).not.toBe(first)
   })
 })
 
