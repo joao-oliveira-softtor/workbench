@@ -1145,6 +1145,16 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(r.t.log.spawns).toEqual([])
   })
 
+  test('pasta da worktree que existe sem o .git: o git com teto falha em vez de subir até a raiz, e o clique avisa', async ($, on) => {
+    const r = await toFix($, on, { run: a => (a[0] === 'env' && a.includes('--abbrev-ref') ? { exitCode: 128, stdout: '' } : undefined) })
+    r.t.dirs.add(wtOf(r.t))
+    await click(r.t, r.ui)
+    await click(r.t, r.ui)
+    expect(r.t.log.runs).toContainEqual(gitIn(r.t, 'rev-parse', '--abbrev-ref', 'HEAD'))
+    expect(r.t.log.toasts.at(-1)).toContain('já existe e não é a worktree')
+    expect(r.t.log.spawns).toEqual([])
+  })
+
   test('cópia do .env que falha: avisa e não lança nada', async ($, on) => {
     const { t } = await fixing($, on, { run: a => (a[0] === 'cp' ? { exitCode: 1, stdout: '' } : undefined) })
     expect(t.log.toasts.at(-1)).toContain('.env da worktree')
