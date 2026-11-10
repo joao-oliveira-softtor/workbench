@@ -1294,3 +1294,79 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(resultOf(t)).toMatchObject({ status: 'corrigido', regressionTest: 'e2e/qa-c1.d1.spec.ts', pending: ['teste de regressão não rodado'] })
   })
 })
+
+// O remover do botão "Aceitar remoções": travado pelo mesmo hook de comando dos agentes de QA, com o papel `remover` e um
+// arquivo de contexto próprio com as linhas aprovadas. Uma worktree sem diretório basta: a regra a remove sem o Haiku.
+describe('remoção pelo botão: a trava do remover', () => {
+  const PANEL = {
+    plugin: 'workbench',
+    component: 'Pane',
+    requestId: 'workbench',
+    surface: 'terminal',
+    props: { title: 'workbench', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  } as const
+  const PORCELAIN = [`worktree ${REPO}`, `HEAD ${'a'.repeat(40)}`, 'branch refs/heads/main', '', `worktree ${REPO}/.worktrees/velha`, `HEAD ${'b'.repeat(40)}`, 'branch refs/heads/velha', 'prunable gitdir file points to non-existent location', ''].join('\n')
+  const collectRun = (a: readonly string[]): Run | undefined => {
+    const line = a.join(' ')
+    if (line === 'git rev-parse --short origin/main') return { exitCode: 0, stdout: 'abc1234\n' }
+    if (line === 'git worktree list --porcelain') return { exitCode: 0, stdout: PORCELAIN }
+    if (a[0] === 'git' && (a[1] === 'for-each-ref' || a[1] === 'ls-tree')) return { exitCode: 0, stdout: '' }
+    if (a[0] === 'git' && a[1] === 'rev-list') return { exitCode: 0, stdout: '0\t0\n' }
+    if (a[0] === 'gh') return { exitCode: 0, stdout: '[]' }
+    return undefined
+  }
+  const isRemoverFile = (path: string) => /\/remover-[a-z0-9]+\.json$/.test(path)
+
+  // Os dois cliques de "Aceitar remoções" e o tique que lança o remover. `writes`: cada gravação do contexto do remover, com
+  // quantos agentes já tinham sido lançados naquela hora.
+  async function accepting($: Engine, on: On, fail = false) {
+    const writes: { path: string; text: string; spawned: number }[] = []
+    const seen = { spawned: () => 0 }
+    const t = await boot($, on, {
+      run: collectRun,
+      failWrite: (path, text) => {
+        if (!isRemoverFile(path)) return false
+        writes.push({ path, text, spawned: seen.spawned() })
+        return fail && text !== '{}'
+      },
+    })
+    seen.spawned = () => t.log.spawns.length
+    await tick(t)
+    const ui = await $.ui.mount(PANEL)
+    await ui.press({ key: 'accept' })
+    await ui.press({ key: 'accept' })
+    await tick(t)
+    return { t, writes }
+  }
+
+  test('o tipo remover leva o hook de comando com o papel remover e o arquivo próprio, só no Bash', async ($, on) => {
+    const t = await boot($, on)
+    const remover = t.log.agents.find(a => a.name === 'remover')
+    expect(remover?.command).toContain('qa-hook.mjs\\" remover \\"')
+    expect(remover?.command).toContain(`${QA_ROOT}/remover-`)
+    expect(JSON.parse(remover?.command ?? 'null')).toMatchObject({ PreToolUse: [{ matcher: 'Bash' }] })
+  })
+
+  test('o contexto com exatamente as linhas aprovadas é gravado antes do lançamento, e volta a {} no fim', async ($, on) => {
+    const { t, writes } = await accepting($, on)
+    expect(writes[0]?.text).toBe('{}')
+    const spawn = t.log.spawns.at(-1)
+    expect(spawn?.type).toBe('workbench:remover')
+    const lines = (spawn?.prompt ?? '').split('\n').slice(1)
+    expect(lines).toEqual([expect.stringContaining('worktree prune')])
+    const before = writes.find(w => w.text !== '{}')
+    expect(before?.spawned).toBe(0)
+    expect(JSON.parse(before?.text ?? '{}')).toEqual({ role: 'remover', agentId: null, lines })
+    await tick(t)
+    await ended($, lastId(t))
+    expect(writes.at(-1)?.text).toBe('{}')
+    expect(writes.at(-1)?.path).toBe(before?.path)
+  })
+
+  test('falha ao gravar o contexto: o remover não é lançado e o aviso sai', async ($, on) => {
+    const { t, writes } = await accepting($, on, true)
+    expect(writes.some(w => w.text !== '{}')).toBe(true)
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain('trava do remover')
+  })
+})

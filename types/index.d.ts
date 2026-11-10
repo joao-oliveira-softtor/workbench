@@ -92,8 +92,8 @@ declare module 'claude-code' {
       suggesting: boolean
       // Confirmação pendente de "Aceitar remoções": quando foi armada e a lista que o usuário viu (linhas juntas por \n).
       armed: { at: number; key: string } | null
-      // Remoção em andamento (botão em "Removendo…") e as únicas linhas de Bash que o subagente remover pode rodar.
-      // agentId é preenchido depois do spawn.
+      // Remoção em andamento (botão em "Removendo…") e as linhas aprovadas, gravadas também no arquivo da trava do remover
+      // (lista não vazia = o spawn pode ter nascido). agentId é preenchido depois do spawn.
       removal: { at: number; agentId: string | null; allowed: string[] } | null
       // Etapa de "Compactar e continuar" que o botão mostra; null = parado. A trava de verdade é variável do módulo.
       compacting: 'queued' | 'analyzing' | 'compacting' | null

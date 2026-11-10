@@ -213,6 +213,7 @@ export const wrapperOf = (qaRoot: string, name: 'ab' | 'imp'): string => `${qaRo
 export const policyFileOf = (qaRoot: string): string => `${qaRoot}/bin/policy.json`
 export const configFileOf = (qaRoot: string): string => `${qaRoot}/bin/agent-browser.json`
 export const guardFileOf = (qaRoot: string, token: string): string => `${qaRoot}/guard-${token}.json`
+export const removerFileOf = (qaRoot: string, token: string): string => `${qaRoot}/remover-${token}.json`
 
 // ---- Ferramentas fixadas, política e scripts ----
 
@@ -264,7 +265,7 @@ export function impWrapperTextOf(o: { bin: string }): string {
 export const guardStateTextOf = (role: QaRole, agentId: string | null, ctx: GuardCtx): string => JSON.stringify({ role, agentId, ctx })
 
 // O comando fica entre aspas duplas no shell: aspas, `$`, crase, `\` e quebra de linha não entram.
-export function hookCommandOf(pluginRoot: string, role: QaRole, guardFile: string): string | null {
+export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover', guardFile: string): string | null {
   if ([pluginRoot, guardFile].some(p => /["$`\\\r\n]/.test(p))) return null
   // O `|| exit 2` é o que barra a ferramenta quando o node falha.
   return `node --no-warnings "${pluginRoot}/hooks/qa-hook.mjs" ${role} "${guardFile}" || exit 2`

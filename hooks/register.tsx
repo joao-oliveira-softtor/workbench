@@ -45,6 +45,7 @@ import {
   fixOutDirOf,
   guardStateTextOf,
   handbackAgentOf,
+  hookCommandOf,
   nextFixOf,
   nextRunOf,
   qaLabelOf,
@@ -63,6 +64,7 @@ import {
 import type { QaCurrent, QaFlow, QaJob, QaStep, SpawnInput } from './qa'
 import { finalVerdictOf, retestCellsOf } from './qa-evidence'
 import type { Cell, Defect, FixStatus, Matrix } from './qa-evidence'
+import { removerStateTextOf } from './qa-guard'
 import type { GuardCtx } from './qa-guard'
 import {
   LostWorktree,
@@ -134,7 +136,6 @@ import {
   mergeKnown,
   parseVerdicts,
   persistOf,
-  removalCheckOf,
   removalLinesOf,
   removalPromptOf,
   removalStepOf,
@@ -411,21 +412,16 @@ async function drainSizes($: EngineInterface): Promise<void> {
   }
 }
 
-function commandOf(input: unknown): string | null {
-  return typeof input === 'object' && input !== null && 'command' in input && typeof input.command === 'string' ? input.command : null
-}
-
 async function agentsOf($: EngineInterface): Promise<Listed[] | null> {
   const listed = await settle(() => $.agent.list())
   return listed.ok ? listed.value.map(a => ({ id: a.id, type: a.type, status: a.status })) : null
 }
 
-// O agente é o remover? `whenUnlisted` é a resposta quando ele não está na lista (ou a consulta falhou): o tool.check
-// falha fechado (true); o turn.complete não encerra nada por um agente que não conseguiu identificar (false).
-async function isListedRemover($: EngineInterface, agentId: string, whenUnlisted: boolean): Promise<boolean> {
+// O agente é o remover? Fora da lista (ou com a consulta falhando) não é: o turn.complete não encerra nada por um agente
+// que não conseguiu identificar.
+async function isListedRemover($: EngineInterface, agentId: string): Promise<boolean> {
   const listed = await agentsOf($)
-  const found = listed?.find(a => a.id === agentId)
-  return found === undefined ? whenUnlisted : found.type === REMOVER_AGENT
+  return listed?.find(a => a.id === agentId)?.type === REMOVER_AGENT
 }
 
 function acceptLabel(isRemoving: boolean, isArmed: boolean, count: number): string {
@@ -469,7 +465,15 @@ async function pressAccept($: EngineInterface): Promise<void> {
 
 type Launch = { kind: 'started' } | { kind: 'retry' } | { kind: 'abort'; text: string } | { kind: 'unsure'; text: string }
 
-// Recoleta de verdade, confere que a lista é a confirmada, grava a allowlist ANTES do spawn e só então chama o Haiku.
+// Grava o contexto que o hook do tipo remover lê, com as linhas aprovadas; false = não gravou, e nada pode ser lançado (o hook
+// negaria tudo do mesmo jeito).
+async function isRemoverArmed($: EngineInterface, lines: readonly string[]): Promise<boolean> {
+  const env = qaEnv
+  if (env === null || !(await mkdirs($, env.qaRoot))) return false
+  return (await settle(() => $.fs.write(env.removerFile, removerStateTextOf(lines)))).ok
+}
+
+// Recoleta de verdade, confere que a lista é a confirmada, grava a trava do remover ANTES do spawn e só então chama o Haiku.
 async function launchRemoval($: EngineInterface, job: { key: string }): Promise<Launch> {
   const startedAt = await $.clock.now()
   await refresh($, true)
@@ -483,6 +487,7 @@ async function launchRemoval($: EngineInterface, job: { key: string }): Promise<
   if (plan.lines.length === 0 || plan.lines.join('\n') !== job.key) {
     return { kind: 'abort', text: 'A lista mudou depois da confirmação: confira e aceite de novo.' }
   }
+  if (!(await isRemoverArmed($, plan.lines))) return { kind: 'abort', text: 'Não deu para gravar a trava do remover: nada foi removido.' }
   await update($, removal, cur => (cur === null ? null : { ...cur, allowed: plan.lines }))
   $.ui.toast(`Haiku removendo ${plan.count} worktrees…`)
   const spawned = await settle(() =>
@@ -497,10 +502,20 @@ async function launchRemoval($: EngineInterface, job: { key: string }): Promise<
   return { kind: 'started' }
 }
 
+// A remoção acabou (ou não começou): sai do estado e a trava do remover volta a `{}`. A gravação que falha não deixa a
+// lista valendo: o arquivo é apagado (o hook nega quando ele não existe).
+async function clearRemoval($: EngineInterface): Promise<void> {
+  await update($, removal, () => null)
+  const env = qaEnv
+  if (env === null) return
+  const wrote = await settle(() => $.fs.write(env.removerFile, '{}'))
+  if (!wrote.ok) await settle(() => $.process.run(['rm', '-f', env.removerFile]))
+}
+
 // Idempotente: o turn.complete e o drainRemove podem chegar os dois.
 async function finishRemoval($: EngineInterface, answer: string | null): Promise<void> {
   if ((await read($, removal)) === null) return
-  await update($, removal, () => null)
+  await clearRemoval($)
   const first = answer?.trim().split('\n')[0] ?? ''
   $.ui.toast(`Remoção encerrada: ${first.slice(0, 160) || 'sem resposta do remover'}`)
   await refresh($, true)
@@ -509,17 +524,17 @@ async function finishRemoval($: EngineInterface, answer: string | null): Promise
 async function startRemoval($: EngineInterface, job: { key: string; tries: number }): Promise<void> {
   if ((await read($, removal)) !== null) return
   const now = await $.clock.now()
-  // `allowed: []` nega todo Bash de subagente enquanto a recoleta roda e mostra "Removendo…" desde já.
+  // `allowed: []` (nada lançado ainda) mostra "Removendo…" desde já; a trava do remover segue em `{}` até a lista ser gravada.
   await update($, removal, () => ({ at: now, agentId: null, allowed: [] }))
   const run = await settle(() => launchRemoval($, job))
   if (!run.ok) {
-    // Só zera se a allowlist ainda não foi gravada; depois disso o spawn pode ter nascido.
+    // Só zera se a lista ainda não foi gravada; depois disso o spawn pode ter nascido.
     const cur = await read($, removal)
     if (cur !== null && cur.allowed.length > 0) {
       $.ui.toast(`Remoção interrompida por erro (${run.error.slice(0, 80)}); aguardando o agente.`)
       return
     }
-    await update($, removal, () => null)
+    await clearRemoval($)
     $.ui.toast(`Remoção não iniciou: ${run.error.slice(0, 120)}`)
     return
   }
@@ -531,11 +546,11 @@ async function startRemoval($: EngineInterface, job: { key: string; tries: numbe
       $.ui.toast(result.text)
       return
     case 'abort':
-      await update($, removal, () => null)
+      await clearRemoval($)
       $.ui.toast(result.text)
       return
     case 'retry':
-      await update($, removal, () => null)
+      await clearRemoval($)
       if (job.tries + 1 < MAX_TRIES) removeQueued = { key: job.key, tries: job.tries + 1 }
       else $.ui.toast('Coleta em andamento, nada foi removido: aceite de novo.')
       return
@@ -1536,7 +1551,7 @@ export const register: Register = on => {
     $.ui.status(undefined)
     // Um reload no meio de uma consulta ao Haiku não deixa a flag presa.
     await update($, suggesting, () => false)
-    // Só `armed` zera: `removal` NÃO, para a allowlist continuar valendo se um remover ainda roda depois do reload.
+    // Só `armed` zera: `removal` NÃO, para a trava do remover continuar valendo se ele ainda roda depois do reload.
     await update($, armed, () => null)
     // Reload no meio não deixa a compactação presa na fila nem o botão travado.
     compactPhase = 'idle'
@@ -1574,18 +1589,26 @@ export const register: Register = on => {
       description: 'Sugere o modelo (haiku, sonnet ou opus) para uma tarefa. `/route auto on|off` liga ou desliga a delegação automática por modelo.',
       argumentHint: '<tarefa> | auto on|off',
     })
+    // A trava do remover é o hook de comando da trava do QA, com o papel `remover` (os hooks do mod, como o tool.check, são
+    // pulados para agente lançado pelo `$.agent.spawn`). Sem o caminho do arquivo ou com o comando recusado, o tipo nem é
+    // registrado: o lançamento falha em vez de rodar sem trava. Sem remoção em curso, a trava fica em `{}`.
+    const removerHook = qaEnv === null ? null : hookCommandOf($.plugin.root, 'remover', qaEnv.removerFile)
+    if ((await read($, removal)) === null) await settle(() => clearRemoval($))
     // Falha aqui não derruba o painel: o botão só recusa, no spawn, com o motivo.
-    await settle(() =>
-      $.agent.register({
-        name: 'remover',
-        description: 'Roda a remoção de worktrees já aprovada no painel do workbench, só as linhas recebidas.',
-        prompt: REMOVER_PROMPT,
-        tools: ['Bash'],
-        model: 'haiku',
-        maxTurns: 200,
-        omitClaudeMd: true,
-      }),
-    )
+    if (removerHook !== null) {
+      await settle(() =>
+        $.agent.register({
+          name: 'remover',
+          description: 'Roda a remoção de worktrees já aprovada no painel do workbench, só as linhas recebidas.',
+          prompt: REMOVER_PROMPT,
+          tools: ['Bash'],
+          hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: removerHook }] }] },
+          model: 'haiku',
+          maxTurns: 200,
+          omitClaudeMd: true,
+        }),
+      )
+    }
     $.clock.every(REFRESH_MS, () => {
       void refresh($).catch(() => {})
     })
@@ -1692,24 +1715,6 @@ export const register: Register = on => {
   })
 
 
-  // Portão do Bash do remover: com uma remoção em curso, só a linha exata da allowlist roda (e nunca o que o engine já negou).
-  // Com o agentId conhecido compara o id; só na janela em que ele ainda é null consulta a lista, e agente não listado conta
-  // como remover (falha fechado).
-  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
-    const core = await next(e)
-    const current = await read($, removal)
-    if (current === null || e.agentId === undefined) return core
-    const isRemover = current.agentId === null ? await isListedRemover($, e.agentId, true) : e.agentId === current.agentId
-    if (!isRemover) return core
-    const decision = removalCheckOf(current.allowed, commandOf(e.input), core.decision)
-    return { decision, reason: decision === 'allow' ? 'linha aprovada no painel do workbench' : 'fora da lista de remoção aprovada no painel' }
-  }).catch(async ($, e, next) => {
-    // Erro no hook nunca abre a trava; e fora do remover (ou fora de uma remoção) não bloqueia nada.
-    const current = await read($, removal)
-    const isGuarded = current !== null && e.agentId !== undefined && (current.agentId === null || e.agentId === current.agentId)
-    return isGuarded ? { decision: 'deny' as const, reason: 'workbench: erro ao conferir a lista de remoção' } : next(e)
-  })
-
   // Só o loop principal conta (subagentes e a fork da compactação trazem agentId): a compactação espera a sessão parar.
   on('turn.start', async (_$, e, next) => {
     if (e.agentId === undefined) {
@@ -1729,7 +1734,7 @@ export const register: Register = on => {
     }
     const current = e.agentId === undefined ? null : await read($, removal)
     if (current !== null && e.agentId !== undefined) {
-      const isRemover = current.agentId === null ? await isListedRemover($, e.agentId, false) : e.agentId === current.agentId
+      const isRemover = current.agentId === null ? await isListedRemover($, e.agentId) : e.agentId === current.agentId
       if (isRemover) await settle(() => finishRemoval($, e.answer))
     }
     return next(e)

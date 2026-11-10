@@ -24,7 +24,6 @@ import {
   parseVerdicts,
   persistOf,
   removableCount,
-  removalCheckOf,
   removalLinesOf,
   removalPromptOf,
   removalStepOf,
@@ -570,17 +569,6 @@ describe('remoção pelo botão', () => {
   test('nenhuma linha devolvida contém --force', async () => {
     const withModule = row({ path: '/repo/.worktrees/m', pr: merged, submodules: 'clean', lastActivityAt: NOW - 2 * DAY })
     expect(plan([withModule, done]).lines.every(line => !line.includes('--force'))).toBe(true)
-  })
-
-  test('o tool.check só libera a linha exata da lista, e nunca o que o engine já negou', async () => {
-    const allowed = ["git -C '/repo' worktree remove '/repo/.worktrees/a'", "git -C '/repo' worktree prune"]
-    expect(removalCheckOf(allowed, allowed[0] ?? '', 'ask')).toBe('allow')
-    expect(removalCheckOf(allowed, `  ${allowed[1]}\n`, 'allow')).toBe('allow')
-    expect(removalCheckOf(allowed, allowed[0] ?? '', 'deny')).toBe('deny')
-    expect(removalCheckOf(allowed, "git -C '/repo' worktree remove '/outro'", 'ask')).toBe('deny')
-    expect(removalCheckOf(allowed, `${allowed[0]} && rm -rf /`, 'ask')).toBe('deny')
-    expect(removalCheckOf(allowed, null, 'ask')).toBe('deny')
-    expect(removalCheckOf([], allowed[0] ?? '', 'ask')).toBe('deny')
   })
 
   test('o prompt do spawn leva todas as linhas, na ordem', async () => {

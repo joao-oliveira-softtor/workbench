@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bashCheckOf, guardDecisionOf, readCheckOf, writeCheckOf } from '../hooks/qa-guard'
+import { bashCheckOf, guardDecisionOf, readCheckOf, removerStateTextOf, writeCheckOf } from '../hooks/qa-guard'
 import type { FsView, GuardCtx, QaRole } from '../hooks/qa-guard'
 
 const ROLES: QaRole[] = ['runner', 'observer', 'fixer']
@@ -1227,5 +1227,52 @@ describe('rodada 5: o caminho real decide junto com o pedido', () => {
     expect(run_('Bash', { command: `grep -n x ${FIX}/src/a.ts` })).toBe('allow')
     expect(run_('Bash', { command: `grep -n -e "/api" ${FIX}/src/a.ts` })).toBe('allow')
     expect(run_('Bash', { command: `rg -n x ${FIX}/src` })).toBe('allow')
+  })
+})
+
+// O remover (botão "Aceitar remoções"): o hook roda com o papel `remover` e só libera a linha exata da lista aprovada.
+describe('guardDecisionOf: papel remover', () => {
+  const LINES = ["git -C '/repo' worktree remove '/repo/.worktrees/a'", "git -C '/repo' branch -D 'fix/a'", "git -C '/repo' worktree prune"]
+  const ctx = removerStateTextOf(LINES)
+  const inputOf = (tool_name: string, tool_input: unknown, agent_id = 'r1') => ({ agent_id, agent_type: 'workbench:remover', cwd: '/repo', tool_name, tool_input })
+  const remover = (input: unknown, text: string | null = ctx) => guardDecisionOf('remover', input, text, SAME_FS).decision
+
+  test('libera cada linha da lista, também com espaço nas pontas', () => {
+    for (const line of LINES) expect(remover(inputOf('Bash', { command: line }))).toBe('allow')
+    expect(remover(inputOf('Bash', { command: `  ${LINES[2]}\n` }))).toBe('allow')
+  })
+
+  test('nega espaço extra no meio, sufixo encadeado, outra linha e Bash sem comando em texto', () => {
+    expect(remover(inputOf('Bash', { command: "git -C '/repo'  worktree prune" }))).toBe('deny')
+    expect(remover(inputOf('Bash', { command: `${LINES[2]} && rm -rf /` }))).toBe('deny')
+    expect(remover(inputOf('Bash', { command: "git -C '/repo' worktree remove '/repo/.worktrees/b'" }))).toBe('deny')
+    expect(remover(inputOf('Bash', { command: 7 }))).toBe('deny')
+    expect(remover(inputOf('Bash', null))).toBe('deny')
+  })
+
+  test('nega qualquer outra ferramenta, mesmo com a linha aprovada', () => {
+    expect(remover(inputOf('Write', { file_path: '/repo/x', command: LINES[2] }))).toBe('deny')
+    expect(remover(inputOf('Read', { file_path: '/repo/x' }))).toBe('deny')
+  })
+
+  test('com id no contexto, nega outro agente', () => {
+    const withId = JSON.stringify({ role: 'remover', agentId: 'r1', lines: LINES })
+    expect(remover(inputOf('Bash', { command: LINES[2] }), withId)).toBe('allow')
+    expect(remover(inputOf('Bash', { command: LINES[2] }, 'r2'), withId)).toBe('deny')
+  })
+
+  test('nega contexto ausente, {}, inválido, de outro papel ou com a lista vazia', () => {
+    const bash = inputOf('Bash', { command: LINES[2] })
+    expect(remover(bash, null)).toBe('deny')
+    expect(remover(bash, '{}')).toBe('deny')
+    expect(remover(bash, '{')).toBe('deny')
+    expect(remover(bash, JSON.stringify({ role: 'fixer', agentId: null, lines: LINES }))).toBe('deny')
+    expect(remover(bash, JSON.stringify({ role: 'remover', agentId: 7, lines: LINES }))).toBe('deny')
+    expect(remover(bash, JSON.stringify({ role: 'remover', agentId: null, lines: [LINES[2], 1] }))).toBe('deny')
+    expect(remover(bash, removerStateTextOf([]))).toBe('deny')
+  })
+
+  test('o contexto de um agente de QA não serve ao remover, e o do remover não serve a um agente de QA', () => {
+    expect(guardDecisionOf('runner', inputOf('Bash', { command: LINES[2] }), ctx, SAME_FS).decision).toBe('deny')
   })
 })

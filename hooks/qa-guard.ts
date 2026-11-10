@@ -616,14 +616,17 @@ function ctxOf(raw: unknown): GuardCtx | null {
 
 type GuardState = { role: QaRole; agentId: string | null; ctx: GuardCtx }
 
-function stateOf(text: string | null): GuardState | null {
-  if (text === null) return null
-  let raw: unknown
+const jsonOf = (text: string): unknown => {
   try {
-    raw = JSON.parse(text)
+    return JSON.parse(text)
   } catch {
     return null
   }
+}
+
+function stateOf(text: string | null): GuardState | null {
+  if (text === null) return null
+  const raw = jsonOf(text)
   if (!isRecord(raw) || !isRole(raw['role'])) return null
   const agentId = raw['agentId']
   const ctx = ctxOf(raw['ctx'])
@@ -668,20 +671,48 @@ function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unkn
   }
 }
 
+// ---- O remover do botão "Aceitar remoções": só a linha exata da lista aprovada ----
+
+// As linhas vêm de `removalLinesOf` (nunca do texto do modelo); o mod grava o contexto antes de lançar o remover e `{}` no fim.
+export const removerStateTextOf = (lines: readonly string[]): string => JSON.stringify({ role: 'remover', agentId: null, lines })
+
+function removerStateOf(text: string | null): { agentId: string | null; lines: string[] } | null {
+  const raw = text === null ? null : jsonOf(text)
+  if (!isRecord(raw) || raw['role'] !== 'remover' || !isStrings(raw['lines']) || raw['lines'].length === 0) return null
+  const agentId = raw['agentId']
+  return agentId === null || typeof agentId === 'string' ? { agentId, lines: raw['lines'] } : null
+}
+
+// Bash com o comando igual (depois do `trim`) a uma das linhas, e o id do contexto quando ele tem um; o resto é negado.
+function removerDecisionOf(input: unknown, stateText: string | null): Decision {
+  const state = removerStateOf(stateText)
+  if (state === null) return deny('lista de remoção ausente ou inválida')
+  if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
+  const { tool_name: tool, tool_input: toolInput, agent_id: agentId } = input
+  if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
+  const command = tool === 'Bash' && isRecord(toolInput) ? toolInput['command'] : null
+  if (typeof command !== 'string' || !state.lines.includes(command.trim())) return deny('fora da lista de remoção aprovada no painel')
+  return { decision: 'allow', reason: 'linha aprovada no painel do workbench' }
+}
+
+function qaDecisionOf(role: string, input: unknown, stateText: string | null, fs: FsView): Decision {
+  if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
+  const state = stateOf(stateText)
+  if (state === null) return deny('contexto de QA ausente ou inválido')
+  if (state.role !== role) return deny('o papel do arquivo de contexto é outro: agente fora de vez')
+  if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
+  const { tool_name: tool, tool_input: toolInput, cwd, agent_id: agentId } = input
+  if (typeof tool !== 'string' || !isRecord(toolInput) || typeof cwd !== 'string' || !cwd.startsWith('/')) {
+    return deny('entrada do hook com forma inesperada')
+  }
+  if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
+  return toolDecision(role, tool, toolInput, state.ctx, cwd, fs)
+}
+
 // Decisão estrita do hook PreToolUse: o que a trava não libera é negado. Nunca lança.
 export function guardDecisionOf(role: string, input: unknown, stateText: string | null, fs: FsView): Decision {
   try {
-    if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
-    const state = stateOf(stateText)
-    if (state === null) return deny('contexto de QA ausente ou inválido')
-    if (state.role !== role) return deny('o papel do arquivo de contexto é outro: agente fora de vez')
-    if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
-    const { tool_name: tool, tool_input: toolInput, cwd, agent_id: agentId } = input
-    if (typeof tool !== 'string' || !isRecord(toolInput) || typeof cwd !== 'string' || !cwd.startsWith('/')) {
-      return deny('entrada do hook com forma inesperada')
-    }
-    if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
-    return toolDecision(role, tool, toolInput, state.ctx, cwd, fs)
+    return role === 'remover' ? removerDecisionOf(input, stateText) : qaDecisionOf(role, input, stateText, fs)
   } catch (error) {
     return deny(`erro interno na trava de QA: ${error instanceof Error ? error.message : 'desconhecido'}`)
   }

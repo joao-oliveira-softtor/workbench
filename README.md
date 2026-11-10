@@ -72,7 +72,7 @@ Leia antes de usar em um projeto com dados que importam.
 
 1. O `.env` do projeto (e os `.env.*` que o git não versiona) é copiado para a worktree de correção.
 2. O código escrito pelo agente corretor roda no seu computador quando o mod sobe o app e os testes da worktree, e o `.env` está ao lado. Um corretor mal-comportado poderia, em princípio, alcançar os segredos dele.
-3. A trava dos agentes funciona por padrões de comando: recusa o que não reconhece, mas não é uma caixa de areia (um ambiente isolado do resto do computador).
+3. A trava dos agentes funciona por padrões de comando: recusa o que não reconhece, mas não é uma caixa de areia (um ambiente isolado do resto do computador). O agente que roda o "Aceitar remoções" usa a mesma trava: só roda, letra por letra, as linhas de remoção que você aprovou.
 4. Os testes escrevem no banco de desenvolvimento local, o mesmo que o app da worktree usa.
 5. O corretor só busca no código por palavra simples: padrão de busca com `|`, `<`, `>` ou `$` é recusado.
 6. Nunca use contra produção. A matriz só aceita `localhost` e `127.0.0.1`, e os endereços de fora liberados são só os que as telas carregam (fontes, por exemplo).

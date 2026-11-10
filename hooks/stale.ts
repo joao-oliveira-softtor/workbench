@@ -386,7 +386,8 @@ export function commandsOf(snapshot: Snapshot, items: readonly Suggestion[], now
   return ['# git worktree remove apaga também arquivos ignorados (.env etc.)', ...lines].join('\n')
 }
 
-// Agente que roda a remoção aprovada no painel. O Bash dele só passa pelas linhas de `allowed` (tool.check no register.tsx).
+// Agente que roda a remoção aprovada no painel. O Bash dele só passa pelas linhas aprovadas (hook de comando do tipo, com o
+// papel `remover` do qa-guard.ts; o register.tsx grava o contexto antes de lançá-lo).
 export const REMOVER_AGENT = 'workbench:remover'
 // Segunda pressão de "Aceitar remoções" dentro deste prazo confirma a primeira; depois dele, arma de novo.
 export const ARM_MS = 15_000
@@ -409,7 +410,7 @@ const hasBreak = (text: string): boolean => /[\r\n]/.test(text)
 
 // O que o botão "Aceitar remoções" executa: o que `commandsOf` produziria, menos o que a automação não assume.
 // Fica de fora (e vai só pelo `x`): worktree com submódulo limpo (o comando leva --force, que apagaria árvore suja se
-// ela mudou depois da coleta) e nome com quebra de linha (o `allowed` é por linha: viraria fragmentos liberados).
+// ela mudou depois da coleta) e nome com quebra de linha (a trava do remover libera por linha: viraria fragmentos liberados).
 // Filtra ANTES do commandsOf, que recalcula o actionableOf por dentro. `snapshot.at` é o único instante usado.
 export function removalLinesOf(
   snapshot: Snapshot,
@@ -432,12 +433,6 @@ export function removalLinesOf(
 
 export function removalPromptOf(lines: readonly string[]): string {
   return ['Linhas a rodar, nesta ordem:', ...lines].join('\n')
-}
-
-// Decisão do tool.check para o Bash do remover: só a linha exata da lista roda, e nada que o engine já negou volta a valer.
-export function removalCheckOf(allowed: readonly string[], command: string | null, core: 'allow' | 'ask' | 'deny'): 'allow' | 'deny' {
-  if (core === 'deny') return 'deny'
-  return command !== null && allowed.includes(command.trim()) ? 'allow' : 'deny'
 }
 
 export type Removal = { at: number; agentId: string | null; allowed: string[] }

@@ -51,13 +51,15 @@ import {
   policyTextOf,
   qaAgentsOf,
   qaRootOf,
+  removerFileOf,
   retestDirOf,
   statusSumOf,
   toolsDirOf,
   wrapperOf,
 } from './qa'
 
-export type QaEnv = { home: string; root: string; qaRoot: string; guardFile: string }
+// `removerFile`: o contexto da trava do remover (botão "Aceitar remoções"), com o mesmo código do arquivo da trava do QA.
+export type QaEnv = { home: string; root: string; qaRoot: string; guardFile: string; removerFile: string }
 
 export async function qaEnvOf($: EngineInterface, token: string): Promise<QaEnv | null> {
   const home = nonEmpty(await settle(() => $.env.get('HOME'))) ?? nonEmpty(await settle(() => $.env.get('USERPROFILE')))
@@ -67,7 +69,7 @@ export async function qaEnvOf($: EngineInterface, token: string): Promise<QaEnv 
   const [realHome, realRoot] = (await run($, ['realpath', home, found]))?.split('\n') ?? []
   const root = realRoot || found
   const qaRoot = qaRootOf(realHome || home, root)
-  return { home: realHome || home, root, qaRoot, guardFile: guardFileOf(qaRoot, token) }
+  return { home: realHome || home, root, qaRoot, guardFile: guardFileOf(qaRoot, token), removerFile: removerFileOf(qaRoot, token) }
 }
 
 // Ids dos agentes de QA vivos na lista: entram em `qaGuarded`, para nunca serem adotados como o agente de um item novo.
