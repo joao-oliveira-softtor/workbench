@@ -64,8 +64,10 @@ import { finalVerdictOf, retestCellsOf } from './qa-evidence'
 import type { Cell, Defect, FixStatus, Matrix } from './qa-evidence'
 import type { GuardCtx } from './qa-guard'
 import {
+  LostWorktree,
   appMatrixOf,
   authReplyOf,
+  assertFixDir,
   checkFix,
   commitPassTests,
   fixQueueAt,
@@ -1048,7 +1050,7 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
     case 'run':
       return stepRun($, env, flow.runDir, loaded.matrix, job)
     case 'fix':
-      return stepFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix: loaded.matrix }, job)
+      return stepFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix: loaded.matrix }, job).catch(err => lostFix($, env, err))
     default:
       throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
   }
@@ -1114,7 +1116,17 @@ async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: Qa
   await teardownQa($, env, c)
   await stopApp(qaApp)
   qaApp = null
-  if (c !== null) await undoFix($, fixDir, c.sha)
+  const undone = c === null ? null : await settle(() => undoFix($, fixDir, c.sha))
+  if (undone?.ok === false) $.ui.toast(`QA: ${undone.error.slice(0, 200)}`)
+}
+
+// A worktree perdeu o `.git` no meio do passo: a fase para (trava `{}`, navegador e app fechados) sem desfazer nada nela.
+async function lostFix($: EngineInterface, env: QaEnv, err: unknown): Promise<void> {
+  if (!(err instanceof LostWorktree)) throw err
+  const current = (await read($, qaJob))?.current ?? null
+  await update($, qaJob, () => null)
+  await teardownFix($, env, '', current === null ? null : { ...current, sha: '' })
+  $.ui.toast(`QA: ${err.message}`)
 }
 
 async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void> {
@@ -1158,6 +1170,7 @@ async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | nu
 }
 
 async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Promise<QaCurrent | null> {
+  await assertFixDir($, f.fixDir)
   const target = await targetOf($, f.runDir, f.matrix, defectId)
   if (target === null) {
     $.ui.toast(`QA: o defeito ${defectId} não está mais no veredito da execução; ficou de fora.`)

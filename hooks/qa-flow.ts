@@ -318,6 +318,19 @@ export async function runFull($: EngineInterface, argv: string[], init: { cwd?: 
 
 export const tailOf = (out: string): string => out.trim().split('\n').slice(-5).join(' | ').slice(-300)
 const git = (dir: string, ...args: string[]): string[] => ['git', '-C', dir, ...args]
+// Todo git na worktree de correção passa por aqui. O teto (a pasta `.worktrees` que a contém) impede o git de subir até o
+// repositório da raiz quando a pasta perdeu o `.git`: ele falha com "not a git repository" em vez de mexer no checkout do usuário.
+const wtGit = (fixDir: string, ...args: string[]): string[] => ['env', `GIT_CEILING_DIRECTORIES=${fixDir.slice(0, fixDir.lastIndexOf('/'))}`, 'git', '-C', fixDir, ...args]
+
+// A pasta da worktree sem o `.git`: a fase para sem rodar nada destrutivo (quem pega é o passo da fase, no register.tsx).
+export class LostWorktree extends Error {}
+
+// Antes de todo git destrutivo: a raiz do repositório que o git vê na pasta é a própria worktree.
+export async function assertFixDir($: EngineInterface, fixDir: string): Promise<void> {
+  if ((await run($, wtGit(fixDir, 'rev-parse', '--show-toplevel')))?.trim() !== fixDir) {
+    throw new LostWorktree(`a worktree de correção sumiu (${fixDir}); nada foi desfeito nem commitado nela`)
+  }
+}
 
 export const fixResultPathOf = (runDir: string, defect: string): string => `${fixOutDirOf(runDir, defect)}.json`
 export const fixReportPathOf = (runDir: string): string => `${runDir}/correcoes.md`
@@ -336,13 +349,13 @@ export async function rootSnapOf($: EngineInterface, root: string): Promise<stri
   return parts.map(p => p ?? '?').join('\n')
 }
 
-export async function headOf($: EngineInterface, dir: string): Promise<string> {
-  return ((await run($, git(dir, 'rev-parse', 'HEAD'))) ?? '').trim()
+export async function headOf($: EngineInterface, fixDir: string): Promise<string> {
+  return ((await run($, wtGit(fixDir, 'rev-parse', 'HEAD'))) ?? '').trim()
 }
 
 async function worktreeOf($: EngineInterface, root: string, fixDir: string, branch: string): Promise<string | null> {
   if (await exists($, fixDir)) {
-    const head = (await run($, git(fixDir, 'rev-parse', '--abbrev-ref', 'HEAD')))?.trim()
+    const head = (await run($, wtGit(fixDir, 'rev-parse', '--abbrev-ref', 'HEAD')))?.trim()
     return head === branch ? null : `a pasta ${fixDir} já existe e não é a worktree da branch ${branch}`
   }
   const made = await runFull($, ['git', 'worktree', 'add', fixDir, '-b', branch], { cwd: root, timeoutMs: TEN_MIN })
@@ -392,7 +405,7 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
   if (installed.code !== 0) return { error: `a instalação (${matrix.installCommand}) falhou: ${tailOf(installed.out)}` }
-  const baseline = await run($, git(real, 'status', '--porcelain'))
+  const baseline = await run($, wtGit(real, 'status', '--porcelain'))
   return baseline === null ? { error: 'não deu para ler o git status da worktree' } : { fixDir: real, baseline }
 }
 
@@ -462,8 +475,9 @@ export async function judgeOf($: EngineInterface, o: { runDir: string; matrix: M
 
 export async function undoFix($: EngineInterface, fixDir: string, sha: string): Promise<void> {
   if (sha === '') return
-  await run($, git(fixDir, 'reset', '-q', '--hard', sha))
-  await run($, git(fixDir, 'clean', '-fdq'))
+  await assertFixDir($, fixDir)
+  await run($, wtGit(fixDir, 'reset', '-q', '--hard', sha))
+  await run($, wtGit(fixDir, 'clean', '-fdq'))
 }
 
 // A pasta de um reteste começa vazia: um veredito de uma rodada parada não vale como o desta.
@@ -471,8 +485,8 @@ export async function freshDir($: EngineInterface, dir: string): Promise<boolean
   return (await run($, ['rm', '-rf', dir])) !== null && (await mkdirs($, dir))
 }
 
-export async function statusOf($: EngineInterface, dir: string): Promise<string | null> {
-  return run($, git(dir, 'status', '--porcelain'))
+export async function statusOf($: EngineInterface, fixDir: string): Promise<string | null> {
+  return run($, wtGit(fixDir, 'status', '--porcelain'))
 }
 
 // Antes de cada corretor: a pasta de saída existe e o fix.json da tentativa anterior some.
@@ -488,7 +502,8 @@ const unverified = (fix: Fix): FixCheck => ({ kind: 'unverified', reason: fix.re
 
 // Etapas b a d: o que mudou vira UM commit feito pelo mod, ou é desfeito. null = commitado (ou nada a commitar e retestável: segue).
 async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixCheck | null> {
-  const isChanged = (await run($, git(o.fixDir, 'status', '--porcelain'))) !== o.baseline
+  await assertFixDir($, o.fixDir)
+  const isChanged = (await statusOf($, o.fixDir)) !== o.baseline
   const message = commitMessageOf(fix)
   if (!isChanged) return fix.retestable ? refuse('o corretor não mudou nada') : unverified(fix)
   const undone = async (check: FixCheck): Promise<FixCheck> => {
@@ -496,13 +511,13 @@ async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixChe
     return check
   }
   if (message === null) return undone(refuse('mudança sem descrição de commit'))
-  await run($, git(o.fixDir, 'add', '-A'))
-  const nameStatus = (await run($, git(o.fixDir, '-c', 'core.quotepath=off', 'diff', '--cached', '--name-status', o.sha))) ?? ''
-  const patch = (await run($, git(o.fixDir, 'diff', '--cached', '-U0', o.sha))) ?? ''
+  await run($, wtGit(o.fixDir, 'add', '-A'))
+  const nameStatus = (await run($, wtGit(o.fixDir, '-c', 'core.quotepath=off', 'diff', '--cached', '--name-status', o.sha))) ?? ''
+  const patch = (await run($, wtGit(o.fixDir, 'diff', '--cached', '-U0', o.sha))) ?? ''
   const checked = diffCheckOf(nameStatus, patch)
   if (checked.migration) return undone({ kind: 'unverified', reason: 'a correção cria migração' })
   if (checked.reasons.length > 0) return undone(refuse(checked.reasons.join('; ')))
-  if ((await run($, git(o.fixDir, 'commit', '-q', ...message.flatMap(p => ['-m', p])))) === null) return undone(refuse('o commit da correção falhou'))
+  if ((await run($, wtGit(o.fixDir, 'commit', '-q', ...message.flatMap(p => ['-m', p])))) === null) return undone(refuse('o commit da correção falhou'))
   return null
 }
 
@@ -537,7 +552,7 @@ export async function writeFixResult(
   $: EngineInterface,
   o: { runDir: string; matrix: Matrix; fixDir: string; defectId: string; sha: string; status: FixStatus; attempt: number; reasons: string[]; cells: readonly string[]; regression: string | null; pending: string[] },
 ): Promise<void> {
-  const log = o.sha === '' ? null : await run($, git(o.fixDir, 'log', '--format=%h %s', `${o.sha}..HEAD`))
+  const log = o.sha === '' ? null : await run($, wtGit(o.fixDir, 'log', '--format=%h %s', `${o.sha}..HEAD`))
   const retest: FixResult['retest'] = []
   for (const cell of o.matrix.cells.filter(c => o.cells.includes(c.id))) {
     retest.push({ cell: cell.id, verdict: finalVerdictOf(cell, await verdictIn($, retestDirOf(o.runDir, o.defectId, o.attempt, cell.id))) })
@@ -569,9 +584,10 @@ export async function commitPassTests($: EngineInterface, runDir: string, matrix
     if ((await exists($, src)) && (await mkdirs($, dir)) && (await run($, ['cp', src, dst])) !== null) copied.push(cell.id)
   }
   if (copied.length === 0) return
-  await run($, git(fixDir, 'add', '--', ...copied.map(id => `${matrix.testDir}/qa-${id}.spec.ts`)))
+  await assertFixDir($, fixDir)
+  await run($, wtGit(fixDir, 'add', '--', ...copied.map(id => `${matrix.testDir}/qa-${id}.spec.ts`)))
   const from = `Vieram de celulas/<id>/teste.spec.ts da execução ${runDir.split('/').pop() ?? runDir}, das células que passaram: ${copied.join(', ')}.`
-  await run($, git(fixDir, 'commit', '-q', '-m', 'Testes de regressão gerados pelo QA', '-m', from))
+  await run($, wtGit(fixDir, 'commit', '-q', '-m', 'Testes de regressão gerados pelo QA', '-m', from))
 }
 
 const NO_HOOKS = 'Os commits foram feitos sem os hooks de pré-commit do repositório: rode o lint e o formatador antes de abrir a PR.'

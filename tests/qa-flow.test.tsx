@@ -83,6 +83,8 @@ type Over = {
   spawns?: { unlisted?: boolean; deny?: string }[]
   hold?: (key: string) => boolean
   failWrite?: (path: string, text: string) => boolean
+  // `stall`: a resposta àquele comando nunca chega (o passo some, como num reload do mod no meio dele).
+  stall?: (key: string) => boolean
 }
 const HOLD_MS = 4_000
 type Agent = { id: string; type: string; status: 'running' | 'completed'; description: string }
@@ -106,8 +108,9 @@ async function boot($: Engine, on: On, over: Over = {}) {
     apps: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
     appStops: 0,
   }
-  // A worktree da fase Corrigir: o `git status` dela (o teste o muda como faria o corretor) e os commits feitos pelo mod.
-  const wt = { status: '', commits: [] as string[][] }
+  // A worktree da fase Corrigir: o `git status` dela (o teste o muda como faria o corretor), os commits feitos pelo mod, o HEAD
+  // (anda a cada commit, volta no reset) e `lost` (a pasta perdeu o `.git`: o `rev-parse --show-toplevel` falha).
+  const wt = { status: '', commits: [] as string[][], head: 'abc123', lost: false }
   let n = 0
   const answer = (argv: readonly string[], env?: Record<string, string>): Run => {
     const ok = (stdout = ''): Run => ({ exitCode: 0, stdout })
@@ -126,9 +129,16 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (line === 'git rev-parse HEAD') return ok('abc123\n')
     if (line === 'git status --porcelain') return ok('')
     if (argv[0] === AB) return line.endsWith('get cdp-url') ? ok('ws://127.0.0.1:9333/devtools/browser/x\n') : ok()
-    if (argv[0] === 'git' && argv[1] === '-C') return worktreeGit(argv.slice(3), ok)
+    // Git na worktree: sempre com o teto que impede o git de subir até o repositório da raiz.
+    if (argv[0] === 'env' && argv[1] === `GIT_CEILING_DIRECTORIES=${REPO}/.worktrees` && argv[2] === 'git' && argv[3] === '-C') return worktreeGit(argv[4] ?? '', argv.slice(5), ok)
+    if (argv[0] === 'git' && argv[1] === '-C') return rootGit(argv.slice(3), ok)
     if (line.startsWith('git worktree add ')) {
       dirs.add(argv[3] ?? '')
+      return ok()
+    }
+    if (argv[0] === 'cp' && argv[1] === '-r') {
+      const [from = '', to = ''] = argv.slice(2)
+      for (const [k, v] of [...files]) if (k.startsWith(`${from}/`)) files.set(`${to}${k.slice(from.length)}`, v)
       return ok()
     }
     if (argv[0] === 'cp') {
@@ -142,16 +152,26 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (argv[0] === 'npx') return { exitCode: env?.QA_BASE_URL === MATRIX.baseUrl ? 1 : 0, stdout: '' }
     return { exitCode: 1, stdout: '' }
   }
-  const worktreeGit = (args: readonly string[], ok: (stdout?: string) => Run): Run => {
+  // O checkout do usuário: HEAD e branch fixos.
+  const rootGit = (args: readonly string[], ok: (stdout?: string) => Run): Run => {
     const sub = args.join(' ')
     if (sub === 'rev-parse HEAD') return ok('abc123\n')
+    if (sub === 'rev-parse --abbrev-ref HEAD') return ok('main\n')
+    return ok()
+  }
+  const worktreeGit = (dir: string, args: readonly string[], ok: (stdout?: string) => Run): Run => {
+    const sub = args.join(' ')
+    if (sub === 'rev-parse --show-toplevel') return wt.lost ? { exitCode: 128, stdout: '' } : ok(`${dir}\n`)
+    if (sub === 'rev-parse HEAD') return ok(`${wt.head}\n`)
     if (sub === 'rev-parse --abbrev-ref HEAD') return ok('main\n')
     if (sub === 'status --porcelain') return ok(wt.status)
     if (args[0] === 'commit') {
       wt.commits.push([...args])
       wt.status = ''
+      wt.head = `c${wt.commits.length}`
       return ok()
     }
+    if (args[0] === 'reset') wt.head = args[3] ?? wt.head
     if (args[0] === 'reset' || args[0] === 'clean') wt.status = ''
     if (args[0] === 'log') return ok(wt.commits.map((_, i) => `f${i} corrige`).join('\n'))
     return ok()
@@ -161,6 +181,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? (over.home ?? HOME) : undefined }))
   on('process.run', async (_$, e) => {
     if (over.hold?.(e.argv.join(' ')) === true) await clock.sleep(HOLD_MS)
+    if (over.stall?.(e.argv.join(' ')) === true) await clock.sleep(1e12)
     log.runs.push([...e.argv])
     log.full.push({ argv: [...e.argv], cwd: e.init?.cwd ?? '', env: { ...e.init?.env } })
     const r = over.run?.(e.argv, e.init?.cwd, e.init?.env) ?? answer(e.argv, e.init?.env)
@@ -717,7 +738,7 @@ const wtOf = (t: T) => `${REPO}/.worktrees/qa-${t.runDir().split('/').pop()}`
 const outOf = (t: T) => `${t.runDir()}/correcoes/${D1}`
 const resultOf = (t: T) => JSON.parse(t.files.get(`${outOf(t)}.json`) ?? '{}')
 const lastId = (t: T) => `a${t.log.spawns.length}`
-const gitIn = (t: T, ...args: string[]) => ['git', '-C', wtOf(t), ...args]
+const gitIn = (t: T, ...args: string[]) => ['env', `GIT_CEILING_DIRECTORIES=${REPO}/.worktrees`, 'git', '-C', wtOf(t), ...args]
 
 // Executar sem célula pendente (os vereditos já existem): o relatório sai com c1.d1 marcado e a etapa vai para Corrigir.
 async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX) {
@@ -997,10 +1018,57 @@ describe('QA: fase Corrigir, bordas', () => {
   })
 })
 
+// A pasta da worktree sem o `.git` (o usuário a apagou e algo a recriou): nenhum git destrutivo roda, a fase para e avisa.
+describe('QA: fase Corrigir, worktree que sumiu', () => {
+  // Git com `-C` (na worktree ou na raiz) cujo subcomando é um dos dados.
+  const touched = (t: T, ...subs: string[]) => t.log.runs.filter(a => a.includes('-C') && subs.some(s => a.includes(s)))
+  const LOST = 'a worktree de correção sumiu'
+
+  test('antes do defeito: nada é lançado nem sobe', async ($, on) => {
+    const r = await toFix($, on)
+    r.t.wt.lost = true
+    await click(r.t, r.ui)
+    await click(r.t, r.ui)
+    expect(r.t.log.toasts.at(-1)).toContain(LOST)
+    expect(r.t.log.spawns).toEqual([])
+    expect(r.t.log.apps).toEqual([])
+    expect(await label(r.ui)).toBe('QA: Corrigir')
+  })
+
+  test('o corretor termina: nem add, nem commit, nem reset; a fase para com a trava em {}', async ($, on) => {
+    const { t, ui } = await fixing($, on)
+    t.wt.lost = true
+    await fixerEnds($, t)
+    expect(touched(t, 'add', 'commit', 'reset', 'clean')).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain(LOST)
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(await label(ui)).toBe('QA: Corrigir')
+  })
+
+  test('stop: nem reset nem clean, e avisa', async ($, on) => {
+    const { t } = await fixing($, on)
+    t.wt.lost = true
+    await command($, 'qa stop')
+    expect(touched(t, 'reset', 'clean')).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain(LOST)
+  })
+
+  test('fim da fila: os testes das células PASS não são commitados', async ($, on) => {
+    const { t } = await fixing($, on)
+    await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }))
+    t.wt.lost = true
+    await tick(t)
+    expect(t.wt.commits).toHaveLength(1)
+    expect(touched(t, 'add').filter(a => a.includes('--'))).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain(LOST)
+  })
+})
+
 describe('QA: fase Corrigir, preparação e retomada', () => {
   // A worktree da branch já existe (o rev-parse dela diz a branch): é reaproveitada.
   const ownBranch = (a: readonly string[]) => {
-    const dir = a[2] ?? ''
+    const dir = a[4] ?? ''
     return a.join(' ').endsWith('rev-parse --abbrev-ref HEAD') && dir.includes('/.worktrees/') ? { exitCode: 0, stdout: `qa/${dir.split('/qa-').pop()}\n` } : undefined
   }
 
