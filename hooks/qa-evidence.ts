@@ -313,9 +313,9 @@ export function parseResult(text: string): CellResult | null {
 }
 
 // `fix.json` do agente corretor. `regressionTest` é o teste que o MOD roda duas vezes, então é caminho e nada mais.
-// Texto de uma linha só, não vazio e de até `max` caracteres (o commit sai por código, a partir disto).
+// Texto de uma linha só (sem controle nem separador de linha), com algo visível e de até `max` caracteres (o commit sai por código, a partir disto).
 function lineOf(v: unknown, max: number, at: string): string {
-  need(typeof v === 'string' && v.trim() !== '' && v.length <= max && !/[\r\n]/.test(v), `${at}: precisa ser texto de uma linha, não vazio, com até ${max} caracteres`)
+  need(typeof v === 'string' && /[^\s\u200b-\u200d\ufeff]/.test(v) && v.length <= max && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v), `${at}: precisa ser texto de uma linha, não vazio, com até ${max} caracteres`)
   return v
 }
 
@@ -340,7 +340,7 @@ export function parseFix(text: string): Fix | null {
   })
 }
 
-const ATTRIBUTION = /co-authored-by:|generated with/i
+const ATTRIBUTION = /co-authored-by\s*:|generated\s+with/i
 
 // Parágrafos da mensagem do commit; o mod commita, então a atribuição nunca entra (no assunto, invalida).
 export function commitMessageOf(fix: Fix): string[] | null {

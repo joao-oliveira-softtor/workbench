@@ -950,6 +950,8 @@ describe('parseFix', () => {
     ['body com parágrafo vazio', { subject: 's', body: [' '] }],
     ['body com quebra de linha', { subject: 's', body: ['a\nb'] }],
     ['body com parágrafo de 501 caracteres', { subject: 's', body: ['a'.repeat(501)] }],
+    ['subject só com caractere invisível', { subject: '\u200b\u200d\ufeff' }],
+    ['body só com caractere invisível', { subject: 's', body: ['\u200b'] }],
     ['body com 11 parágrafos', { subject: 's', body: Array.from({ length: 11 }, (_, i) => `p${i}`) }],
   ]
   for (const [name, patch] of bad) {
@@ -958,6 +960,13 @@ describe('parseFix', () => {
 
   test('recusa texto que não é json', () => {
     expect(parseFix('nada')).toBeNull()
+  })
+
+  test('recusa caractere de controle ou separador de linha, no assunto e no corpo', () => {
+    for (const c of ['\u0000', '\t', '\v', '\f', '\u001f', '\u007f', '\u0085', '\u009f', '\u2028', '\u2029']) {
+      expect(parseFix(fixText({ subject: `a${c}b` }))).toBeNull()
+      expect(parseFix(fixText({ subject: 's', body: [`a${c}b`] }))).toBeNull()
+    }
   })
 
   test('aceita subject e body nos limites (120 caracteres, 10 parágrafos de 500)', () => {
@@ -983,6 +992,13 @@ describe('commitMessageOf', () => {
   test('parágrafo de atribuição sai, em qualquer caixa', () => {
     const body = ['por quê', 'Co-Authored-By: Alguém <a@b.c>', 'o que mudou', 'GENERATED WITH uma ferramenta', 'como provei']
     expect(commitMessageOf(fix({ body }))).toEqual(['Corrige o botão Salvar', 'por quê', 'o que mudou', 'como provei'])
+  })
+
+  test('grafias que o git ainda lê como trailer também saem do corpo e invalidam o assunto', () => {
+    for (const p of ['Co-authored-by : x <a@b>', 'generated  with x', 'Generated with x', 'CO-AUTHORED-BY\u00a0: x']) {
+      expect(commitMessageOf(fix({ body: ['antes', p, 'depois'] }))).toEqual(['Corrige o botão Salvar', 'antes', 'depois'])
+      expect(commitMessageOf(fix({ subject: p }))).toBeNull()
+    }
   })
 
   test('atribuição no assunto invalida a mensagem', () => {
