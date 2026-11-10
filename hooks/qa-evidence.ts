@@ -203,7 +203,7 @@ function commandAt(o: Rec, key: string, opts: { required: boolean; port?: boolea
   const v = textAt(o, key)
   need(!opts.required || v.trim() !== '', `${key}: não pode ser vazio`)
   need(COMMAND_CHARS.test(opts.port ? v.replace(PORT_MARK, '') : v), `${key}: só letras, números, espaço e _ . : / = @ + , - (sem aspas nem shell)`)
-  const program = (argvOf(v)[0] ?? '').split('/').pop()?.toLowerCase() ?? ''
+  const program = (argvOf(v)[0] ?? '').split('/').pop()?.toLowerCase().replace(/\.exe$/, '') ?? ''
   need(!COMMAND_DENY.includes(program), `${key}: programa "${program}" não é aceito`)
   return v
 }

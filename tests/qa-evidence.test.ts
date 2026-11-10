@@ -202,6 +202,15 @@ describe('programa dos comandos (COMMAND_DENY, heurística)', () => {
     expect(refusedBy({ installCommand: 'npm ci git' })).toBe('')
   })
 
+  test('sufixo .exe (qualquer caixa) e caminho relativo não escapam, em cada campo', () => {
+    for (const [program, name] of [['curl.exe x', 'curl'], ['BASH.EXE x', 'bash'], ['C:/Windows/System32/curl.exe x', 'curl'], ['./curl x', 'curl'], ['../bin/curl x', 'curl']]) {
+      expect(refusedBy({ installCommand: program })).toContain(`installCommand: programa "${name}" não é aceito`)
+      expect(refusedBy({ startCommand: program })).toContain(`startCommand: programa "${name}" não é aceito`)
+      expect(refusedBy({ testCommand: program })).toContain(`testCommand: programa "${name}" não é aceito`)
+    }
+    expect(refusedBy({ startCommand: 'node.exe server.js' })).toBe('')
+  })
+
   test('todo programa da lista é recusado', () => {
     for (const program of COMMAND_DENY) expect(refusedBy({ testCommand: `${program} x` })).toContain(`"${program}"`)
   })
