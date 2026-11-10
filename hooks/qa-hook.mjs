@@ -1,7 +1,8 @@
 // Hook PreToolUse dos agentes de QA, rodado pelo node. Só a decisão "deny" e o código de saída 2 barram a chamada:
 // código 1, JSON inválido ou demora deixam a ferramenta seguir. Por isso toda falha, em qualquer ponto, sai com código 2.
-import { constants } from 'node:fs'
+import { constants, lstatSync, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 
 const MAX_CONTEXT = 1024 * 1024
 
@@ -27,6 +28,36 @@ async function contextTextOf(file) {
   }
 }
 
+// O caminho real: o `realpath` do caminho ou, se ele ainda não existe, o do ancestral mais próximo que existe. Link pendurado (o
+// `lstat` vê, o `realpath` não resolve) ou outro erro: `null`, que a trava nega.
+// shortcut: home ou repositório atrás de um link simbólico nega toda leitura e gravação (o caminho real cai fora das pastas do
+// contexto, que não são resolvidas); se acontecer, o mod passa a gravar o contexto com os caminhos reais.
+function realOf(path) {
+  const tail = []
+  for (let p = path; ; p = dirname(p)) {
+    try {
+      lstatSync(p)
+    } catch (error) {
+      if (error?.code !== 'ENOENT' || dirname(p) === p) return null
+      tail.unshift(basename(p))
+      continue
+    }
+    try {
+      return join(realpathSync(p), ...tail)
+    } catch {
+      return null
+    }
+  }
+}
+
+function isFile(path) {
+  try {
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
+
 function fail(reason) {
   process.stderr.write(`workbench QA: ${reason}\n`)
   process.exit(2)
@@ -48,7 +79,7 @@ try {
   const stateText = await contextTextOf(contextFile)
 
   const { guardDecisionOf } = await import('./qa-guard.ts')
-  const { decision, reason } = guardDecisionOf(role, input, stateText)
+  const { decision, reason } = guardDecisionOf(role, input, stateText, { realOf, isFile })
   const output = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } }
   process.stdout.write(`${JSON.stringify(output)}\n`, () => process.exit(0))
 } catch (error) {

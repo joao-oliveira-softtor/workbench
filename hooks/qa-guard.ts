@@ -25,7 +25,7 @@ type GitSpec = { flags: readonly string[]; count?: true }
 const GIT_SPECS = new Map<string, GitSpec>([
   ['diff', { flags: ['--stat', '--name-only', '--name-status', '--cached', '--staged', '--'] }],
   ['status', { flags: ['-s', '--short', '-b', '--branch', '--porcelain'] }],
-  ['log', { flags: ['--oneline', '--stat', '-p', '--patch'], count: true }],
+  ['log', { flags: ['--oneline', '--stat', '-p', '--patch', '--'], count: true }],
 ])
 const CURL_FLAGS = ['--silent', '--show-error', '--include', '--head', '--fail', '--insecure', '--verbose']
 const CURL_VALUED = ['-X', '--request', '-H', '--header', '-d', '--data', '--data-raw', '-m', '--max-time', '--connect-timeout', '-w', '--write-out']
@@ -90,8 +90,9 @@ function isUnsafeShape(command: string): boolean {
   let quote = ''
   for (let i = 0; i < command.length; i++) {
     const c = command[i] ?? ''
-    // o bash só expande `~/` solto no começo de uma palavra; entre aspas é texto literal
-    if (c === '~' && !(quote === '' && (i === 0 || command[i - 1] === ' ') && command[i + 1] === '/')) return true
+    // o bash só expande `~/` solto no começo de uma palavra; entre aspas é texto literal; `HEAD~2` é referência do git
+    const homeTilde = !(quote === '' && (i === 0 || command[i - 1] === ' ') && command[i + 1] === '/')
+    if (c === '~' && homeTilde && !(command.slice(i - 4, i) === 'HEAD' && /\d/.test(command[i + 1] ?? ''))) return true
     if (quote !== '') {
       if (c === quote) quote = ''
     } else if (c === "'" || c === '"') {
@@ -148,8 +149,9 @@ function checkoutPathReason(word: string, ctx: GuardCtx, cwd: string): string | 
   return null
 }
 
-// shortcut: a varredura olha toda palavra solta, então buscar o texto `cd`, `git`, `gh` ou `pushd` (`rg -n git <fixDir>`) é negado;
-// para liberar, a varredura teria que saber qual palavra é programa e qual é argumento.
+// shortcut: a varredura olha toda palavra solta, então buscar o texto `cd`, `gh` ou `pushd` (`rg -n gh <fixDir>`) é negado, e `git`
+// também quando a palavra seguinte é um subcomando proibido (`rg -n "git push" <fixDir>`); `rg -n git <fixDir>` passa. Para liberar,
+// a varredura teria que saber qual palavra é programa e qual é argumento.
 function denyReason(role: QaRole, command: string, ctx: GuardCtx, cwd: string): string | null {
   // palavras cruas, e palavras de shell (aspas juntadas: `g""it`, `c''d`)
   const raw = command.split(/[\s'"`;&|()<>]+/).filter(w => w !== '')
@@ -352,11 +354,16 @@ function dockerLogsOk(args: readonly string[], ctx: GuardCtx): boolean {
   return names.length === 1 && ctx.containers.includes(names[0] ?? '')
 }
 
-// Posicional do git da worktree: referência ou caminho simples; com `/` ou começando com `.` tem que ficar dentro de fixDir.
-function gitPositionalOk(w: string, ctx: GuardCtx): boolean {
+// Caminho do git da worktree (depois de `--`): simples; com `/` ou começando com `.` tem que ficar dentro de fixDir.
+function gitPathOk(w: string, ctx: GuardCtx): boolean {
   const inFix = isInside(resolveIn(w, ctx.fixDir, ctx.home), ctx.fixDir)
   return /^[A-Za-z0-9._/-]+$/.test(w) && !isSecretPath(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
 }
+
+// Referência (antes de `--`): só o HEAD da worktree, um hash ou um intervalo entre eles. Nome nenhum (`stash`, `refs/stash`, branch,
+// `FETCH_HEAD`): o stash é de todas as worktrees e guarda os arquivos não versionados e os segredos do checkout do usuário.
+const REV = '(HEAD(~\\d+|\\^)?|[0-9a-f]{7,40})'
+const GIT_REV = new RegExp(`^${REV}(\\.\\.\\.?${REV})?$`)
 
 function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
   const [flag, dir, sub, ...rest] = args
@@ -367,7 +374,7 @@ function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
   for (let i = 0; i < rest.length; i++) {
     const w = rest[i] ?? ''
     if (afterDashes) {
-      if (!gitPositionalOk(w, ctx)) return false
+      if (!gitPathOk(w, ctx)) return false
     } else if (w === '--' && spec.flags.includes(w)) {
       afterDashes = true
     } else if (spec.flags.includes(w)) {
@@ -376,7 +383,7 @@ function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
       if (!/^\d+$/.test(rest[++i] ?? '')) return false
     } else if (spec.count && /^(--max-count=|-)\d+$/.test(w)) {
       continue
-    } else if (w.startsWith('-') || !gitPositionalOk(w, ctx)) {
+    } else if (!GIT_REV.test(w)) {
       return false
     }
   }
@@ -396,15 +403,20 @@ const SEARCH_SPECS = new Map<string, SearchSpec>([
 ])
 // Glob e tipo passam por cima de "pular oculto" (e o glob, de "pular ignorado"): `*.env` acha `.env`, `*.local` acha `.env.local`.
 // Por isso só extensões de código, que nenhum `.env*` usa.
-const CODE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'sass', 'less', 'html', 'vue', 'svelte', 'json', 'md', 'mdx', 'py', 'go', 'rs', 'java', 'php', 'rb', 'sql', 'yml', 'yaml', 'graphql', 'prisma', 'svg', 'txt', 'log']
+// Sem json, yaml, txt, log e afins: costumam guardar segredo (`.creds.local.json`) ou saída.
+const CODE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'sass', 'less', 'html', 'vue', 'svelte', 'md', 'mdx', 'py', 'go', 'rs', 'java', 'php', 'rb', 'sql', 'graphql', 'prisma', 'svg']
 // tipos do rg cujos globs são só `*.<extensão>` (`sh` traz `.env`; `ruby`, `.irbrc`)
-const RG_TYPES = ['ts', 'js', 'css', 'html', 'json', 'md', 'py', 'go', 'rust', 'java', 'php', 'sql', 'yaml', 'vue', 'svelte', 'sass', 'less']
+const RG_TYPES = ['ts', 'js', 'css', 'html', 'md', 'py', 'go', 'rust', 'java', 'php', 'sql', 'vue', 'svelte', 'sass', 'less']
+// a forma `*.ext` (ou `**/*.ext`) já recusa glob cujo nome começa com ponto
 const isCodeGlob = (v: string): boolean => CODE_EXTS.includes(/^(\*\*\/)?\*\.([A-Za-z0-9]+)$/.exec(v)?.[2] ?? '')
 // o grep do Bash do Claude Code é o ugrep com `--hidden`: numa pasta ele lê os ocultos que o `.gitignore` de cima não cobre
 const isCodeFile = (p: string): boolean => CODE_EXTS.includes(/^[^.][^/]*\.([A-Za-z0-9]+)$/.exec(p.slice(p.lastIndexOf('/') + 1))?.[1] ?? '')
 const FIND_TESTS = ['-name', '-iname', '-path']
 
+// shortcut: arquivo oculto que não se chama `.env*`, com o caminho por extenso dentro de fixDir, é legível (pela busca e pelo Read);
+// vale porque o mod só copia `.env*` para a worktree. Se ele passar a copiar outro segredo, o nome entra aqui.
 const isSecretPath = (p: string): boolean => p.split('/').some(seg => seg.toLowerCase().startsWith('.env'))
+const hasSegment = (p: string, name: string): boolean => p.split('/').some(seg => seg.toLowerCase() === name)
 
 function searchPathOk(w: string, ctx: GuardCtx): boolean {
   if (!w.startsWith('/')) return false
@@ -422,9 +434,12 @@ function lsOk(args: readonly string[], ctx: GuardCtx): boolean {
 }
 
 // rg e grep: o primeiro posicional é o padrão (a não ser que haja -e); os demais são caminhos, e o último argumento é um deles.
-function grepOk(prog: string, args: readonly string[], ctx: GuardCtx): boolean {
+// `null` se a forma não for a liberada.
+// shortcut: padrão de busca com `|`, `<`, `>`, `$`, `\` ou `=>` é recusado pela regra "sem encadeador" (`isUnsafeShape`): o fixer busca
+// por palavra simples; liberar exigiria interpretar as aspas do shell de verdade.
+function searchPathsOf(prog: string, args: readonly string[]): string[] | null {
   const spec = SEARCH_SPECS.get(prog)
-  if (spec === undefined) return false
+  if (spec === undefined) return null
   const pos: string[] = []
   let hasPattern = false
   let lastIsPos = false
@@ -434,21 +449,31 @@ function grepOk(prog: string, args: readonly string[], ctx: GuardCtx): boolean {
     if (spec.letters.test(w)) continue
     if (spec.numeric.includes(w) || spec.globs.includes(w) || spec.types.includes(w) || w === '-e') {
       const v = args[++i]
-      if (!optValueOk(v)) return false
-      if (spec.numeric.includes(w) && !/^\d+$/.test(v)) return false
-      if (spec.globs.includes(w) && !isCodeGlob(v)) return false
-      if (spec.types.includes(w) && !RG_TYPES.includes(v)) return false
+      if (!optValueOk(v)) return null
+      if (spec.numeric.includes(w) && !/^\d+$/.test(v)) return null
+      if (spec.globs.includes(w) && !isCodeGlob(v)) return null
+      if (spec.types.includes(w) && !RG_TYPES.includes(v)) return null
       if (w === '-e') hasPattern = true
     } else if (w.startsWith('-')) {
-      return false
+      return null
     } else {
       pos.push(w)
       lastIsPos = true
     }
   }
-  const paths = hasPattern ? pos : pos.slice(1)
+  return lastIsPos ? (hasPattern ? pos : pos.slice(1)) : null
+}
+
+function grepOk(prog: string, args: readonly string[], ctx: GuardCtx): boolean {
+  const paths = searchPathsOf(prog, args)
   const fileOk = (w: string): boolean => prog !== 'grep' || isCodeFile(normalizePath(w))
-  return lastIsPos && paths.length > 0 && paths.every(w => searchPathOk(w, ctx) && fileOk(w))
+  return paths !== null && paths.length > 0 && paths.every(w => searchPathOk(w, ctx) && fileOk(w))
+}
+
+// Os caminhos de um `grep`: a trava pura não distingue arquivo de pasta, e numa pasta o grep lê os ocultos (`x.ts/` é pasta).
+function grepTargetsOf(command: string): string[] {
+  const [prog, ...args] = shellWords(command)
+  return prog === 'grep' ? (searchPathsOf(prog, args) ?? []) : []
 }
 
 // find: caminhos primeiro; depois só -name/-iname/-path (sem nome oculto nem `.env`), -type f|d|l, -maxdepth/-mindepth e -not.
@@ -493,32 +518,39 @@ export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx, cwd: s
   const denied = denyReason(role, command, ctx, cwd)
   if (denied !== null) return { decision: 'deny', reason: denied }
   if (isUnsafeShape(command)) return { decision: 'pass', reason: 'comando com encadeamento, expansão ou aspas que a trava não interpreta' }
+  // `<fixDir>/link/..` sai da pasta quando `link` é simbólico, e a normalização não vê isso.
+  // shortcut: argumento de Bash que passa por link simbólico (sem `..`) não é resolvido; Read, Write e Edit são, pelo hook.
+  if (shellWords(command).some(w => !SCHEME.test(w) && hasSegment(w.replace(/=/g, '/'), '..'))) {
+    return { decision: 'pass', reason: 'caminho com .. que a trava não libera' }
+  }
   return isAllowed(role, command, ctx, cwd)
     ? { decision: 'allow', reason: 'comando liberado pela trava de QA' }
     : { decision: 'pass', reason: 'comando fora da lista liberada pela trava de QA' }
 }
 
 // Arquivo que muda o que o rg e o grep pulam: com `!.env` dentro, a busca seguinte leria o `.env`.
-const isIgnoreFile = (p: string): boolean =>
-  ['.ignore', '.rgignore', '.gitignore'].includes(p.slice(p.lastIndexOf('/') + 1).toLowerCase()) || /\/\.git\/info\/exclude$/i.test(p)
+const isIgnoreFile = (p: string): boolean => ['.ignore', '.rgignore', '.gitignore'].includes(p.slice(p.lastIndexOf('/') + 1).toLowerCase())
 
-// Gravar só no runDir (qualquer papel) ou, para o fixer, na worktree de correção (menos o `.git`, que aponta para outro repositório).
+// Caminho absoluto do pedido, ou `null`: vazio, com til (o bash não o expande entre aspas e os agentes recebem caminhos absolutos)
+// ou com `..` (que sai da pasta quando o segmento anterior é link simbólico).
+function filePathOf(filePath: string, ctx: GuardCtx, cwd: string): string | null {
+  if (filePath === '' || filePath.startsWith('~') || hasSegment(filePath.replace(/\\/g, '/'), '..')) return null
+  return resolveIn(filePath, cwd, ctx.home)
+}
+
+// Gravar só no runDir (qualquer papel) ou, para o fixer, na worktree de correção; nunca num `.git`, de nenhuma pasta (config e hooks
+// do git rodam código).
 export function writeCheckOf(role: QaRole, filePath: string, ctx: GuardCtx, cwd: string): 'allow' | 'deny' {
-  // o bash não expande `~` entre aspas e os agentes recebem caminhos absolutos
-  if (filePath === '' || filePath.startsWith('~')) return 'deny'
-  const p = resolveIn(filePath, cwd, ctx.home)
+  const p = filePathOf(filePath, ctx, cwd)
   // mudar o `.env` da cópia faria o reteste passar sem corrigir o código
-  if (isSecretPath(p) || isIgnoreFile(p)) return 'deny'
-  if (isInside(p, ctx.runDir)) return 'allow'
-  const inFix = role === 'fixer' && isInside(p, ctx.fixDir) && !isInside(p, `${normalizePath(ctx.fixDir)}/.git`)
-  return inFix ? 'allow' : 'deny'
+  if (p === null || isSecretPath(p) || isIgnoreFile(p) || hasSegment(p, '.git')) return 'deny'
+  return isInside(p, ctx.runDir) || (role === 'fixer' && isInside(p, ctx.fixDir)) ? 'allow' : 'deny'
 }
 
 // Ler: runDir, pastas de leitura extras e, só para o fixer, a worktree; nunca `.env*`.
 export function readCheckOf(role: QaRole, filePath: string, ctx: GuardCtx, cwd: string): 'allow' | 'deny' {
-  if (filePath === '' || filePath.startsWith('~')) return 'deny'
-  const p = resolveIn(filePath, cwd, ctx.home)
-  if (isSecretPath(p)) return 'deny'
+  const p = filePathOf(filePath, ctx, cwd)
+  if (p === null || isSecretPath(p)) return 'deny'
   const inside = isInside(p, ctx.runDir) || ctx.readDirs.some(dir => isInside(p, dir)) || (role === 'fixer' && isInside(p, ctx.fixDir))
   return inside ? 'allow' : 'deny'
 }
@@ -542,12 +574,18 @@ const isOrigin = (o: string): boolean => {
   }
 }
 
-// Valores do contexto: as pastas liberadas nunca podem cobrir a raiz, a home nem o checkout principal.
+const within = (p: string, dir: string): boolean => p !== dir && isInside(p, dir)
+
+// Valores do contexto: caminhos absolutos normalizados com 2+ segmentos; `fixDir` vazio ou dentro de `repoRoot` (sem ser ele) e sem
+// segmento `.git`; `runDir` dentro de `<home>/.claude/workbench-qa/`, nem dentro nem contendo `repoRoot`; cada `readDirs` dentro de
+// `runDir`, de `<home>/.claude/workbench-qa/` ou de `<home>/.claude/skills/`, sem conter `repoRoot`; origens http(s), porta e sessão.
 function ctxValuesOk(c: GuardCtx): boolean {
+  const qaHome = `${c.home}/.claude/workbench-qa`
   const paths = [c.home, c.repoRoot, c.runDir, c.agentBrowser, c.impeccable].every(isDeepPath)
-  const fix = c.fixDir === '' || (isDeepPath(c.fixDir) && c.fixDir !== c.repoRoot && isInside(c.fixDir, c.repoRoot))
-  const run = !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
-  const reads = c.readDirs.every(d => isDeepPath(d) && d !== c.home && !isInside(c.repoRoot, d))
+  const fix = c.fixDir === '' || (isDeepPath(c.fixDir) && within(c.fixDir, c.repoRoot) && !hasSegment(c.fixDir, '.git'))
+  const run = within(c.runDir, qaHome) && !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
+  const readRoots = [c.runDir, qaHome, `${c.home}/.claude/skills`]
+  const reads = c.readDirs.every(d => isDeepPath(d) && readRoots.some(r => within(d, r)) && !isInside(c.repoRoot, d))
   const port = c.cdpPort === null || (Number.isInteger(c.cdpPort) && c.cdpPort >= 1 && c.cdpPort <= 65535)
   return paths && fix && run && reads && port && c.origins.every(isOrigin) && /^[A-Za-z0-9_-]*$/.test(c.session)
 }
@@ -594,30 +632,43 @@ function stateOf(text: string | null): GuardState | null {
 
 type Decision = { decision: 'allow' | 'deny'; reason: string }
 const deny = (reason: string): Decision => ({ decision: 'deny', reason })
+// O sistema de arquivos que o hook vê: caminho real (links simbólicos resolvidos; `null` se não deu para resolver) e se é arquivo.
+export type FsView = { realOf: (absPath: string) => string | null; isFile: (absPath: string) => boolean }
 
-function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unknown>, ctx: GuardCtx, cwd: string): Decision {
+// O pedido e o caminho real têm que passar os dois: um link em fixDir apontando para o checkout cai fora da pasta liberada.
+function realOk(check: (p: string) => 'allow' | 'deny', path: string, ctx: GuardCtx, cwd: string, fs: FsView): boolean {
+  if (check(path) === 'deny') return false
+  const real = fs.realOf(resolveIn(path, cwd, ctx.home))
+  return real !== null && check(real) === 'allow'
+}
+
+function bashDecision(role: QaRole, command: string, ctx: GuardCtx, cwd: string, fs: FsView): Decision {
+  const v = bashCheckOf(role, command, ctx, cwd)
+  if (v.decision !== 'allow') return deny(v.reason)
+  const folder = grepTargetsOf(command).find(p => !fs.isFile(normalizePath(p)))
+  return folder === undefined ? { decision: 'allow', reason: v.reason } : deny(`grep só lê arquivo regular: ${folder}`)
+}
+
+function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unknown>, ctx: GuardCtx, cwd: string, fs: FsView): Decision {
   const command = toolInput['command']
   const path = toolInput['file_path']
   switch (tool) {
-    case 'Bash': {
-      if (typeof command !== 'string') return deny('Bash sem comando em texto')
-      const v = bashCheckOf(role, command, ctx, cwd)
-      return v.decision === 'allow' ? { decision: 'allow', reason: v.reason } : deny(v.reason)
-    }
+    case 'Bash':
+      return typeof command === 'string' ? bashDecision(role, command, ctx, cwd, fs) : deny('Bash sem comando em texto')
     case 'Write':
     case 'Edit':
       if (typeof path !== 'string') return deny(`${tool} sem file_path em texto`)
-      return writeCheckOf(role, path, ctx, cwd) === 'allow' ? { decision: 'allow', reason: 'gravação dentro da pasta liberada' } : deny(`gravar em ${path} é proibido para agentes de QA`)
+      return realOk(p => writeCheckOf(role, p, ctx, cwd), path, ctx, cwd, fs) ? { decision: 'allow', reason: 'gravação dentro da pasta liberada' } : deny(`gravar em ${path} é proibido para agentes de QA`)
     case 'Read':
       if (typeof path !== 'string') return deny('Read sem file_path em texto')
-      return readCheckOf(role, path, ctx, cwd) === 'allow' ? { decision: 'allow', reason: 'leitura dentro da pasta liberada' } : deny(`ler ${path} é proibido para agentes de QA`)
+      return realOk(p => readCheckOf(role, p, ctx, cwd), path, ctx, cwd, fs) ? { decision: 'allow', reason: 'leitura dentro da pasta liberada' } : deny(`ler ${path} é proibido para agentes de QA`)
     default:
       return deny(`a ferramenta ${tool} não é liberada para agentes de QA`)
   }
 }
 
 // Decisão estrita do hook PreToolUse: o que a trava não libera é negado. Nunca lança.
-export function guardDecisionOf(role: string, input: unknown, stateText: string | null): Decision {
+export function guardDecisionOf(role: string, input: unknown, stateText: string | null, fs: FsView): Decision {
   try {
     if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
     const state = stateOf(stateText)
@@ -629,7 +680,7 @@ export function guardDecisionOf(role: string, input: unknown, stateText: string 
       return deny('entrada do hook com forma inesperada')
     }
     if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
-    return toolDecision(role, tool, toolInput, state.ctx, cwd)
+    return toolDecision(role, tool, toolInput, state.ctx, cwd, fs)
   } catch (error) {
     return deny(`erro interno na trava de QA: ${error instanceof Error ? error.message : 'desconhecido'}`)
   }
