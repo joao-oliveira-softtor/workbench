@@ -88,6 +88,12 @@ const PROFILE_ID = /^[a-z0-9][a-z0-9_-]{0,30}$/
 const CONTAINER_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/
 // O mod roda os comandos por vetor de argumentos, sem shell: nada de aspas nem metacaractere.
 const COMMAND_CHARS = /^[A-Za-z0-9 _.:/=@+,-]*$/
+// Heurística, não uma prova: programas sem relação com instalar, subir ou testar um app (rede, shell, privilégio, apagar,
+// git, rodar outro programa). Os comandos rodam sem pedido de permissão e foram escritos por um agente de IA.
+export const COMMAND_DENY: readonly string[] = [
+  'curl', 'wget', 'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'sudo', 'su', 'doas', 'ssh', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'netcat', 'telnet',
+  'rm', 'mv', 'dd', 'chmod', 'chown', 'git', 'gh', 'eval', 'exec', 'env', 'xargs', 'nohup', 'setsid', 'kill', 'pkill',
+]
 const PORT_MARK = /\{QA_PORT\}/g
 const MAX_CELLS = 12
 
@@ -197,6 +203,8 @@ function commandAt(o: Rec, key: string, opts: { required: boolean; port?: boolea
   const v = textAt(o, key)
   need(!opts.required || v.trim() !== '', `${key}: não pode ser vazio`)
   need(COMMAND_CHARS.test(opts.port ? v.replace(PORT_MARK, '') : v), `${key}: só letras, números, espaço e _ . : / = @ + , - (sem aspas nem shell)`)
+  const program = (argvOf(v)[0] ?? '').split('/').pop()?.toLowerCase() ?? ''
+  need(!COMMAND_DENY.includes(program), `${key}: programa "${program}" não é aceito`)
   return v
 }
 

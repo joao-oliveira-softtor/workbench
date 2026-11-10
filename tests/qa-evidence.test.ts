@@ -6,6 +6,7 @@ import {
   authSummaryOf,
   baseUrlAt,
   checkedDefectsOf,
+  COMMAND_DENY,
   commitMessageOf,
   defectIdOf,
   diffCheckOf,
@@ -179,6 +180,40 @@ describe('parseMatrix', () => {
     expect(parseMatrix(mdOf(matrixOf({ installCommand: 'npm ci {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: 'npm test {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: '' }))).ok).toBe(true)
+  })
+})
+
+describe('programa dos comandos (COMMAND_DENY, heurística)', () => {
+  const refusedBy = (patch: Record<string, unknown>): string => {
+    const r = parseMatrix(mdOf(matrixOf(patch as Partial<Matrix>)))
+    return r.ok ? '' : r.error
+  }
+
+  test('um programa recusado em cada campo, com a mensagem citando o campo e o programa', () => {
+    expect(refusedBy({ installCommand: 'curl -o x http://exemplo.com' })).toContain('installCommand: programa "curl" não é aceito')
+    expect(refusedBy({ startCommand: 'bash run.sh {QA_PORT}' })).toContain('startCommand: programa "bash" não é aceito')
+    expect(refusedBy({ testCommand: 'git status' })).toContain('testCommand: programa "git" não é aceito')
+  })
+
+  test('caminho absoluto e maiúsculas não escapam; só o primeiro termo conta', () => {
+    expect(refusedBy({ installCommand: '/usr/bin/curl x' })).toContain('"curl"')
+    expect(refusedBy({ installCommand: 'CURL x' })).toContain('"curl"')
+    expect(refusedBy({ startCommand: 'a/b/Sudo node x.js' })).toContain('"sudo"')
+    expect(refusedBy({ installCommand: 'npm ci git' })).toBe('')
+  })
+
+  test('todo programa da lista é recusado', () => {
+    for (const program of COMMAND_DENY) expect(refusedBy({ testCommand: `${program} x` })).toContain(`"${program}"`)
+  })
+
+  test('programas comuns passam, e testCommand vazio também', () => {
+    const ok = [
+      ['npm ci', 'node --watch server.js', 'npx playwright test'],
+      ['pnpm install --frozen-lockfile', 'php artisan serve --port={QA_PORT}', 'python -m pytest'],
+      ['composer install', 'npm run dev -- --port {QA_PORT}', 'make test'],
+      ['npm ci', 'npm start', ''],
+    ]
+    for (const [installCommand, startCommand, testCommand] of ok) expect(refusedBy({ installCommand, startCommand, testCommand })).toBe('')
   })
 })
 
