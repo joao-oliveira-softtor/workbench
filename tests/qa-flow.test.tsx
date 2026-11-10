@@ -4,6 +4,7 @@ import type { Engine } from 'claude-code/testing'
 
 import {
   AGENT_TIMEOUT_MS,
+  NODE_MIN,
   QA_AUTH_TOOL,
   QA_FIXER,
   QA_OBSERVER,
@@ -174,6 +175,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
       files.set(argv[2] ?? '', files.get(argv[1] ?? '') ?? '')
       return ok()
     }
+    if (line === 'node --version') return ok('v22.6.0\n')
     if (argv[0] === 'node') return ok('4100\n')
     if (argv[0] === 'npm') return ok()
     if (line === 'git ls-files --error-unmatch .env.example') return ok('.env.example\n')
@@ -504,6 +506,17 @@ describe('QA: portões do Executar', () => {
     expect(t.log.spawns).toEqual([])
     expect(await label(ui)).toBe('QA: Executar')
   })
+
+  for (const [name, r] of [['mais velho que o mínimo', { exitCode: 0, stdout: 'v22.5.1\n' }], ['ausente', { exitCode: 127, stdout: '' }]] as const) {
+    test(`Node ${name}: avisa e não lança nada`, async ($, on) => {
+      const { t, ui } = await toRun($, on, { run: a => (a.join(' ') === 'node --version' ? r : undefined) })
+      await click(t, ui)
+      expect(t.log.toasts.at(-1)).toContain(`precisa do Node ${NODE_MIN} ou mais novo`)
+      await tick(t)
+      expect(t.log.spawns).toEqual([])
+      expect(t.log.runs.some(x => x[0] === AB)).toBe(false)
+    })
+  }
 
   test('grava os scripts executáveis e o HEAD do app', async ($, on) => {
     const { t } = await running($, on)
@@ -1644,6 +1657,17 @@ describe('remoção pelo botão: a trava do remover', () => {
     await ended($, lastId(t))
     expect(writes.at(-1)?.text).toBe('{}')
     expect(writes.at(-1)?.path).toBe(before?.path)
+  })
+
+  test('Node mais velho que o mínimo: o remover não é lançado e o aviso sai', async ($, on) => {
+    const t = await boot($, on, { run: a => (a.join(' ') === 'node --version' ? { exitCode: 0, stdout: 'v20.1.0\n' } : collectRun(a)) })
+    await tick(t)
+    const ui = await $.ui.mount(PANEL)
+    await ui.press({ key: 'accept' })
+    await ui.press({ key: 'accept' })
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain(`as remoções precisam do Node ${NODE_MIN} ou mais novo`)
   })
 
   test('falha ao gravar o contexto: o remover não é lançado e o aviso sai', async ($, on) => {

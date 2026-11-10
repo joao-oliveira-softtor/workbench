@@ -34,6 +34,7 @@ import {
   guardStateTextOf,
   handbackAgentOf,
   hookCommandOf,
+  isNodeOk,
   impWrapperTextOf,
   nextFixOf,
   nextRunOf,
@@ -439,6 +440,13 @@ describe('impWrapperTextOf', () => {
     expect(text).toContain('export IMPECCABLE_NO_TELEMETRY=1')
     expect(text).toContain('export DO_NOT_TRACK=1')
     expect(text.trimEnd().endsWith(`exec '/t/o'\\''k/impeccable' "$@"`)).toBe(true)
+  })
+})
+
+describe('isNodeOk', () => {
+  test('a saída do node --version igual ou mais nova que NODE_MIN passa; mais velha ou fora do formato, não', () => {
+    for (const v of ['v22.6.0\n', 'v22.10.0', 'v23.0.0', 'v24.22.1']) expect(`${v.trim()} ${isNodeOk(v)}`).toBe(`${v.trim()} true`)
+    for (const v of ['v22.5.9', 'v21.99.0', 'v8.6.0', '', 'node', '22.6.0', 'v22.6']) expect(`${v} ${isNodeOk(v)}`).toBe(`${v} false`)
   })
 })
 

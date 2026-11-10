@@ -29,6 +29,7 @@ import {
 } from './plan'
 import type { PlanStep, Refined } from './plan'
 import {
+  NODE_MIN,
   QA_AUTH_TOOL,
   QA_FIXER,
   QA_OBSERVER,
@@ -98,6 +99,7 @@ import {
   exists,
   guardCtxOf,
   guardRefusalOf,
+  isNodeReady,
   liveQaIdsOf,
   loadMatrix,
   matrixPathOf,
@@ -489,6 +491,7 @@ async function launchRemoval($: EngineInterface, job: { key: string }): Promise<
   if (plan.lines.length === 0 || plan.lines.join('\n') !== job.key) {
     return { kind: 'abort', text: 'A lista mudou depois da confirmação: confira e aceite de novo.' }
   }
+  if (!(await isNodeReady($))) return { kind: 'abort', text: `Nada foi removido: as remoções precisam do Node ${NODE_MIN} ou mais novo (o node do PATH falta ou é mais velho).` }
   if (!(await isRemoverArmed($, plan.lines))) return { kind: 'abort', text: 'Não deu para gravar a trava do remover: nada foi removido.' }
   await update($, removal, cur => (cur === null ? null : { ...cur, allowed: plan.lines }))
   $.ui.toast(`Haiku removendo ${plan.count} worktrees…`)

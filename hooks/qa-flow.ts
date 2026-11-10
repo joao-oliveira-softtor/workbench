@@ -32,6 +32,7 @@ import { ENDED } from './stale'
 import type { GuardCtx, QaRole } from './qa-guard'
 import {
   DETECT_FAIL_RULES,
+  NODE_MIN,
   QA_TOOLS,
   QA_TYPE,
   VIEW_HEIGHT,
@@ -46,6 +47,7 @@ import {
   guardStateTextOf,
   hookCommandOf,
   impWrapperTextOf,
+  isNodeOk,
   outcomeOf,
   policyFileOf,
   policyTextOf,
@@ -145,8 +147,15 @@ async function isUp($: EngineInterface, url: string): Promise<boolean> {
   return (await run($, ['curl', '-s', '-o', '/dev/null', '--max-time', '5', url])) !== null
 }
 
+// O node do PATH roda o hook da trava (qa-hook.mjs): sem ele, ou mais velho que NODE_MIN, todo agente travado fica sem ferramentas.
+export async function isNodeReady($: EngineInterface): Promise<boolean> {
+  const out = await run($, ['node', '--version'])
+  return out !== null && isNodeOk(out)
+}
+
 // Portões do clique Executar, nesta ordem; `back` diz se a etapa volta para o Login.
 export async function runGateOf($: EngineInterface, env: QaEnv, matrix: Matrix, now: number): Promise<{ text: string; back: boolean } | null> {
+  if (!(await isNodeReady($))) return { text: `QA: o QA precisa do Node ${NODE_MIN} ou mais novo (o node do PATH falta ou é mais velho).`, back: false }
   const tools = toolsDirOf(env.home)
   for (const name of ['agent-browser', 'impeccable'] as const) {
     if (!(await exists($, binOf(tools, name)))) return { text: `QA: falta instalar o ${name}; clique em "QA: Login" de novo.`, back: true }

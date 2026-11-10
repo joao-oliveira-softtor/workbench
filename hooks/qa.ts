@@ -37,6 +37,15 @@ export const AGENT_TIMEOUT_MS = 20 * 60_000
 export const VIEW_HEIGHT = 800
 export const NODE_MIN = '22.6'
 
+// A saída do `node --version` (`v22.6.0`) é NODE_MIN ou mais nova? Fora desse formato: não.
+export function isNodeOk(version: string): boolean {
+  const found = /^v(\d+)\.(\d+)\.\d+$/.exec(version.trim())
+  if (found === null) return false
+  const [major, minor] = [Number(found[1]), Number(found[2])]
+  const [minMajor = 0, minMinor = 0] = NODE_MIN.split('.').map(Number)
+  return major > minMajor || (major === minMajor && minor >= minMinor)
+}
+
 function fixVerbOf(role: QaRole, attempt: number, cell: string): string {
   switch (role) {
     case 'fixer':
