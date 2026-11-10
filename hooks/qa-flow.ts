@@ -520,7 +520,6 @@ const unverified = (fix: Fix): FixCheck => ({ kind: 'unverified', reason: fix.re
 
 // Etapas b a d: o que mudou vira UM commit feito pelo mod, ou é desfeito. null = commitado (ou nada a commitar e retestável: segue).
 async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixCheck | null> {
-  await assertFixDir($, o.fixDir)
   const isChanged = (await statusOf($, o.fixDir)) !== o.baseline
   const message = commitMessageOf(fix)
   if (!isChanged) return fix.retestable ? refuse('o corretor não mudou nada') : unverified(fix)
@@ -556,7 +555,9 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
 export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> {
   const fix = parseFix((await readText($, `${fixOutDirOf(o.runDir, o.defectId)}/fix.json`)) ?? '')
   if (fix === null) return refuse('fix.json ausente ou inválido')
-  const committed = await commitFix($, o, fix)
+  await assertFixDir($, o.fixDir)
+  // O HEAD já andou desde o começo da tentativa: o commit dela foi feito (um reload cortou o passo depois dele). Segue daí.
+  const committed = (await headOf($, o.fixDir)) === o.sha ? await commitFix($, o, fix) : null
   if (committed !== null) return committed
   if (!fix.retestable) return unverified(fix)
   if (o.matrix.testCommand !== '') {

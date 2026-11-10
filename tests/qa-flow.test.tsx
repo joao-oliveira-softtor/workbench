@@ -1148,6 +1148,18 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.log.spawns[2]?.prompt).toContain('mudança sem descrição de commit')
   })
 
+  test('reload entre o commit e o fim das conferências: segue da etapa depois do commit, sem recusa nem tentativa a mais', async ($, on) => {
+    const { t } = await fixing($, on, { stall: holdOnce(k => k === 'npm test').hold })
+    await fixerEnds($, t)
+    expect(t.wt.commits).toHaveLength(1)
+    await start($)
+    await tick(t)
+    expect(t.wt.commits).toHaveLength(1)
+    // O `npm test` parado nunca chega ao log (o fixture registra depois da espera): este é o do passo novo.
+    expect(t.log.runs.filter(a => a.join(' ') === 'npm test')).toHaveLength(1)
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+  })
+
   test('o fix.json de uma tentativa recusada não vale para a seguinte', async ($, on) => {
     const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
     await fixerEnds($, t)
