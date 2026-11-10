@@ -284,8 +284,9 @@ export const guardStateTextOf = (role: QaRole, agentId: string | null, ctx: Guar
 // O comando fica entre aspas duplas no shell: aspas, `$`, crase, `\` e quebra de linha não entram.
 export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover', guardFile: string): string | null {
   if ([pluginRoot, guardFile].some(p => /["$`\\\r\n]/.test(p))) return null
-  // O `|| exit 2` é o que barra a ferramenta quando o node falha.
-  return `node --no-warnings "${pluginRoot}/hooks/qa-hook.mjs" ${role} "${guardFile}" || exit 2`
+  // O `|| exit 2` é o que barra a ferramenta quando o node falha. `--experimental-strip-types`: sem ela o Node 22.6 a 22.x não
+  // importa o qa-guard.ts ("Unknown file extension .ts") e todo agente fica sem ferramentas; nas versões novas ela já vem ligada.
+  return `node --no-warnings --experimental-strip-types "${pluginRoot}/hooks/qa-hook.mjs" ${role} "${guardFile}" || exit 2`
 }
 
 // ---- Tipos de agente e ferramenta do mod ----
