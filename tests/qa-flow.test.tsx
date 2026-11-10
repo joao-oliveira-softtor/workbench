@@ -537,8 +537,9 @@ describe('QA: fase Executar', () => {
     await tick(t)
     await command($, 'qa stop')
     await t.clock.advance(HOLD_MS)
+    // O stop guarda o agente vivo: a adoção que estava em curso não o adota mais.
     expect(t.log.guards.at(-1)).toBe('{}')
-    expect(JSON.parse(t.log.guards.at(-2) ?? '{}')).toMatchObject({ role: 'runner', agentId: 'a1' })
+    expect(t.log.guards.some(g => g.includes('"a1"'))).toBe(false)
   })
 
   test('retomada: depois de um novo session.start o trabalho segue do item em curso', async ($, on) => {
@@ -563,6 +564,54 @@ describe('QA: fase Executar', () => {
     await ended($, 'a1')
     await tick(t)
     expect(types(t)).toEqual([QA_RUNNER])
+  })
+})
+
+const guardPathOf = (t: T): string => /"[^"]*\/(?:[^"/]+\/)*guard-[a-z0-9]+\.json/.exec(t.log.agents.find(a => a.name === 'qa-runner')?.command.replaceAll('\\"', '"') ?? '')?.[0].slice(1) ?? ''
+
+describe('QA: pendências da revisão da 7a', () => {
+  test('agente de uma execução parada antes da adoção não é adotado pela execução nova', async ($, on) => {
+    const { t, ui } = await running($, on)
+    await command($, 'qa stop')
+    await click(t, ui)
+    await tick(t)
+    expect(types(t)).toEqual([QA_RUNNER, QA_RUNNER])
+    expect(t.guard()).toMatchObject({ role: 'runner', agentId: 'a2' })
+  })
+
+  test('item que acaba sem id: os agentes de QA vivos na lista nunca são adotados depois', async ($, on) => {
+    const { t } = await running($, on, { spawns: [{ unlisted: true }] })
+    t.listed.push({ id: 'z1', type: QA_OBSERVER, status: 'running', description: 'sobra' })
+    await t.clock.advance(61_000)
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER])
+    await tick(t)
+    expect(t.guard()).toMatchObject({ role: 'observer', agentId: 'a2' })
+  })
+
+  test('stop com a gravação de {} falhando: fecha o navegador, apaga o arquivo da trava e avisa', async ($, on) => {
+    const { t } = await running($, on, { failWrite: (path, text) => path.includes('/guard-') && text === '{}' })
+    await command($, 'qa stop')
+    expect(t.log.runs.some(a => a[0] === AB && a.at(-1) === 'close')).toBe(true)
+    expect(t.log.runs).toContainEqual(['rm', '-f', guardPathOf(t)])
+    expect(t.log.toasts.at(-1)).toContain('trava')
+  })
+
+  test('falha ao gravar a trava do observer: fecha a sessão, a célula fica sem veredito e a fila segue', async ($, on) => {
+    const { t } = await running($, on, { failWrite: (path, text) => path.includes('/guard-') && text.includes('"observer"') })
+    await tick(t)
+    await ended($, 'a1')
+    await tick(t)
+    expect(types(t)).toEqual([QA_RUNNER])
+    expect(t.log.runs.at(-1)?.slice(3)).toEqual(['close'])
+    expect(t.log.toasts.at(-1)).toContain('sem veredito')
+    await tick(t)
+    expect(types(t)).toEqual([QA_RUNNER, QA_RUNNER])
+    expect(t.guard().ctx.session).toContain('c2')
+  })
+
+  test('HOME e raiz atrás de link simbólico: os caminhos do QA usam o caminho real', async ($, on) => {
+    const t = await boot($, on, { run: argv => (argv[0] === 'realpath' ? { exitCode: 0, stdout: '/data/u\n/srv/app\n' } : undefined) })
+    expect(guardPathOf(t).startsWith(`${qaRootOf('/data/u', '/srv/app')}/guard-`)).toBe(true)
   })
 })
 

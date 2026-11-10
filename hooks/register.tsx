@@ -60,6 +60,7 @@ import {
   closeSession,
   guardCtxOf,
   guardRefusalOf,
+  liveQaIdsOf,
   loadMatrix,
   matrixPathOf,
   mkdirs,
@@ -928,9 +929,19 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
 }
 
 // Desmonta o que um item deixou aberto: a trava nega todo agente e a sessão do navegador fecha.
+// A gravação de `{}` que falha não deixa o contexto antigo valendo: o arquivo é apagado (o hook nega quando ele não existe).
 async function teardownQa($: EngineInterface, env: QaEnv, current: QaCurrent | null | undefined): Promise<void> {
-  await $.fs.write(env.guardFile, '{}')
+  const wrote = await settle(() => $.fs.write(env.guardFile, '{}'))
   if (current) await closeSession($, env, current.session)
+  if (wrote.ok) return
+  await settle(() => $.process.run(['rm', '-f', env.guardFile]))
+  $.ui.toast(`QA: não deu para zerar a trava (${wrote.error.slice(0, 80)}); o arquivo dela foi apagado.`)
+}
+
+// Os agentes de QA vivos agora nunca serão adotados por um item novo (stop, ou item que acabou sem conhecer o seu agente).
+async function guardLive($: EngineInterface): Promise<void> {
+  const ids = await liveQaIdsOf($)
+  if (ids.length > 0) await update($, qaGuarded, cur => [...cur, ...ids.filter(id => !cur.includes(id))])
 }
 
 // Grava o item novo. Sem item (célula recusada ou encerrada) a trava fica em `{}`, para não sobrar contexto sem id que
@@ -989,6 +1000,7 @@ async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matri
     case 'adopt':
       return adoptAgent($, env, runDir, matrix, c, step.agentId)
     case 'ended':
+      if (c.agentId === null) await guardLive($)
       return setCurrent($, env, await advanceCell($, env, runDir, matrix, c))
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
@@ -1037,6 +1049,7 @@ async function stopQa($: EngineInterface): Promise<string> {
   const env = qaEnv
   await update($, qaJob, () => null)
   qaQueued = null
+  await guardLive($)
   if (env !== null) await teardownQa($, env, job?.current)
   return job === null ? 'QA: nenhum trabalho em curso.' : 'QA parado. Clique em QA para retomar.'
 }

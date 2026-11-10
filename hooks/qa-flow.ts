@@ -8,6 +8,7 @@ import type { Settled } from './model'
 import { ANON_PROFILE, authSummaryOf, parseMatrix, parseVerdict, reportOf, sessionLoadOf } from './qa-evidence'
 import type { Cell, CellOutcome, CellVerdict, Matrix } from './qa-evidence'
 import { guardDecisionOf } from './qa-guard'
+import { ENDED } from './stale'
 import type { GuardCtx, QaRole } from './qa-guard'
 import {
   DETECT_FAIL_RULES,
@@ -36,10 +37,20 @@ export type QaEnv = { home: string; root: string; qaRoot: string; guardFile: str
 
 export async function qaEnvOf($: EngineInterface, token: string): Promise<QaEnv | null> {
   const home = nonEmpty(await settle(() => $.env.get('HOME'))) ?? nonEmpty(await settle(() => $.env.get('USERPROFILE')))
-  const root = await repoRoot($)
-  if (home === undefined || root === null) return null
-  const qaRoot = qaRootOf(home, root)
-  return { home, root, qaRoot, guardFile: guardFileOf(qaRoot, token) }
+  const found = await repoRoot($)
+  if (home === undefined || found === null) return null
+  // O hook da trava resolve links simbólicos: o contexto guarda o caminho real, senão o hook nega tudo. Falhou: fica o lido.
+  const [realHome, realRoot] = (await run($, ['realpath', home, found]))?.split('\n') ?? []
+  const root = realRoot || found
+  const qaRoot = qaRootOf(realHome || home, root)
+  return { home: realHome || home, root, qaRoot, guardFile: guardFileOf(qaRoot, token) }
+}
+
+// Ids dos agentes de QA vivos na lista: entram em `qaGuarded`, para nunca serem adotados como o agente de um item novo.
+export async function liveQaIdsOf($: EngineInterface): Promise<string[]> {
+  const listed = await settle(() => $.agent.list())
+  const types: string[] = Object.values(QA_TYPE)
+  return listed.ok ? listed.value.filter(a => types.includes(a.type) && !ENDED.has(a.status)).map(a => a.id) : []
 }
 
 // O validate só aceita `$.env.get` com o nome literal, então a leitura fica no chamador.
