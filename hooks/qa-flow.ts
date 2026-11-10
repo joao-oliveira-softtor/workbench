@@ -236,11 +236,22 @@ export function guardCtxOf(env: QaEnv, matrix: Matrix, runDir: string, session: 
 // A validação da própria trava sobre um contexto de exemplo (o runner lendo a matriz; o corretor lendo um arquivo da worktree):
 // o motivo da recusa, null = aceita. O exemplo não toca o disco: cada caminho é o próprio caminho real e todo alvo é arquivo.
 export function guardRefusalOf(env: QaEnv, matrix: Matrix, runDir: string, role: QaRole = 'runner', fixDir = ''): string | null {
-  const file = role === 'fixer' ? `${fixDir}/package.json` : matrixPathOf(runDir)
-  const probe = { tool_name: 'Read', tool_input: { file_path: file }, cwd: env.root, agent_id: '' }
+  const probe = { tool_name: 'Read', tool_input: { file_path: probeFileOf(role, runDir, fixDir) }, cwd: env.root, agent_id: '' }
   const asIs = { realOf: (p: string) => p, isFile: () => true }
   const got = guardDecisionOf(role, probe, guardStateTextOf(role, null, guardCtxOf(env, matrix, runDir, '', null, fixDir)), asIs)
   return got.decision === 'allow' ? null : got.reason
+}
+
+function probeFileOf(role: QaRole, runDir: string, fixDir: string): string {
+  switch (role) {
+    case 'fixer':
+      return `${fixDir}/package.json`
+    case 'runner':
+    case 'observer':
+      return matrixPathOf(runDir)
+    default:
+      throw new Error('Caso não tratado: ' + String(role satisfies never))
+  }
 }
 
 // `{ deny }` volta como texto; uma rejeição não prova que o agente não nasceu (agentId null: o timer adota ou encerra).
@@ -334,7 +345,7 @@ async function worktreeOf($: EngineInterface, root: string, fixDir: string, bran
     const head = (await run($, git(fixDir, 'rev-parse', '--abbrev-ref', 'HEAD')))?.trim()
     return head === branch ? null : `a pasta ${fixDir} já existe e não é a worktree da branch ${branch}`
   }
-  const made = await runFull($, ['git', 'worktree', 'add', fixDir, '-b', branch], { cwd: root })
+  const made = await runFull($, ['git', 'worktree', 'add', fixDir, '-b', branch], { cwd: root, timeoutMs: TEN_MIN })
   return made.code === 0 ? null : `não deu para criar a worktree (${tailOf(made.out)})`
 }
 
@@ -453,6 +464,15 @@ export async function undoFix($: EngineInterface, fixDir: string, sha: string): 
   if (sha === '') return
   await run($, git(fixDir, 'reset', '-q', '--hard', sha))
   await run($, git(fixDir, 'clean', '-fdq'))
+}
+
+// A pasta de um reteste começa vazia: um veredito de uma rodada parada não vale como o desta.
+export async function freshDir($: EngineInterface, dir: string): Promise<boolean> {
+  return (await run($, ['rm', '-rf', dir])) !== null && (await mkdirs($, dir))
+}
+
+export async function statusOf($: EngineInterface, dir: string): Promise<string | null> {
+  return run($, git(dir, 'status', '--porcelain'))
 }
 
 // Antes de cada corretor: a pasta de saída existe e o fix.json da tentativa anterior some.

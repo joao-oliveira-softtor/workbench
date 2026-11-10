@@ -118,7 +118,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
       return ok()
     }
     if (argv[0] === 'rm') {
-      files.delete(argv[2] ?? '')
+      const target = argv[2] ?? ''
+      for (const k of [...files.keys()]) if (k === target || (argv[1] === '-rf' && k.startsWith(`${target}/`))) files.delete(k)
       return ok()
     }
     if (argv[0] === 'chmod' || argv[0] === 'curl') return ok()
@@ -950,6 +951,39 @@ describe('QA: fase Corrigir, bordas', () => {
     await fixerEnds($, t)
     expect(types(t)).toEqual([QA_FIXER])
     expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['não deu para abrir o navegador do reteste de c1'] })
+  })
+
+  test('stop durante a preparação da worktree: o trabalho não nasce', async ($, on) => {
+    const { t, ui } = await toFix($, on, { hold: holdOnce(k => k === 'npm ci').hold })
+    await click(t, ui)
+    await click(t, ui)
+    await command($, 'qa stop')
+    await t.clock.advance(HOLD_MS)
+    await tick(t)
+    expect(t.log.toasts.at(-1)).toContain('parado durante a preparação')
+    expect(t.log.spawns).toEqual([])
+    expect(await label(ui)).toBe('QA: Corrigir')
+  })
+
+  test('veredito velho na pasta do reteste não vale: a pasta começa vazia', async ($, on) => {
+    const dirty = (a: readonly string[], cwd?: string) => (a.join(' ') === 'git status --porcelain' && cwd === REPO ? { exitCode: 0, stdout: ' M x\n' } : undefined)
+    const r = await toFix($, on, { run: dirty })
+    r.t.files.set(`${outOf(r.t)}/reteste-0/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT]))
+    await click(r.t, r.ui)
+    await click(r.t, r.ui)
+    await finishAgent($, r.t)
+    await finishAgent($, r.t)
+    expect(resultOf(r.t)).toMatchObject({ status: 'não reproduzido na worktree' })
+  })
+
+  test('linha de base relida antes de cada corretor: a worktree suja depois da instalação não engana o "não mudou nada"', async ($, on) => {
+    const { t, ui } = await toFix($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
+    t.wt.status = ' M package-lock.json'
+    await click(t, ui)
+    await click(t, ui)
+    await fixerEnds($, t)
+    await fixerEnds($, t, FIX_OK, '')
+    expect(t.log.spawns[2]?.prompt).toContain('o corretor não mudou nada')
   })
 
   test('clique durante a preparação da worktree espera ela acabar', async ($, on) => {

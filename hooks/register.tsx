@@ -70,6 +70,7 @@ import {
   commitPassTests,
   fixQueueAt,
   freePortOf,
+  freshDir,
   headOf,
   isReproduced,
   judgeOf,
@@ -78,6 +79,7 @@ import {
   rootSnapOf,
   setupWorktree,
   startApp,
+  statusOf,
   stopApp,
   targetOf,
   undoFix,
@@ -201,6 +203,8 @@ let qaEnv: QaEnv | null = null
 let qaBlocked: string | null = QA_OFF
 // O app da worktree na fase Corrigir: o processo morre com o módulo, então um reload o perde e o passo o sobe de novo.
 let qaApp: QaApp | null = null
+// Quantos stops já houve: o clique Corrigir que prepara a worktree por minutos não monta o trabalho se um stop chegou no meio.
+let qaStops = 0
 
 function hhmm(at: number): string {
   const d = new Date(at)
@@ -874,6 +878,7 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   }
   const runId = runIdIn(flow.runDir)
   const fixDir = fixDirOf(env.root, runId)
+  if ((await read($, qaJob)) !== null) return
   const now = await $.clock.now()
   const armedAt = (await read($, qaArmed))?.at
   if (armedAt === undefined || now - armedAt > ARM_MS) {
@@ -882,9 +887,14 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
     return
   }
   await update($, qaArmed, () => null)
+  const stops = qaStops
   const ready = await setupWorktree($, env, matrix, flow.runDir, fixDir, fixBranchOf(runId))
   if ('error' in ready) {
     $.ui.toast(`QA: ${ready.error}`)
+    return
+  }
+  if (stops !== qaStops) {
+    $.ui.toast('QA: parado durante a preparação da worktree; clique em "QA: Corrigir" para retomar.')
     return
   }
   const root = await rootSnapOf($, env.root)
@@ -1170,6 +1180,8 @@ async function finishDefect($: EngineInterface, f: FixCtx, c: QaCurrent, status:
   await closeSession($, f.env, c.session)
   await stopApp(qaApp)
   qaApp = null
+  // Parado no meio do passo: o stop desfaz o defeito, então não fica resultado (a retomada o refaz).
+  if ((await read($, qaJob)) === null) return null
   const fix = await read($, qaFix)
   await writeFixResult($, { ...f, defectId: c.item, sha: c.sha, status, attempt: c.attempt, reasons: [...c.reasons, ...reasons], cells, regression: fix?.regression ?? null, pending: fix?.pending ?? [] })
   return null
@@ -1181,7 +1193,7 @@ async function startRetest($: EngineInterface, f: FixCtx, c: QaCurrent, cellId: 
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-${attempt}-${cellId}`)
   const outDir = retestDirOf(f.runDir, c.item, attempt, cellId)
   const app = appMatrixOf(f.matrix, c.port)
-  const cdpPort = cell !== undefined && (await mkdirs($, outDir)) ? await prepareSession($, f.env, f.matrix, cell, session, app.baseUrl) : null
+  const cdpPort = cell !== undefined && (await freshDir($, outDir)) ? await prepareSession($, f.env, f.matrix, cell, session, app.baseUrl) : null
   if (cell === undefined || cdpPort === null) return finishDefect($, f, c, 'não reverificado', [`não deu para abrir o navegador do reteste de ${cellId}`], [])
   const now = await $.clock.now()
   const item: QaCurrent = { ...c, role: 'runner', attempt, agentId: null, at: now, isEnded: false, cell: cellId, session, cdpPort }
@@ -1196,6 +1208,9 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const outDir = fixOutDirOf(f.runDir, c.item)
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
   const app = appMatrixOf(f.matrix, c.port)
+  // A linha de base é relida antes de cada corretor: o commit ou o desfazer anterior mudou o `git status` da worktree.
+  const baseline = await statusOf($, f.fixDir)
+  await update($, qaFix, x => (x === null || baseline === null ? x : { ...x, baseline }))
   const cdpPort = (await resetFixOut($, outDir)) ? await prepareSession($, f.env, f.matrix, target.cell, session, app.baseUrl) : null
   if (cdpPort === null) return finishDefect($, f, c, 'não reverificado', ['não deu para abrir o navegador do corretor'], [])
   const now = await $.clock.now()
@@ -1350,6 +1365,7 @@ async function stopQa($: EngineInterface): Promise<string> {
   const env = qaEnv
   await update($, qaJob, () => null)
   qaQueued = null
+  qaStops += 1
   await guardLive($)
   if (env !== null) await (job === null ? teardownQa($, env, null) : teardownJob($, env, await read($, qaFlow), job))
   return job === null ? 'QA: nenhum trabalho em curso.' : 'QA parado. Clique em QA para retomar.'
