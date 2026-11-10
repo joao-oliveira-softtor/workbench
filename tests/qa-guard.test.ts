@@ -608,7 +608,8 @@ describe('writeCheckOf', () => {
     expect(wc('fixer', `${FIX}/.git`, CTX)).toBe('deny')
     expect(wc('fixer', `${FIX}/.git/config`, CTX)).toBe('deny')
     expect(wc('fixer', `${FIX}/src/../.git`, CTX)).toBe('deny')
-    expect(wc('fixer', `${FIX}/.gitignore`, CTX)).toBe('allow')
+    // `.gitignore` nega desde a rodada 4: com `!.env` dentro, o rg leria o `.env`
+    expect(wc('fixer', `${FIX}/.gitattributes`, CTX)).toBe('allow')
   })
   test('fixer não escapa de fixDir com ..', () => {
     expect(wc('fixer', `${FIX}/../../src/a.ts`, CTX)).toBe('deny')
@@ -880,5 +881,169 @@ describe('guardDecisionOf', () => {
     expect(d.reason).not.toBe('')
     const proxy = new Proxy({}, { get: () => { throw new Error('boom') }, getPrototypeOf: () => { throw new Error('boom') } })
     expect(guard('fixer', proxy).decision).toBe('deny')
+  })
+})
+
+describe('rodada 4: a busca não abre arquivo oculto nem ignorado', () => {
+  const fx = (command: string) => decision('fixer', command)
+
+  test('glob do rg e do grep só na forma de extensão de código', () => {
+    for (const c of [
+      `rg -n -g ".env" "=" ${FIX}`,
+      `rg -n -g "*" X ${FIX}`,
+      `rg -n -g ".e*" "=" ${FIX}`,
+      `rg -n --glob .env "=" ${FIX}`,
+      `rg -n -g "*.env" "=" ${FIX}`,
+      `rg -n -g "**/*.local" "=" ${FIX}`,
+      `rg -n -g "*.dotsecret" "=" ${FIX}`,
+      `rg -n -g "src/*.ts" "=" ${FIX}`,
+      `grep -n --include ".env" "=" ${FIX}/src/a.css`,
+      `grep -n --exclude "*.env" "=" ${FIX}/src/a.css`,
+      `grep -n --exclude-dir node_modules "=" ${FIX}/src/a.css`,
+    ]) expect(fx(c)).toBe('pass')
+    expect(fx(`rg -n -g "**/*.css" X ${FIX}`)).toBe('allow')
+    expect(fx(`rg -n --glob "*.ts" X ${FIX}`)).toBe('allow')
+  })
+
+  test('tipo do rg só da lista (o tipo sh inclui .env e passa por cima de "pular oculto")', () => {
+    expect(fx(`rg -n -t sh "=" ${FIX}`)).toBe('pass')
+    expect(fx(`rg -n --type sh "=" ${FIX}`)).toBe('pass')
+    expect(fx(`rg -n -t ts X ${FIX}`)).toBe('allow')
+  })
+
+  test('cada opção com valor só no programa que a tem', () => {
+    expect(fx(`rg -n --include "*.css" X ${FIX}`)).toBe('pass')
+    expect(fx(`grep -n -g "*.css" X ${FIX}/src/a.css`)).toBe('pass')
+    expect(fx(`grep -n -t ts X ${FIX}/src/a.css`)).toBe('pass')
+    expect(fx(`grep -n --max-depth 2 X ${FIX}/src/a.css`)).toBe('pass')
+    expect(fx(`rg -n --max-depth 2 X ${FIX}`)).toBe('allow')
+  })
+
+  test('letras: no rg, E e h não são letras soltas (-E leva valor)', () => {
+    expect(fx(`rg -v -n -E utf-8 ${FIX}`)).toBe('pass')
+    expect(fx(`rg -nE X ${FIX}`)).toBe('pass')
+    expect(fx(`rg -h X ${FIX}`)).toBe('pass')
+    expect(fx(`rg -nilFwcoHsvx X ${FIX}`)).toBe('allow')
+    expect(fx(`grep -nilFwcoHhsvxE X ${FIX}/src/a.css`)).toBe('allow')
+  })
+
+  test('o último argumento de rg, grep e ls é um caminho aceito', () => {
+    expect(fx(`rg -n X ${FIX} -e Y`)).toBe('pass')
+    expect(fx(`rg X ${FIX} -n`)).toBe('pass')
+    expect(fx(`grep X ${FIX}/src/a.css -n`)).toBe('pass')
+    expect(fx(`ls ${FIX}/src -la`)).toBe('pass')
+  })
+
+  test('grep só em arquivo de código: numa pasta ele lê os ocultos que o .gitignore de cima não cobre', () => {
+    expect(fx(`grep -n "=" ${FIX}/apps/api`)).toBe('pass')
+    expect(fx(`grep -n "=" ${FIX}`)).toBe('pass')
+    expect(fx(`grep -n "=" ${FIX}/.oculto`)).toBe('pass')
+    expect(fx(`grep -n "=" ${FIX}/src/a.ts`)).toBe('allow')
+  })
+
+  test('find não procura nome oculto nem .env', () => {
+    for (const c of [
+      `find ${FIX} -name .env`,
+      `find ${FIX} -name ".*"`,
+      `find ${FIX} -iname "*.ENV*"`,
+      `find ${FIX} -path "*/.env.local"`,
+    ]) expect(fx(c)).toBe('pass')
+    expect(fx(`find ${FIX}/src -name "*.ts"`)).toBe('allow')
+  })
+
+  test('regressão: buscas comuns continuam liberadas', () => {
+    for (const c of [
+      `rg -n "useState" ${FIX}/src`,
+      `rg -n -g "*.tsx" -e "foo bar" ${FIX}`,
+      `grep -n --include "*.css" "overflow" ${FIX}/src/a.css`,
+      `find ${FIX}/src -name "*.tsx" -type f -maxdepth 3`,
+      `ls -la ${FIX}/src`,
+    ]) expect(fx(c)).toBe('allow')
+    expect(wc('fixer', `${FIX}/src/a.ts`)).toBe('allow')
+  })
+})
+
+describe('rodada 4: arquivos de ignorar, git e .env em maiúsculas', () => {
+  test('gravar arquivo de regras de ignorar nega em qualquer pasta', () => {
+    for (const p of [`${FIX}/.rgignore`, `${FIX}/.ignore`, `${FIX}/.gitignore`, `${FIX}/src/.gitignore`, `${RUN}/.ignore`, `${FIX}/.GITIGNORE`, `${FIX}/.git/info/exclude`, `${RUN}/x/.git/info/exclude`]) {
+      expect(wc('fixer', p)).toBe('deny')
+    }
+    expect(wc('fixer', `${FIX}/src/gitignore.ts`)).toBe('allow')
+  })
+
+  test('posicionais do git passam pela regra do .env', () => {
+    expect(decision('fixer', `git -C ${FIX} diff -- .env.local`)).toBe('pass')
+    expect(decision('fixer', `git -C ${FIX} diff -- apps/api/.env`)).toBe('pass')
+    expect(decision('fixer', `git -C ${FIX} diff .ENV`)).toBe('pass')
+    expect(decision('fixer', `git -C ${FIX} diff -- src/a.ts`)).toBe('allow')
+  })
+
+  test('.env sem diferenciar maiúsculas: leitura, gravação e busca', () => {
+    expect(rc('fixer', `${FIX}/.ENV`)).toBe('deny')
+    expect(rc('fixer', `${FIX}/apps/.Env.local`)).toBe('deny')
+    expect(wc('fixer', `${FIX}/.Env.local`)).toBe('deny')
+    expect(decision('fixer', `rg -n X ${FIX}/.ENV`)).toBe('pass')
+  })
+})
+
+describe('rodada 4: guardDecisionOf confere os valores do contexto', () => {
+  const stateOf = (ctx: Record<string, unknown>) => JSON.stringify({ role: 'fixer', agentId: null, ctx: { ...CTX, ...ctx } })
+  const input = { agent_id: 'a1', cwd: CWD, tool_name: 'Bash', tool_input: { command: 'curl http://localhost:3000' } }
+  const with_ = (ctx: Record<string, unknown>) => guardDecisionOf('fixer', input, stateOf(ctx)).decision
+
+  test('o contexto de base libera; fixDir vazio e sessão vazia também', () => {
+    expect(with_({})).toBe('allow')
+    expect(with_({ fixDir: '' })).toBe('allow')
+    expect(with_({ session: '' })).toBe('allow')
+  })
+
+  for (const key of ['home', 'repoRoot', 'runDir', 'agentBrowser', 'impeccable']) {
+    test(`${key} tem que ser caminho absoluto normalizado com pelo menos dois segmentos`, () => {
+      for (const v of ['', 'agent-browser', 'home/u/x', '/', '/home', '/home/u/', '/home/./u', '/home/x/../u']) {
+        expect(with_({ [key]: v })).toBe('deny')
+      }
+    })
+  }
+
+  test('fixDir: vazio ou caminho assim, dentro de repoRoot e diferente dele', () => {
+    for (const v of ['/', 'app/x', '/home/u/app', '/home/u/other/wt', '/home/u/app/../x', '/home/u/app/']) expect(with_({ fixDir: v })).toBe('deny')
+  })
+
+  test('runDir fora de repoRoot e sem conter repoRoot', () => {
+    expect(with_({ runDir: '/home/u/app/qa' })).toBe('deny')
+    expect(with_({ runDir: '/home/u' , home: '/home/u' })).toBe('deny')
+    expect(with_({ runDir: '/home/u/app' })).toBe('deny')
+  })
+
+  test('readDirs: caminho absoluto com dois segmentos, diferente da home e sem conter repoRoot', () => {
+    for (const v of ['/', '/home', 'rel/x', '/home/u', '/home/u/app', '/home/u/']) expect(with_({ readDirs: [REF, v] })).toBe('deny')
+    // home que não contém o repositório: só a regra "igual à home" pega
+    expect(with_({ home: '/srv/h', readDirs: [REF, '/srv/h'] })).toBe('deny')
+    expect(with_({ home: '/srv/h', readDirs: [REF, '/srv/h/ref'] })).toBe('allow')
+  })
+
+  test('origins só origem http(s)', () => {
+    for (const v of ['localhost:3000', 'http://localhost:3000/', 'file:///x', 'ftp://h', 'http://u@localhost:3000', 'http://localhost:3000/a']) {
+      expect(with_({ origins: ['http://localhost:3000', v] })).toBe('deny')
+    }
+    expect(with_({ origins: ['https://app.local:8443', 'http://localhost:3000'] })).toBe('allow')
+  })
+
+  test('cdpPort nulo ou inteiro entre 1 e 65535', () => {
+    for (const v of [0, -1, 65536, 1.5]) expect(with_({ cdpPort: v })).toBe('deny')
+    expect(with_({ cdpPort: 1 })).toBe('allow')
+    expect(with_({ cdpPort: 65535 })).toBe('allow')
+  })
+
+  test('session só com letras, dígitos, _ e -', () => {
+    for (const v of ['a b', 'a;b', 'é', 'a/b', 'a.b']) expect(with_({ session: v })).toBe('deny')
+    expect(with_({ session: 'qa-c01_X' })).toBe('allow')
+  })
+
+  test('contexto que não é JSON sai com o motivo de contexto inválido, não erro interno', () => {
+    const bad = guardDecisionOf('fixer', input, '{')
+    expect(bad.decision).toBe('deny')
+    expect(bad.reason).toBe('contexto de QA ausente ou inválido')
+    expect(guardDecisionOf('fixer', input, null).reason).toBe('contexto de QA ausente ou inválido')
   })
 })

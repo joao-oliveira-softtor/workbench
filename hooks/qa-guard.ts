@@ -148,6 +148,8 @@ function checkoutPathReason(word: string, ctx: GuardCtx, cwd: string): string | 
   return null
 }
 
+// shortcut: a varredura olha toda palavra solta, então buscar o texto `cd`, `git`, `gh` ou `pushd` (`rg -n git <fixDir>`) é negado;
+// para liberar, a varredura teria que saber qual palavra é programa e qual é argumento.
 function denyReason(role: QaRole, command: string, ctx: GuardCtx, cwd: string): string | null {
   // palavras cruas, e palavras de shell (aspas juntadas: `g""it`, `c''d`)
   const raw = command.split(/[\s'"`;&|()<>]+/).filter(w => w !== '')
@@ -353,7 +355,7 @@ function dockerLogsOk(args: readonly string[], ctx: GuardCtx): boolean {
 // Posicional do git da worktree: referência ou caminho simples; com `/` ou começando com `.` tem que ficar dentro de fixDir.
 function gitPositionalOk(w: string, ctx: GuardCtx): boolean {
   const inFix = isInside(resolveIn(w, ctx.fixDir, ctx.home), ctx.fixDir)
-  return /^[A-Za-z0-9._/-]+$/.test(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
+  return /^[A-Za-z0-9._/-]+$/.test(w) && !isSecretPath(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
 }
 
 function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
@@ -384,13 +386,25 @@ function gitWorktreeOk(args: readonly string[], ctx: GuardCtx): boolean {
 // ---- Busca no código pelo Bash (só fixer): forma fechada, só caminho absoluto em fixDir ou runDir ----
 
 const LS_LETTERS = /^-[aAlLhR1tSrdF]+$/
-// sem `r`/`R`: o grep recursivo leria o `.env` copiado para a worktree; o rg já é recursivo (e nele `-r` é "replace")
-const GREP_LETTERS = /^-[nilFwcoHhsvxE]+$/
-const GREP_NUMERIC = ['-A', '-B', '-C', '-m', '--max-count', '--max-depth']
-const GREP_TEXT = ['-e', '-g', '--glob', '--include', '--exclude', '--exclude-dir', '-t', '--type']
+// Busca por programa: só letras que não levam valor (conferidas no `rg --help` e no `grep --help` desta máquina) e as opções
+// com valor que cada um tem. Sem `r`/`R`: o grep recursivo leria o `.env`; o rg já é recursivo (nele `-r` é "replace").
+type SearchSpec = { letters: RegExp; numeric: readonly string[]; globs: readonly string[]; types: readonly string[] }
+const SEARCH_SPECS = new Map<string, SearchSpec>([
+  // no rg, `-E` é codificação e `-h` é ajuda
+  ['rg', { letters: /^-[nilFwcoHsvx]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count', '--max-depth'], globs: ['-g', '--glob'], types: ['-t', '--type'] }],
+  ['grep', { letters: /^-[nilFwcoHhsvxE]+$/, numeric: ['-A', '-B', '-C', '-m', '--max-count'], globs: ['--include', '--exclude', '--exclude-dir'], types: [] }],
+])
+// Glob e tipo passam por cima de "pular oculto" (e o glob, de "pular ignorado"): `*.env` acha `.env`, `*.local` acha `.env.local`.
+// Por isso só extensões de código, que nenhum `.env*` usa.
+const CODE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'sass', 'less', 'html', 'vue', 'svelte', 'json', 'md', 'mdx', 'py', 'go', 'rs', 'java', 'php', 'rb', 'sql', 'yml', 'yaml', 'graphql', 'prisma', 'svg', 'txt', 'log']
+// tipos do rg cujos globs são só `*.<extensão>` (`sh` traz `.env`; `ruby`, `.irbrc`)
+const RG_TYPES = ['ts', 'js', 'css', 'html', 'json', 'md', 'py', 'go', 'rust', 'java', 'php', 'sql', 'yaml', 'vue', 'svelte', 'sass', 'less']
+const isCodeGlob = (v: string): boolean => CODE_EXTS.includes(/^(\*\*\/)?\*\.([A-Za-z0-9]+)$/.exec(v)?.[2] ?? '')
+// o grep do Bash do Claude Code é o ugrep com `--hidden`: numa pasta ele lê os ocultos que o `.gitignore` de cima não cobre
+const isCodeFile = (p: string): boolean => CODE_EXTS.includes(/^[^.][^/]*\.([A-Za-z0-9]+)$/.exec(p.slice(p.lastIndexOf('/') + 1))?.[1] ?? '')
 const FIND_TESTS = ['-name', '-iname', '-path']
 
-const isSecretPath = (p: string): boolean => p.split('/').some(seg => seg.startsWith('.env'))
+const isSecretPath = (p: string): boolean => p.split('/').some(seg => seg.toLowerCase().startsWith('.env'))
 
 function searchPathOk(w: string, ctx: GuardCtx): boolean {
   if (!w.startsWith('/')) return false
@@ -400,34 +414,44 @@ function searchPathOk(w: string, ctx: GuardCtx): boolean {
 
 const optValueOk = (v: string | undefined): v is string => v !== undefined && !v.startsWith('-')
 
+// O último argumento é caminho: um valor engolido por uma opção nunca deixa o comando sem caminho (aí ele varre a pasta da sessão).
 function lsOk(args: readonly string[], ctx: GuardCtx): boolean {
   const paths = args.filter(w => !LS_LETTERS.test(w))
-  return paths.length > 0 && paths.every(w => !w.startsWith('-') && searchPathOk(w, ctx))
+  const last = args[args.length - 1] ?? ''
+  return paths.length > 0 && !LS_LETTERS.test(last) && paths.every(w => !w.startsWith('-') && searchPathOk(w, ctx))
 }
 
-// rg e grep: o primeiro posicional é o padrão (a não ser que haja -e); os demais são caminhos, e pelo menos um é obrigatório.
-function grepOk(args: readonly string[], ctx: GuardCtx): boolean {
+// rg e grep: o primeiro posicional é o padrão (a não ser que haja -e); os demais são caminhos, e o último argumento é um deles.
+function grepOk(prog: string, args: readonly string[], ctx: GuardCtx): boolean {
+  const spec = SEARCH_SPECS.get(prog)
+  if (spec === undefined) return false
   const pos: string[] = []
   let hasPattern = false
+  let lastIsPos = false
   for (let i = 0; i < args.length; i++) {
     const w = args[i] ?? ''
-    if (GREP_LETTERS.test(w)) continue
-    const numeric = GREP_NUMERIC.includes(w)
-    if (numeric || GREP_TEXT.includes(w)) {
+    lastIsPos = false
+    if (spec.letters.test(w)) continue
+    if (spec.numeric.includes(w) || spec.globs.includes(w) || spec.types.includes(w) || w === '-e') {
       const v = args[++i]
-      if (!optValueOk(v) || (numeric && !/^\d+$/.test(v))) return false
+      if (!optValueOk(v)) return false
+      if (spec.numeric.includes(w) && !/^\d+$/.test(v)) return false
+      if (spec.globs.includes(w) && !isCodeGlob(v)) return false
+      if (spec.types.includes(w) && !RG_TYPES.includes(v)) return false
       if (w === '-e') hasPattern = true
     } else if (w.startsWith('-')) {
       return false
     } else {
       pos.push(w)
+      lastIsPos = true
     }
   }
   const paths = hasPattern ? pos : pos.slice(1)
-  return paths.length > 0 && paths.every(w => searchPathOk(w, ctx))
+  const fileOk = (w: string): boolean => prog !== 'grep' || isCodeFile(normalizePath(w))
+  return lastIsPos && paths.length > 0 && paths.every(w => searchPathOk(w, ctx) && fileOk(w))
 }
 
-// find: caminhos primeiro; depois só -name/-iname/-path, -type f|d|l, -maxdepth/-mindepth e -not.
+// find: caminhos primeiro; depois só -name/-iname/-path (sem nome oculto nem `.env`), -type f|d|l, -maxdepth/-mindepth e -not.
 function findCmdOk(args: readonly string[], ctx: GuardCtx): boolean {
   let i = 0
   while (i < args.length && !(args[i] ?? '').startsWith('-')) {
@@ -440,7 +464,7 @@ function findCmdOk(args: readonly string[], ctx: GuardCtx): boolean {
     const v = args[i + 1]
     if (w === '-not') continue
     const ok = FIND_TESTS.includes(w)
-      ? optValueOk(v)
+      ? optValueOk(v) && !v.startsWith('.') && !v.toLowerCase().includes('.env')
       : w === '-type'
         ? ['f', 'd', 'l'].includes(v ?? '')
         : (w === '-maxdepth' || w === '-mindepth') && /^\d+$/.test(v ?? '')
@@ -460,7 +484,7 @@ function isAllowed(role: QaRole, command: string, ctx: GuardCtx, cwd: string): b
   if (role !== 'fixer') return false
   if (prog === 'git') return gitWorktreeOk(args, ctx)
   if (prog === 'ls') return lsOk(args, ctx)
-  if (prog === 'rg' || prog === 'grep') return grepOk(args, ctx)
+  if (prog === 'rg' || prog === 'grep') return grepOk(prog, args, ctx)
   return prog === 'find' && findCmdOk(args, ctx)
 }
 
@@ -474,13 +498,17 @@ export function bashCheckOf(role: QaRole, command: string, ctx: GuardCtx, cwd: s
     : { decision: 'pass', reason: 'comando fora da lista liberada pela trava de QA' }
 }
 
+// Arquivo que muda o que o rg e o grep pulam: com `!.env` dentro, a busca seguinte leria o `.env`.
+const isIgnoreFile = (p: string): boolean =>
+  ['.ignore', '.rgignore', '.gitignore'].includes(p.slice(p.lastIndexOf('/') + 1).toLowerCase()) || /\/\.git\/info\/exclude$/i.test(p)
+
 // Gravar só no runDir (qualquer papel) ou, para o fixer, na worktree de correção (menos o `.git`, que aponta para outro repositório).
 export function writeCheckOf(role: QaRole, filePath: string, ctx: GuardCtx, cwd: string): 'allow' | 'deny' {
   // o bash não expande `~` entre aspas e os agentes recebem caminhos absolutos
   if (filePath === '' || filePath.startsWith('~')) return 'deny'
   const p = resolveIn(filePath, cwd, ctx.home)
   // mudar o `.env` da cópia faria o reteste passar sem corrigir o código
-  if (isSecretPath(p)) return 'deny'
+  if (isSecretPath(p) || isIgnoreFile(p)) return 'deny'
   if (isInside(p, ctx.runDir)) return 'allow'
   const inFix = role === 'fixer' && isInside(p, ctx.fixDir) && !isInside(p, `${normalizePath(ctx.fixDir)}/.git`)
   return inFix ? 'allow' : 'deny'
@@ -503,6 +531,27 @@ const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x =
 const STRING_FIELDS = ['home', 'repoRoot', 'fixDir', 'runDir', 'agentBrowser', 'impeccable', 'session'] as const
 const LIST_FIELDS = ['readDirs', 'origins', 'containers'] as const
 
+// Caminho absoluto já normalizado e com pelo menos dois segmentos: `/`, `/home` e `/a/../b` não servem de pasta liberada.
+const isDeepPath = (p: string): boolean => p.startsWith('/') && normalizePath(p) === p && p.split('/').length >= 3
+const isOrigin = (o: string): boolean => {
+  try {
+    const u = new URL(o)
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.origin === o
+  } catch {
+    return false
+  }
+}
+
+// Valores do contexto: as pastas liberadas nunca podem cobrir a raiz, a home nem o checkout principal.
+function ctxValuesOk(c: GuardCtx): boolean {
+  const paths = [c.home, c.repoRoot, c.runDir, c.agentBrowser, c.impeccable].every(isDeepPath)
+  const fix = c.fixDir === '' || (isDeepPath(c.fixDir) && c.fixDir !== c.repoRoot && isInside(c.fixDir, c.repoRoot))
+  const run = !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
+  const reads = c.readDirs.every(d => isDeepPath(d) && d !== c.home && !isInside(c.repoRoot, d))
+  const port = c.cdpPort === null || (Number.isInteger(c.cdpPort) && c.cdpPort >= 1 && c.cdpPort <= 65535)
+  return paths && fix && run && reads && port && c.origins.every(isOrigin) && /^[A-Za-z0-9_-]*$/.test(c.session)
+}
+
 // O contexto vem de um arquivo: confere cada campo.
 function ctxOf(raw: unknown): GuardCtx | null {
   if (!isRecord(raw)) return null
@@ -510,7 +559,7 @@ function ctxOf(raw: unknown): GuardCtx | null {
   const okLists = LIST_FIELDS.every(k => isStrings(raw[k]))
   const port = raw['cdpPort']
   if (!okStrings || !okLists || !(port === null || typeof port === 'number')) return null
-  return {
+  const ctx = {
     home: String(raw['home']),
     repoRoot: String(raw['repoRoot']),
     fixDir: String(raw['fixDir']),
@@ -523,13 +572,19 @@ function ctxOf(raw: unknown): GuardCtx | null {
     origins: raw['origins'] as string[],
     containers: raw['containers'] as string[],
   }
+  return ctxValuesOk(ctx) ? ctx : null
 }
 
 type GuardState = { role: QaRole; agentId: string | null; ctx: GuardCtx }
 
 function stateOf(text: string | null): GuardState | null {
   if (text === null) return null
-  const raw: unknown = JSON.parse(text)
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return null
+  }
   if (!isRecord(raw) || !isRole(raw['role'])) return null
   const agentId = raw['agentId']
   const ctx = ctxOf(raw['ctx'])
@@ -566,7 +621,7 @@ export function guardDecisionOf(role: string, input: unknown, stateText: string 
   try {
     if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
     const state = stateOf(stateText)
-    if (state === null) return deny('arquivo de contexto da trava ausente ou inválido')
+    if (state === null) return deny('contexto de QA ausente ou inválido')
     if (state.role !== role) return deny('o papel do arquivo de contexto é outro: agente fora de vez')
     if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
     const { tool_name: tool, tool_input: toolInput, cwd, agent_id: agentId } = input
