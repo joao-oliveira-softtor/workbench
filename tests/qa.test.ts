@@ -53,6 +53,7 @@ import {
   runIdOf,
   sessionOf,
   spawnPromptOf,
+  statusSumOf,
   toolsDirOf,
   wrapperOf,
 } from '../hooks/qa'
@@ -335,6 +336,14 @@ describe('caminhos', () => {
     expect(projectSlugOf('/x/Meu App_v2')).toMatch(/^meu-app-v2-[0-9a-f]{6}$/)
     expect(projectSlugOf('/')).toMatch(/^projeto-[0-9a-f]{6}$/)
     expect(projectSlugOf('/x/ç')).toMatch(/^projeto-[0-9a-f]{6}$/)
+  })
+
+  test('o resumo do git status é curto, igual para o mesmo texto e diferente quando o texto muda', () => {
+    const big = ' M src/a.ts\n'.repeat(50_000)
+    expect(statusSumOf(big).length).toBeLessThan(20)
+    expect(statusSumOf(' M a.ts\n')).toBe(statusSumOf(' M a.ts\n'))
+    expect(statusSumOf(' M a.ts\n')).not.toBe(statusSumOf(' M b.ts\n'))
+    expect(statusSumOf('')).not.toBe(statusSumOf(' M a.ts\n'))
   })
 
   test('identificador da execução é a hora local AAAAMMDD-HHMM', () => {

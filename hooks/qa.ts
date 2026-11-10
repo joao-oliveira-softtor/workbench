@@ -174,18 +174,21 @@ export function agentStepOf(
 
 export const qaHomeOf = (home: string): string => `${home}/.claude/workbench-qa`
 
-// FNV-1a de 32 bits sobre o caminho inteiro: dois projetos de mesmo nome em pastas diferentes não dividem a raiz.
+// FNV-1a de 32 bits: no caminho, dois projetos de mesmo nome em pastas diferentes não dividem a raiz.
 function hashOf(text: string): string {
   let h = 0x811c9dc5
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193)
-  return (h >>> 0).toString(16).padStart(8, '0').slice(0, 6)
+  return (h >>> 0).toString(16).padStart(8, '0')
 }
 
 export function projectSlugOf(root: string): string {
   const path = root.replace(/\/+$/, '')
   const name = (path.split('/').pop() ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  return `${name === '' ? 'projeto' : name}-${hashOf(path)}`
+  return `${name === '' ? 'projeto' : name}-${hashOf(path).slice(0, 6)}`
 }
+
+// O `git status` da worktree no estado é só tamanho e hash: o texto inteiro pode ter milhares de linhas.
+export const statusSumOf = (status: string): string => `${status.length}:${hashOf(status)}`
 
 export const qaRootOf = (home: string, root: string): string => `${qaHomeOf(home)}/${projectSlugOf(root)}`
 

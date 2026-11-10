@@ -56,6 +56,7 @@ import {
   runIdOf,
   sessionOf,
   spawnPromptOf,
+  statusSumOf,
   toolsDirOf,
   wrapperOf,
 } from './qa'
@@ -1344,7 +1345,7 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
 // As conferências do corretor, a partir do HEAD do começo da tentativa; depois delas a linha de base é o que deixaram.
 async function checkAttempt($: EngineInterface, f: FixCtx, c: QaCurrent): Promise<FixCheck> {
   const fix = await read($, qaFix)
-  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? '', port: c.port })
+  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? statusSumOf(''), port: c.port })
   await rebaseline($, f)
   return check
 }
@@ -1355,6 +1356,11 @@ async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
     case 'refuse':
       return judged($, f, c, target, [], { accepted: false, reasons: [check.reason], detail: check.detail })
     case 'unverified':
+      // Depois da tentativa 1, os commits das anteriores foram recusados: nada da correção fica na branch.
+      if (c.attempt > 1) {
+        await undoFix($, f.fixDir, c.sha)
+        await rebaseline($, f)
+      }
       return finishDefect($, f, c, 'não reverificado', [check.reason], [])
     case 'ok':
       await update($, qaFix, x => (x === null ? null : { ...x, regression: check.regression, pending: check.pending }))
@@ -1377,16 +1383,24 @@ async function warnRootMoved($: EngineInterface, env: QaEnv): Promise<void> {
   $.ui.toast(`QA: o checkout principal (${env.root}) mudou durante a correção (HEAD, branch ou stash); confira se foi você.`)
 }
 
-// Fim da fila: testes das células PASS na worktree, correcoes.md, etapa de volta ao começo e o resumo para a sessão.
+// Fim da fila: correcoes.md, testes das células PASS na worktree, etapa de volta ao começo e o resumo para a sessão. Worktree
+// sumida: os testes ficam de fora, com aviso, e a fase volta ao começo do mesmo jeito (o relatório já saiu).
 async function closeFix($: EngineInterface, f: FixCtx): Promise<void> {
   const outcomes = await outcomesOf($, baseDirOf(f.runDir), f.matrix)
-  await commitPassTests($, f.runDir, f.matrix, outcomes, f.fixDir)
   const reportPath = await writeFixReport($, f.runDir, (await read($, qaFix))?.defects ?? [])
+  const lost = await commitPassTests($, f.runDir, f.matrix, outcomes, f.fixDir).then(
+    () => null,
+    (err: unknown) => {
+      if (!(err instanceof LostWorktree)) throw err
+      return err.message
+    },
+  )
   await update($, qaFlow, x => ({ ...x, step: 'plan' as const }))
   await update($, qaJob, () => null)
   await update($, qaFix, () => null)
   await teardownQa($, f.env, null)
   void refresh($, true).catch(() => {})
+  if (lost !== null) $.ui.toast(`QA: ${lost}`)
   qaPending = fixDonePromptOf({ reportPath, fixDir: f.fixDir, branch: fixBranchOf(runIdIn(f.runDir)) })
 }
 

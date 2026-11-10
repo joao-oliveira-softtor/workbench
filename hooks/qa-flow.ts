@@ -52,6 +52,7 @@ import {
   qaAgentsOf,
   qaRootOf,
   retestDirOf,
+  statusSumOf,
   toolsDirOf,
   wrapperOf,
 } from './qa'
@@ -439,7 +440,7 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
   if (installed.code !== 0) return { error: `o comando ${matrix.installCommand} falhou (${exitOf(installed)})` }
-  const baseline = await run($, wtGit(real, 'status', '--porcelain'))
+  const baseline = await statusOf($, real)
   return baseline === null ? { error: 'não deu para ler o git status da worktree' } : { fixDir: real, baseline }
 }
 
@@ -452,7 +453,9 @@ export async function freePortOf($: EngineInterface): Promise<number | null> {
 export type QaApp = { it: AsyncGenerator<unknown, unknown>; port: number; isDone: boolean }
 
 // O app da worktree, pelo startCommand com a porta. O laço em segundo plano puxa e descarta a saída (o processo vive com ele).
+// Numa pasta sem o `.git`, o startCommand subiria as pastas e rodaria o script do checkout do usuário: confere antes.
 export async function startApp($: EngineInterface, matrix: Matrix, fixDir: string, port: number): Promise<QaApp | null> {
+  await assertFixDir($, fixDir)
   const it = $.process.spawn({ argv: startArgvOf(matrix, port), cwd: fixDir, env: { QA_PORT: String(port), PORT: String(port) } })
   const app: QaApp = { it, port, isDone: false }
   void (async () => {
@@ -519,8 +522,10 @@ export async function freshDir($: EngineInterface, dir: string): Promise<boolean
   return (await run($, ['rm', '-rf', dir])) !== null && (await mkdirs($, dir))
 }
 
+// O resumo do `git status` (é o que a linha de base guarda no estado); null = o git falhou.
 export async function statusOf($: EngineInterface, fixDir: string): Promise<string | null> {
-  return run($, wtGit(fixDir, 'status', '--porcelain'))
+  const status = await run($, wtGit(fixDir, 'status', '--porcelain'))
+  return status === null ? null : statusSumOf(status)
 }
 
 // Antes de cada corretor: a pasta de saída existe e o fix.json da tentativa anterior some.
@@ -622,6 +627,7 @@ export async function writeFixResult(
 // Fim da fila: os testes das células PASS (da foto tirada no clique) vão para a pasta de testes da worktree, num commit próprio.
 export async function commitPassTests($: EngineInterface, runDir: string, matrix: Matrix, outcomes: Record<string, CellOutcome>, fixDir: string): Promise<void> {
   if (matrix.testDir === '') return
+  await assertFixDir($, fixDir)
   const dir = `${fixDir}/${matrix.testDir}`
   const copied: string[] = []
   for (const cell of matrix.cells.filter(c => outcomes[c.id]?.final === 'PASS')) {
@@ -630,7 +636,6 @@ export async function commitPassTests($: EngineInterface, runDir: string, matrix
     if ((await exists($, src)) && (await mkdirs($, dir)) && (await run($, ['cp', src, dst])) !== null) copied.push(cell.id)
   }
   if (copied.length === 0) return
-  await assertFixDir($, fixDir)
   await run($, wtGit(fixDir, 'add', '--', ...copied.map(id => `${matrix.testDir}/qa-${id}.spec.ts`)))
   const from = `Vieram de celulas/<id>/teste.spec.ts da execução ${runDir.split('/').pop() ?? runDir}, das células que passaram: ${copied.join(', ')}.`
   await run($, wtGit(fixDir, 'commit', '-q', '-m', 'Testes de regressão gerados pelo QA', '-m', from))

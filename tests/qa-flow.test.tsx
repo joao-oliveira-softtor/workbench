@@ -1092,14 +1092,29 @@ describe('QA: fase Corrigir, worktree que sumiu', () => {
     expect(t.log.toasts.at(-1)).toContain(LOST)
   })
 
-  test('fim da fila: os testes das células PASS não são commitados', async ($, on) => {
-    const { t } = await fixing($, on)
+  test('fim da fila: os testes das células PASS nem são copiados; o correcoes.md sai e a fase volta ao começo', async ($, on) => {
+    const { t, ui } = await fixing($, on)
     await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }))
     t.wt.lost = true
     await tick(t)
     expect(t.wt.commits).toHaveLength(1)
     expect(touched(t, 'add').filter(a => a.includes('--'))).toEqual([])
+    expect(t.files.has(`${wtOf(t)}/e2e/qa-c2.spec.ts`)).toBe(false)
+    expect(t.files.get(`${t.runDir()}/correcoes.md`)).toContain('não reverificado')
     expect(t.log.toasts.at(-1)).toContain(LOST)
+    expect(await label(ui)).toBe('QA')
+  })
+
+  test('reload com a worktree sumida: o app não sobe de novo nela e a fase para', async ($, on) => {
+    const { t, ui } = await fixing($, on)
+    const apps = t.log.apps.length
+    await start($)
+    t.wt.lost = true
+    await tick(t)
+    expect(t.log.apps).toHaveLength(apps)
+    expect(t.log.toasts.at(-1)).toContain(LOST)
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(await label(ui)).toBe('QA: Corrigir')
   })
 })
 
@@ -1193,6 +1208,16 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'c1'))
     expect(t.wt.head).toBe('c1')
     expect(t.log.spawns[2]?.prompt).toContain('mudança sem descrição de commit')
+  })
+
+  test('tentativa 2 que termina não reverificada desfaz até o começo do defeito: o commit recusado da tentativa 1 sai', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
+    await fixerEnds($, t)
+    expect(t.wt.head).toBe('c1')
+    await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }))
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(t.wt.head).toBe('abc123')
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 2 })
   })
 
   test('reload entre o commit e o fim das conferências: segue da etapa depois do commit, sem recusa nem tentativa a mais', async ($, on) => {
