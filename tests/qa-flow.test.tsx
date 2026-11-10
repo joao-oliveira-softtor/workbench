@@ -735,7 +735,8 @@ describe('QA: fim dos agentes e qa_auth', () => {
     const { t } = await toRun($, on)
     const ok = await auth($, 'admin')
     expect(ok).not.toContain('SEGREDO')
-    expect(ok).toContain('"result":{"cookies":1,"expired":0}')
+    // O engine só aceita texto (ou lista de blocos) como resultado de ferramenta MCP sem output schema; objeto ele recusa.
+    expect(JSON.parse(ok).result).toBe('cookies: 1, vencidos: 0. serve')
     expect(ok).toContain('vencidos: 0. serve')
     t.files.delete(AUTH)
     expect(await auth($, 'admin')).toContain('não serve')

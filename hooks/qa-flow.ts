@@ -309,8 +309,9 @@ export async function writeReport($: EngineInterface, runDir: string, matrix: Ma
   return [...counts].map(([v, n]) => `${v} ${n}`).join(', ')
 }
 
-// A ferramenta qa_auth: só contagens, nunca o conteúdo do arquivo de sessão.
-export async function authReplyOf($: EngineInterface, env: QaEnv, runDir: string, profile: unknown, now: number): Promise<{ deny: string } | { result: { cookies: number; expired: number }; text: string }> {
+// A ferramenta qa_auth: só contagens, nunca o conteúdo do arquivo de sessão. O resultado é texto: sem output schema, o engine
+// recusa objeto no resultado de ferramenta MCP.
+export async function authReplyOf($: EngineInterface, env: QaEnv, runDir: string, profile: unknown, now: number): Promise<{ deny: string } | { result: string; text: string }> {
   const loaded = await loadMatrix($, runDir)
   if (loaded.kind !== 'ok' || typeof profile !== 'string' || profile === ANON_PROFILE || !loaded.matrix.profiles.includes(profile)) {
     return { deny: 'qa_auth: perfil fora da matriz da execução atual' }
@@ -318,7 +319,8 @@ export async function authReplyOf($: EngineInterface, env: QaEnv, runDir: string
   const text = await readText($, authFileOf(env.qaRoot, profile))
   const summary = (text === null ? null : authSummaryOf(text, originOf(loaded.matrix), now)) ?? { cookies: 0, expired: 0 }
   const isOk = summary.cookies > 0 && summary.expired === 0
-  return { result: summary, text: `cookies: ${summary.cookies}, vencidos: ${summary.expired}. ${isOk ? 'serve' : 'não serve: faça o login'}` }
+  const reply = `cookies: ${summary.cookies}, vencidos: ${summary.expired}. ${isOk ? 'serve' : 'não serve: faça o login'}`
+  return { result: reply, text: reply }
 }
 
 // ---- Fase Corrigir ----
