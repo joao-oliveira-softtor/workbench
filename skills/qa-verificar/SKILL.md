@@ -11,14 +11,14 @@ novo, nunca corrige e nunca sugere correção no código. O que reprova é medi�
 ## O que você recebe (no pedido)
 A célula (JSON), a pasta com o que o runner gravou (é também a sua pasta de saída), a URL base, o script do agent-browser, a
 sessão (aberta na última tela do runner), o script do impeccable, a porta de depuração, as regras do detector que reprovam, os
-contêineres do backend e a janela de tempo (início e fim). Nos comandos, troque: `AB`, `S`, `IMP`, `PORTA`, `BASE` (URL base),
-`SAIDA` (a pasta), `HOST` (a URL base sem `http://`, ex.: `localhost:3000`), `INICIO` e `FIM` (a janela).
+contêineres do backend, a janela de tempo (início e fim) e a rota de login (`LOGIN`). Nos comandos, troque: `AB`, `S`, `IMP`,
+`PORTA`, `BASE` (URL base), `SAIDA` (a pasta), `HOST` (a URL base sem `http://`, ex.: `localhost:3000`), `INICIO` e `FIM` (a janela).
 
 ## A trava (leia antes do primeiro comando)
 Todo comando do Bash passa por uma trava estrita. O que ela não libera é **recusado na hora**, com o motivo no erro.
 - Um comando por chamada. Nunca `;`, `&&`, `||`, `|`, `>`, `<`, `&`, `$`, crase, `\`, `~` nem quebra de linha, nem entre aspas.
 - Seletor e URL sempre entre aspas simples; fora de aspas, `# ? * ( ) [ ] { } !` são recusados. Seletor com `>` não passa.
-- Arquivo se grava com a ferramenta Write, nunca pelo Bash. Nada de `npm`, `npx`, `node`, `cat`, `ls`, `rm`, `git`, instalar.
+- Arquivo se grava com a ferramenta Write, nunca pelo Bash. Nada de `cd`, `npm`, `npx`, `node`, `cat`, `ls`, `rm`, `git`, instalar.
 - **Comando recusado:** não insista nem procure outro caminho; anote a limitação e siga com o resto.
 
 Comandos liberados que você usa:
@@ -43,30 +43,35 @@ abaixo basta.
    dizendo ONDE está a prova. Critério **não** atendido → nenhuma entrada em `evidence` (uma prova escrita conta como
    atendido) e um defeito de fonte `criterio`, com `rule` = o índice em texto (`"0"`) e `where` = a `route` da célula.
    Registre a prova de todo critério atendido, em qualquer veredito.
-3. **Rede.** Para cada `expectedStatus`, a requisição cujo caminho é o `url` dele; status diferente vira defeito `rede`.
-   Qualquer 5xx do app também. `where` = `MÉTODO caminho` (`POST /api/clientes`), `rule` = o status em texto (`"500"`).
+3. **Rede.** Um `expectedStatus` confere quando ALGUMA requisição com aquele caminho trouxe o status esperado. Vira defeito
+   `rede` só quando nenhuma trouxe (`rule` = o status visto, em texto: `"500"`) ou quando a requisição não aconteceu
+   (`rule` = `"ausente"`). Qualquer 5xx do app também vira defeito `rede`. `where` = `MÉTODO caminho` (`POST /api/clientes`).
 4. **Console.** Cada mensagem de tipo `error` e cada item de `pageErrors` vira defeito `console`, com `where` =
-   `console: <primeira linha da mensagem>`. Aviso (`warning`) não é defeito.
+   `console: <primeira linha da mensagem>`, SEM URL e sem nome de arquivo (mudam a cada build e fariam o mesmo defeito
+   parecer novo). Aviso (`warning`) não é defeito.
 5. **Logs do backend.** Para cada contêiner do pedido, `docker logs --since INICIO --until FIM --tail 500 <contêiner>`. Grave a
    saída em `SAIDA/backend.log`, trocando por `<redigido>` qualquer valor de senha, token, cookie ou cabeçalho de autorização.
    `backend: "lido"`. Sem contêiner, sem docker ou comando recusado: `backend: "indisponível"` (com acento; não é falha).
 6. **Medição de design.** Com a tela como o runner deixou, `IMP detect --json --cdp PORTA --target HOST`. Depois, para cada URL
    diferente visitada nos passos (até 5, menos a última, que já foi medida), `open '<url>'` e meça de novo. Grave em
    `SAIDA/design.json` a saída crua: `[{ "url": "...", "achados": [ ...o array do detect... ] }]`. Cada achado vira defeito
-   `impeccable-detect`: `rule` = `antipattern`, `where` = `selector`, `repro` = como chegar na tela + o `snippet`, e `text` =
-   o texto visível do elemento (`get text '<selector>'`). Omita `text` quando o seletor é `body`/`html`, tem `>`, foi
-   recusado ou o texto veio vazio. `severity` = `fail` se a regra está na lista do pedido, senão `candidate`.
+   `impeccable-detect`: `rule` = `antipattern`, `where` = `selector`, `repro` = como chegar na tela + o `snippet`.
+   `text` = o texto visível do elemento: leia com `get text '<selector>'` logo depois do detect daquela tela, ANTES de abrir a
+   próxima URL, e só preencha `text` se esse texto aparece no `text` de algum passo do `resultado.json` (o reteste o procura
+   lá). Senão, ou se o seletor é `body`/`html`, tem `>`, foi recusado ou o texto veio vazio, omita o campo.
+   `severity` = `fail` se a regra está na lista do pedido, senão `candidate`.
 7. **Candidatos** (nunca reprovam, `severity: "candidate"`, `kind: "design"`):
-   - `impeccable-audit`: olhe os prints e os textos contra a lista de auditoria: texto com contraste fraco; alvo de toque menor
-     que 24×24 px; campo sem rótulo; botão sem nome; hierarquia de títulos pulada; rolagem lateral; largura fixa que quebra no
-     celular; imagem sem texto alternativo. `rule` = um id curto (`alvo-de-toque-pequeno`).
+   - `impeccable-audit`: olhe os prints e os textos contra a lista de auditoria. `rule` é SEMPRE um destes ids (outro valor
+     invalida o veredito inteiro): `contraste-fraco` (texto com contraste fraco), `alvo-de-toque-pequeno` (menor que 24×24 px),
+     `campo-sem-rotulo`, `botao-sem-nome`, `titulos-pulados` (hierarquia de títulos pulada), `rolagem-lateral`, `largura-fixa`
+     (que quebra no celular), `imagem-sem-alt`. Achado que não cabe em nenhum fica de fora.
    - `pergunta-visual`: abra cada print (Read) e responda quatro perguntas fechadas: texto cortado? desalinhado? área quebrada?
      elemento espremido? Cada "sim" vira defeito com `rule` = `texto-cortado`, `desalinhado`, `area-quebrada` ou
-     `elemento-espremido` e `where` = `passo-<n>.png: <qual elemento>`.
+     `elemento-espremido` (só esses quatro) e `where` = `passo-<n>.png: <qual elemento>`.
 8. **Veredito**, o primeiro que se aplica:
    1. `AMBIENTE`: app fora do ar (o `error` do runner, o `open` ou o detector falam em conexão recusada ou página que não
-      carrega), ou um passo caiu na tela de login (a `loginRoute`, se veio no pedido; senão uma tela com campo
-      de senha e botão de entrar) numa célula cuja `route` não é a de login;
+      carrega), ou um passo caiu na tela de login (a URL de um passo tem o caminho `LOGIN`; se `LOGIN` vier vazio, uma tela
+      com campo de senha e botão de entrar) numa célula cuja `route` não é `LOGIN`;
    2. `FAIL-AGENTE`: `completed: false` sem erro do app (elemento não achado, comando recusado);
    3. `FAIL-APP`: há defeito de `criterio`, `rede` ou `console`;
    4. `FAIL-VISUAL`: há defeito `impeccable-detect` com regra da lista que reprova;
@@ -93,6 +98,10 @@ abaixo basta.
     {
       "id": "d2", "kind": "design", "source": "pergunta-visual", "rule": "elemento-espremido", "where": "passo-1.png: campo Nome",
       "severity": "candidate", "repro": ["Abrir /clientes/novo a 360px", "Ver o campo Nome"]
+    },
+    {
+      "id": "d3", "kind": "design", "source": "impeccable-audit", "rule": "alvo-de-toque-pequeno", "where": "passo-1.png: botão Cancelar",
+      "severity": "candidate", "repro": ["Abrir /clientes/novo a 360px", "O botão Cancelar tem cerca de 16×16 px"]
     }
   ],
   "backend": "lido"
