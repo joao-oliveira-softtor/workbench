@@ -1195,6 +1195,21 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.files.get(`${wtOf(t)}/e2e/qa-c2.spec.ts`)).toBe('test()')
   })
 
+  test('app original fora do ar: a regressão não roda e vira pendência, sem recusa', async ($, on) => {
+    const app = { up: true }
+    const { t } = await fixing($, on, { run: a => (a[0] === 'curl' && a.includes(MATRIX.baseUrl) && !app.up ? { exitCode: 7, stdout: '' } : undefined) })
+    app.up = false
+    await fixerEnds($, t)
+    expect(t.log.runs.some(a => a[0] === 'npx')).toBe(false)
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+    const re = (cell: string) => `${outOf(t)}/reteste-1/${cell}/veredito.json`
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c1')]: verdictOf('c1', 'PASS') })
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c2')]: verdictOf('c2', 'PASS') })
+    expect(resultOf(t)).toMatchObject({ status: 'corrigido', attempts: 1, pending: ['teste de regressão não rodado: app original fora do ar'] })
+  })
+
   test('projeto sem Playwright: o teste de regressão não roda e vira pendência', async ($, on) => {
     const { t } = await fixing($, on, {}, MATRIX)
     await fixerEnds($, t)

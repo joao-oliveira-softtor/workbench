@@ -132,6 +132,11 @@ export async function isLoginOk($: EngineInterface, env: QaEnv, matrix: Matrix, 
   return summary !== null && summary.cookies > 0 && summary.expired === 0
 }
 
+// O app responde em `url`?
+async function isUp($: EngineInterface, url: string): Promise<boolean> {
+  return (await run($, ['curl', '-s', '-o', '/dev/null', '--max-time', '5', url])) !== null
+}
+
 // Portões do clique Executar, nesta ordem; `back` diz se a etapa volta para o Login.
 export async function runGateOf($: EngineInterface, env: QaEnv, matrix: Matrix, now: number): Promise<{ text: string; back: boolean } | null> {
   const tools = toolsDirOf(env.home)
@@ -141,7 +146,7 @@ export async function runGateOf($: EngineInterface, env: QaEnv, matrix: Matrix, 
   for (const profile of matrix.profiles.filter(p => p !== ANON_PROFILE)) {
     if (!(await isLoginOk($, env, matrix, profile, now))) return { text: `QA: o login do perfil ${profile} falta ou venceu; refaça em "QA: Login".`, back: true }
   }
-  if ((await run($, ['curl', '-s', '-o', '/dev/null', '--max-time', '5', matrix.baseUrl])) === null) {
+  if (!(await isUp($, matrix.baseUrl))) {
     return { text: `QA: o app não respondeu em ${matrix.baseUrl}; suba o app e clique de novo.`, back: false }
   }
   return null
@@ -542,6 +547,10 @@ async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixChe
 async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<FixCheck> {
   const file = fix.regressionTest
   if (file === undefined || o.matrix.testDir === '') return { kind: 'ok', regression: file ?? null, pending: ['teste de regressão não rodado'] }
+  // Fora do ar, o teste falharia no original pelo motivo errado: não roda, e fica a pendência (não é recusa).
+  if (!(await isUp($, o.matrix.baseUrl))) {
+    return { kind: 'ok', regression: file, pending: ['teste de regressão não rodado: app original fora do ar'] }
+  }
   const auth = Object.fromEntries(o.matrix.profiles.filter(p => p !== ANON_PROFILE).map(p => [authEnvOf(p), authFileOf(o.env.qaRoot, p)]))
   const runAt = (url: string): Promise<Ran> => runFull($, ['npx', 'playwright', 'test', file], { cwd: o.fixDir, env: { ...auth, QA_BASE_URL: url }, timeoutMs: TEN_MIN })
   const original = await runAt(o.matrix.baseUrl)
