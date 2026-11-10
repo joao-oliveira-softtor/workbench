@@ -569,9 +569,13 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
 
 // Quando o corretor termina, nesta ordem (a primeira que falha decide): fix.json, commit, testes do projeto, regressão.
 export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> {
-  const fix = parseFix((await readText($, `${fixOutDirOf(o.runDir, o.defectId)}/fix.json`)) ?? '')
-  if (fix === null) return refuse('fix.json ausente ou inválido')
   await assertFixDir($, o.fixDir)
+  const fix = parseFix((await readText($, `${fixOutDirOf(o.runDir, o.defectId)}/fix.json`)) ?? '')
+  // Sem fix.json, o que o corretor mudou é desfeito: toda saída das conferências deixa uma árvore que o mod fez.
+  if (fix === null) {
+    if ((await statusOf($, o.fixDir)) !== o.baseline) await undoFix($, o.fixDir, o.sha)
+    return refuse('fix.json ausente ou inválido')
+  }
   // O HEAD já andou desde o começo da tentativa: o commit dela foi feito (um reload cortou o passo depois dele). Segue daí.
   const committed = (await headOf($, o.fixDir)) === o.sha ? await commitFix($, o, fix) : null
   if (committed !== null) return committed

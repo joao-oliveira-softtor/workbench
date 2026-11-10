@@ -1108,6 +1108,17 @@ describe('QA: fase Corrigir, corretor cortado e contexto sem id', () => {
     expect(t.guard()).toMatchObject({ role: 'fixer', agentId: 'a1', ctx: { fixDir: wtOf(t) } })
   })
 
+  test('corretor que muda a worktree sem fix.json: a mudança é desfeita, não vira linha de base nem vai no commit do defeito seguinte', async ($, on) => {
+    const D2 = { ...FAIL_DEFECT, id: 'd2', where: 'button.outro' }
+    const { t } = await fixing($, on, { spawns: [{}, { deny: 'x' }] }, FIX_MATRIX, [FAIL_DEFECT, D2])
+    await fixerEnds($, t, null, ' M src/sem-descricao.ts')
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['fix.json ausente ou inválido', 'o corretor foi recusado'] })
+    await tick(t)
+    expect(t.wt.status).toBe('')
+    expect(types(t)).toEqual([QA_FIXER, QA_FIXER, QA_FIXER])
+  })
+
   test('mudança de um corretor cortado: o defeito seguinte não começa, nada é commitado nem desfeito e o aviso sai', async ($, on) => {
     const D2 = { ...FAIL_DEFECT, id: 'd2', where: 'button.outro' }
     const app = { down: 0 }
