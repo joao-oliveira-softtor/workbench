@@ -7,6 +7,7 @@ import { settle } from './model'
 import type { Settled } from './model'
 import { ANON_PROFILE, authSummaryOf, parseMatrix, parseVerdict, reportOf, sessionLoadOf } from './qa-evidence'
 import type { Cell, CellOutcome, CellVerdict, Matrix } from './qa-evidence'
+import { guardDecisionOf } from './qa-guard'
 import type { GuardCtx, QaRole } from './qa-guard'
 import {
   DETECT_FAIL_RULES,
@@ -19,6 +20,7 @@ import {
   cellDirOf,
   configFileOf,
   guardFileOf,
+  guardStateTextOf,
   hookCommandOf,
   impWrapperTextOf,
   outcomeOf,
@@ -194,6 +196,15 @@ export function guardCtxOf(env: QaEnv, matrix: Matrix, runDir: string, session: 
     origins: [originOf(matrix)],
     containers: matrix.backend.containers,
   }
+}
+
+// A validação da própria trava sobre um contexto de exemplo (o runner lendo a matriz): o motivo da recusa, null = aceita.
+// O exemplo não toca o disco: cada caminho é o próprio caminho real e todo alvo é arquivo.
+export function guardRefusalOf(env: QaEnv, matrix: Matrix, runDir: string): string | null {
+  const probe = { tool_name: 'Read', tool_input: { file_path: matrixPathOf(runDir) }, cwd: env.root, agent_id: '' }
+  const asIs = { realOf: (p: string) => p, isFile: () => true }
+  const got = guardDecisionOf('runner', probe, guardStateTextOf('runner', null, guardCtxOf(env, matrix, runDir, '', null)), asIs)
+  return got.decision === 'allow' ? null : got.reason
 }
 
 // `{ deny }` volta como texto; uma rejeição não prova que o agente não nasceu (agentId null: o timer adota ou encerra).

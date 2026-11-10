@@ -59,6 +59,7 @@ import {
   cellVerdictOf,
   closeSession,
   guardCtxOf,
+  guardRefusalOf,
   loadMatrix,
   matrixPathOf,
   mkdirs,
@@ -132,6 +133,7 @@ const qaFlow = atom({ plugin: 'workbench', key: 'qaFlow' } as const, QA_START)
 const qaJob = atom({ plugin: 'workbench', key: 'qaJob' } as const, null)
 const qaGuarded = atom({ plugin: 'workbench', key: 'qaGuarded' } as const, [])
 const qaRunBase = atom({ plugin: 'workbench', key: 'qaRunBase' } as const, null)
+const qaGuardToken = atom({ plugin: 'workbench', key: 'qaGuardToken' } as const, null)
 // Tentativas de refazer a coleta antes de a remoção abortar (um refresh em voo faz o launchRemoval voltar cedo).
 const MAX_TRIES = 3
 
@@ -751,12 +753,12 @@ async function sendQaStep($: EngineInterface, before: QaFlow, after: QaFlow, tex
 
 async function qaPlan($: EngineInterface, env: QaEnv, flow: QaFlow): Promise<void> {
   const scope = (await $.prompt.read()).text
-  await $.prompt.fill({ text: '' })
   const runDir = runDirOf(env.qaRoot, runIdOf(await $.clock.now()))
   if (!(await mkdirs($, runDir))) {
     $.ui.toast(`QA: não deu para criar a pasta ${runDir}`)
     return
   }
+  await $.prompt.fill({ text: '' })
   const base = (await read($, snapshot))?.base || 'origin/main'
   await sendQaStep($, flow, { step: 'login', runDir, fixDir: '' }, qaPlanPromptOf({ scope, root: env.root, base, matrixPath: matrixPathOf(runDir) }))
 }
@@ -767,6 +769,11 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   if (gate !== null) {
     $.ui.toast(gate.text)
     if (gate.back) await update($, qaFlow, () => ({ ...flow, step: 'login' }))
+    return
+  }
+  const refusal = guardRefusalOf(env, matrix, flow.runDir)
+  if (refusal !== null) {
+    $.ui.toast(`QA: a trava recusaria o contexto desta execução (${refusal}); confira HOME (${env.home}) e a raiz do repositório (${env.root}).`)
     return
   }
   if (!(await writeScripts($, env, matrix))) {
@@ -845,6 +852,15 @@ function spawnInputOf(o: { env: QaEnv; matrix: Matrix; cell: Cell; outDir: strin
   }
 }
 
+// Grava o contexto da trava com o navegador da célula aberto; falhou: fecha a sessão e avisa (a célula fica sem veredito).
+async function guardWritten($: EngineInterface, env: QaEnv, text: string, item: { cell: string; session: string }): Promise<boolean> {
+  const wrote = await settle(() => $.fs.write(env.guardFile, text))
+  if (wrote.ok) return true
+  $.ui.toast(`QA: não deu para gravar a trava da célula ${item.cell} (${wrote.error.slice(0, 80)}); ela fica sem veredito.`)
+  await closeSession($, env, item.session)
+  return false
+}
+
 // Depois do lançamento: `deny` fecha a sessão (a célula fica sem veredito); o id entra em `qaGuarded` e na trava.
 async function launchedOf($: EngineInterface, env: QaEnv, ctxText: (agentId: string) => string, spawned: { agentId: string | null } | { deny: string }, item: QaCurrent): Promise<QaCurrent | null> {
   if ('deny' in spawned) {
@@ -855,7 +871,7 @@ async function launchedOf($: EngineInterface, env: QaEnv, ctxText: (agentId: str
   const id = spawned.agentId
   if (id !== null) {
     await update($, qaGuarded, ids => [...ids, id])
-    await $.fs.write(env.guardFile, ctxText(id))
+    if (!(await guardWritten($, env, ctxText(id), item))) return null
   }
   return { ...item, agentId: id }
 }
@@ -874,7 +890,7 @@ async function startCell($: EngineInterface, env: QaEnv, runDir: string, matrix:
     return null
   }
   const ctx = guardCtxOf(env, matrix, runDir, session, cdpPort)
-  await $.fs.write(env.guardFile, guardStateTextOf('runner', null, ctx))
+  if (!(await guardWritten($, env, guardStateTextOf('runner', null, ctx), { cell: cellId, session }))) return null
   const prompt = spawnPromptOf('runner', spawnInputOf({ env, matrix, cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '' }))
   const spawned = await spawnQa($, 'runner', prompt, `QA ${cellId}`)
   const item: QaCurrent = { item: cellId, role: 'runner', attempt, agentId: null, at: now, isEnded: false, cell: cellId, sha: '', port: 0, session, cdpPort, reasons: [] }
@@ -884,22 +900,31 @@ async function startCell($: EngineInterface, env: QaEnv, runDir: string, matrix:
 // O agente do item acabou: runner → observer na mesma sessão; observer → fecha a sessão e repete uma vez se falhou.
 async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent): Promise<QaCurrent | null> {
   const cell = matrix.cells.find(x => x.id === c.cell)
-  if (cell === undefined || c.role === 'fixer') {
+  if (cell === undefined) {
     await closeSession($, env, c.session)
     return null
   }
-  if (c.role === 'runner') {
-    const now = await $.clock.now()
-    const ctx = guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)
-    await $.fs.write(env.guardFile, guardStateTextOf('observer', null, ctx))
-    const outDir = cellDirOf(runDir, c.cell, c.attempt)
-    const prompt = spawnPromptOf('observer', spawnInputOf({ env, matrix, cell, outDir, session: c.session, cdpPort: c.cdpPort, startedAt: isoOf(c.at), endedAt: isoOf(now) }))
-    const spawned = await spawnQa($, 'observer', prompt, `QA ${c.cell} (verificação)`)
-    return launchedOf($, env, id => guardStateTextOf('observer', id, ctx), spawned, { ...c, role: 'observer', agentId: null, at: now, isEnded: false })
+  switch (c.role) {
+    case 'runner': {
+      const now = await $.clock.now()
+      const ctx = guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)
+      if (!(await guardWritten($, env, guardStateTextOf('observer', null, ctx), c))) return null
+      const outDir = cellDirOf(runDir, c.cell, c.attempt)
+      const prompt = spawnPromptOf('observer', spawnInputOf({ env, matrix, cell, outDir, session: c.session, cdpPort: c.cdpPort, startedAt: isoOf(c.at), endedAt: isoOf(now) }))
+      const spawned = await spawnQa($, 'observer', prompt, `QA ${c.cell} (verificação)`)
+      return launchedOf($, env, id => guardStateTextOf('observer', id, ctx), spawned, { ...c, role: 'observer', agentId: null, at: now, isEnded: false })
+    }
+    case 'observer': {
+      await closeSession($, env, c.session)
+      const final = finalVerdictOf(cell, await cellVerdictOf($, runDir, c.cell, c.attempt))
+      return nextRunOf(c, final) === 'repeat' ? startCell($, env, runDir, matrix, c.cell, 2) : null
+    }
+    case 'fixer':
+      await closeSession($, env, c.session)
+      return null
+    default:
+      throw new Error('Caso não tratado: ' + String(c.role satisfies never))
   }
-  await closeSession($, env, c.session)
-  const final = finalVerdictOf(cell, await cellVerdictOf($, runDir, c.cell, c.attempt))
-  return nextRunOf(c, final) === 'repeat' ? startCell($, env, runDir, matrix, c.cell, 2) : null
 }
 
 // Desmonta o que um item deixou aberto: a trava nega todo agente e a sessão do navegador fecha.
@@ -908,10 +933,11 @@ async function teardownQa($: EngineInterface, env: QaEnv, current: QaCurrent | n
   if (current) await closeSession($, env, current.session)
 }
 
-// Grava o item novo; se o trabalho foi parado no meio do passo, desmonta o que o passo acabou de abrir.
+// Grava o item novo. Sem item (célula recusada ou encerrada) a trava fica em `{}`, para não sobrar contexto sem id que
+// aceita qualquer agente do papel; se o trabalho foi parado no meio do passo, desmonta o que o passo acabou de abrir.
 async function setCurrent($: EngineInterface, env: QaEnv, next: QaCurrent | null): Promise<void> {
   await update($, qaJob, cur => (cur === null ? null : { ...cur, current: next }))
-  if (next !== null && (await read($, qaJob)) === null) await teardownQa($, env, next)
+  if (next === null || (await read($, qaJob)) === null) await teardownQa($, env, next)
 }
 
 // Fila vazia: relatório, etapa Corrigir, trava zerada e o resumo pendente para a sessão.
@@ -945,19 +971,23 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
   return stepCurrent($, env, flow.runDir, loaded.matrix, c)
 }
 
+// Adota o agente lançado sem id: ele entra em qaGuarded e na trava. Parado no meio da adoção, a trava acabou de ganhar o
+// id depois do `{}` do stop: volta a `{}`.
+async function adoptAgent($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent, id: string): Promise<void> {
+  await update($, qaGuarded, ids => [...ids, id])
+  await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)))
+  await update($, qaJob, cur => (cur?.current?.item === c.item && cur.current.role === c.role ? { ...cur, current: { ...cur.current, agentId: id } } : cur))
+  if ((await read($, qaJob)) === null) await teardownQa($, env, c)
+}
+
 // O item em curso: espera, adota o agente sem id (trava e qaGuarded), ou avança quando o agente acabou.
 async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent): Promise<void> {
   const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
       return
-    case 'adopt': {
-      const id = step.agentId
-      await update($, qaGuarded, ids => [...ids, id])
-      await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)))
-      await update($, qaJob, cur => (cur?.current?.item === c.item && cur.current.role === c.role ? { ...cur, current: { ...cur.current, agentId: id } } : cur))
-      return
-    }
+    case 'adopt':
+      return adoptAgent($, env, runDir, matrix, c, step.agentId)
     case 'ended':
       return setCurrent($, env, await advanceCell($, env, runDir, matrix, c))
     default:
@@ -966,10 +996,11 @@ async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matri
 }
 
 // Roda no timer de 3 s. O clique e o pedido pendente são tirados da fila antes de qualquer `await`; os envios à sessão
-// esperam a sessão parar. O passo do trabalho não espera a sessão, mas nunca roda dois ao mesmo tempo.
+// esperam a sessão parar. O passo do trabalho não espera a sessão, mas nunca roda dois ao mesmo tempo. Com um passo em
+// curso o clique fica na fila: um Executar novo montado agora receberia o item que o passo antigo ainda vai gravar.
 async function drainQaClick($: EngineInterface): Promise<void> {
   const step = qaQueued
-  if (step === null || (isMainTurn && (step === 'plan' || step === 'login'))) return
+  if (step === null || isQaStepping || (isMainTurn && (step === 'plan' || step === 'login'))) return
   qaQueued = null
   const ran = await settle(() => runQaClick($, step))
   if (!ran.ok) $.ui.toast(`QA falhou: ${ran.error.slice(0, 120)}`)
@@ -992,6 +1023,12 @@ async function drainQa($: EngineInterface): Promise<void> {
   } finally {
     isQaStepping = false
   }
+}
+
+// O código do arquivo da trava fica no estado, criado uma vez: um reload não troca o arquivo que os agentes já lançados leem.
+async function guardTokenOf($: EngineInterface): Promise<string> {
+  const fresh = Math.random().toString(36).slice(2, 10)
+  return (await update($, qaGuardToken, cur => cur ?? fresh)) ?? fresh
 }
 
 // Para o trabalho: a trava nega todo agente antigo, a sessão do navegador fecha e a etapa do botão fica (um clique retoma).
@@ -1098,7 +1135,7 @@ export const register: Register = on => {
     qaEnv = null
     qaBlocked = QA_OFF
     // Cada item num settle: o QA que falha fica desligado com o motivo, sem derrubar o painel.
-    const env = await settle(() => qaEnvOf($, Math.random().toString(36).slice(2, 10)))
+    const env = await settle(async () => qaEnvOf($, await guardTokenOf($)))
     if (env.ok && env.value !== null) {
       const ready = env.value
       qaEnv = ready

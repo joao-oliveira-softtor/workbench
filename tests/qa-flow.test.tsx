@@ -28,8 +28,9 @@ const BAND = {
   props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 5 }, view: {} },
 } as const
 
-const HOME = '/h'
-const QA_ROOT = qaRootOf(HOME, '/repo')
+const HOME = '/home/u'
+const REPO = '/work/app'
+const QA_ROOT = qaRootOf(HOME, REPO)
 const AB = wrapperOf(QA_ROOT, 'ab')
 const AUTH = authFileOf(QA_ROOT, 'admin')
 const crit = { given: 'logado', when: 'clica em Salvar', then: 'vê a confirmação' }
@@ -71,7 +72,18 @@ const verdictOf = (id: string, verdict: string, defects: unknown[] = []) =>
 const FAIL_DEFECT = { id: 'd1', source: 'criterio', rule: '0', where: 'button.salvar', repro: ['abrir'], kind: 'funcional', severity: 'fail' }
 
 type Run = { exitCode: number; stdout: string }
-type Over = { typed?: string; drop?: boolean; run?: (argv: readonly string[]) => Run | undefined; spawns?: { unlisted?: boolean; deny?: string }[] }
+// `hold`: a resposta àquele comando (a linha do argv, ou 'agent.list') chega HOLD_MS depois, segurando o passo do timer.
+// `failWrite`: a gravação daquele arquivo falha (vai ao hook de baixo do engine, que lança).
+type Over = {
+  home?: string
+  typed?: string
+  drop?: boolean
+  run?: (argv: readonly string[]) => Run | undefined
+  spawns?: { unlisted?: boolean; deny?: string }[]
+  hold?: (key: string) => boolean
+  failWrite?: (path: string, text: string) => boolean
+}
+const HOLD_MS = 4_000
 type Agent = { id: string; type: string; status: 'running' | 'completed'; description: string }
 
 async function boot($: Engine, on: On, over: Over = {}) {
@@ -94,7 +106,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   const answer = (argv: readonly string[]): Run => {
     const ok = (stdout = ''): Run => ({ exitCode: 0, stdout })
     const line = argv.join(' ')
-    if (line.includes('--git-common-dir')) return ok('/repo/.git\n')
+    if (line.includes('--git-common-dir')) return ok(`${REPO}/.git\n`)
     if (argv[0] === 'mkdir') {
       dirs.add(argv[2] ?? '')
       return ok()
@@ -110,9 +122,10 @@ async function boot($: Engine, on: On, over: Over = {}) {
     return { exitCode: 1, stdout: '' }
   }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('session.cwd', () => ({ value: '/repo' }))
-  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
-  on('process.run', (_$, e) => {
+  on('session.cwd', () => ({ value: REPO }))
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? (over.home ?? HOME) : undefined }))
+  on('process.run', async (_$, e) => {
+    if (over.hold?.(e.argv.join(' ')) === true) await clock.sleep(HOLD_MS)
     log.runs.push([...e.argv])
     const r = over.run?.(e.argv) ?? answer(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -122,7 +135,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
     const text = files.get(e.path)
     return text === undefined ? next(e) : { value: text }
   })
-  on('fs.write', (_$, e) => {
+  on('fs.write', (_$, e, next) => {
+    if (over.failWrite?.(e.path, e.text) === true) return next(e)
     files.set(e.path, e.text)
     if (/\/guard-[a-z0-9]+\.json$/.test(e.path)) log.guards.push(e.text)
     return { value: undefined }
@@ -148,7 +162,10 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (r.unlisted !== true) listed.push({ id: `a${n}`, type, status: 'running', description: 'x' })
     return { model: 'sonnet' }
   })
-  on('agent.list', () => ({ value: listed }))
+  on('agent.list', async () => {
+    if (over.hold?.('agent.list') === true) await clock.sleep(HOLD_MS)
+    return { value: listed }
+  })
   on('ui.log', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', (_$, e) => {
@@ -174,7 +191,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
 }
 
 type T = Awaited<ReturnType<typeof boot>>
-const start = ($: Engine) => $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+const start = ($: Engine) => $.session.start({ cwd: REPO, surface: null, isInteractive: true })
 const tick = (t: T) => t.clock.advance(3_100)
 const mount = ($: Engine) => $.ui.mount(BAND)
 type Ui = Awaited<ReturnType<typeof mount>>
@@ -201,9 +218,10 @@ async function toLogin($: Engine, on: On, over: Over = {}, matrix: unknown = MAT
 // Pronto para o clique Executar: ferramentas instaladas e login do admin salvo.
 async function toRun($: Engine, on: On, over: Over = {}, matrix: unknown = MATRIX) {
   const r = await toLogin($, on, over, matrix)
-  r.t.files.set(binOf(toolsDirOf(HOME), 'agent-browser'), '')
-  r.t.files.set(binOf(toolsDirOf(HOME), 'impeccable'), '')
-  r.t.files.set(AUTH, authOf(-1))
+  const home = over.home ?? HOME
+  r.t.files.set(binOf(toolsDirOf(home), 'agent-browser'), '')
+  r.t.files.set(binOf(toolsDirOf(home), 'impeccable'), '')
+  r.t.files.set(authFileOf(qaRootOf(home, REPO), 'admin'), authOf(-1))
   return r
 }
 
@@ -212,6 +230,17 @@ async function running($: Engine, on: On, over: Over = {}) {
   const r = await toRun($, on, over)
   await click(r.t, r.ui)
   return r
+}
+
+// Segura uma vez só a primeira resposta cuja chave passa no teste: armado desde já ou, com `isArmed` false, depois do `arm`.
+function holdOnce(match: (key: string) => boolean, isArmed = true) {
+  const s = { isArmed }
+  const hold = (key: string): boolean => {
+    const isHit = s.isArmed && match(key)
+    if (isHit) s.isArmed = false
+    return isHit
+  }
+  return { hold, arm: () => void (s.isArmed = true) }
 }
 
 describe('QA: registro', () => {
@@ -232,6 +261,19 @@ describe('QA: registro', () => {
     const offer = (agent: string) => $.agent.offer({ agent, description: 'x', source: 'plugin', provider: { plugin: 'workbench', tier: 'user' } })
     for (const agent of [QA_RUNNER, QA_OBSERVER, QA_FIXER]) expect((await offer(agent)).isOffered).toBe(false)
     expect((await offer(QA_PLANNER)).isOffered).not.toBe(false)
+  })
+
+  test('o arquivo da trava é o mesmo depois de recarregar: o qa stop chega no agente lançado antes', async ($, on) => {
+    const { t } = await running($, on)
+    await tick(t)
+    await start($)
+    await command($, 'qa stop')
+    const runners = t.log.agents.filter(a => a.name === 'qa-runner').map(a => a.command)
+    expect(runners).toHaveLength(2)
+    expect(runners[1]).toBe(runners[0])
+    const guards = [...t.files.keys()].filter(k => /\/guard-[a-z0-9]+\.json$/.test(k))
+    expect(guards).toHaveLength(1)
+    expect(t.files.get(guards[0] ?? '')).toBe('{}')
   })
 })
 
@@ -263,6 +305,15 @@ describe('QA: Planejar e Login', () => {
     await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
     await tick(t)
     expect(t.log.submits).toHaveLength(1)
+  })
+
+  test('pasta da execução que não deu para criar: o texto do campo fica', async ($, on) => {
+    const t = await boot($, on, { typed: 'tela de cadastro', run: argv => (argv[0] === 'mkdir' ? { exitCode: 1, stdout: '' } : undefined) })
+    const ui = await mount($)
+    await click(t, ui)
+    expect(t.box.text).toBe('tela de cadastro')
+    expect(t.log.toasts.at(-1)).toContain('não deu para criar a pasta')
+    expect(t.log.submits).toEqual([])
   })
 
   test('{ drop } no envio devolve a etapa anterior', async ($, on) => {
@@ -327,6 +378,17 @@ describe('QA: portões do Executar', () => {
     expect(t.log.runs.some(a => a[0] === AB && a.join(' ').endsWith('open http://localhost:3000'))).toBe(true)
   })
 
+  // O Executar confere um contexto de exemplo com a validação da trava antes de lançar: HOME raso ela recusaria.
+  test('HOME /root: a trava recusaria o contexto, o Executar diz o motivo e não lança nada', async ($, on) => {
+    const { t, ui } = await toRun($, on, { home: '/root' })
+    await click(t, ui)
+    await tick(t)
+    expect(t.log.toasts.at(-1)).toContain('trava recusaria')
+    expect(t.log.toasts.at(-1)).toContain('/root')
+    expect(t.log.spawns).toEqual([])
+    expect(await label(ui)).toBe('QA: Executar')
+  })
+
   test('grava os scripts executáveis e o HEAD do app', async ($, on) => {
     const { t } = await running($, on)
     expect(t.files.get(AB)).toContain('AGENT_BROWSER_ACTION_POLICY')
@@ -359,6 +421,7 @@ describe('QA: fase Executar', () => {
     await ended($, 'a2')
     await tick(t)
     expect(t.log.runs.at(-1)?.slice(3)).toEqual(['close'])
+    expect(t.log.guards.at(-1)).toBe('{}')
     await tick(t)
     expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER, QA_RUNNER])
     expect(t.guard()).toMatchObject({ role: 'runner', ctx: { session: expect.stringContaining('c2') } })
@@ -427,9 +490,48 @@ describe('QA: fase Executar', () => {
     const { t } = await running($, on, { spawns: [{ deny: 'não' }] })
     expect(t.log.runs.at(-1)?.slice(3)).toEqual(['close'])
     expect(t.log.toasts.at(-1)).toContain('recusado')
+    expect(t.log.guards.at(-1)).toBe('{}')
     await tick(t)
     expect(types(t)).toEqual([QA_RUNNER, QA_RUNNER])
     expect(t.guard().ctx.session).toContain('c2')
+  })
+
+  test('falha ao gravar a trava depois de abrir o navegador: fecha a sessão, avisa e a fila segue', async ($, on) => {
+    const fail = { left: 1 }
+    const { t } = await running($, on, { failWrite: (path, text) => path.includes('/guard-') && text.includes('"runner"') && fail.left-- > 0 })
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.runs.at(-1)?.slice(3)).toEqual(['close'])
+    expect(t.log.toasts.at(-1)).toContain('c1')
+    expect(t.log.toasts.at(-1)).toContain('sem veredito')
+    await tick(t)
+    expect(types(t)).toEqual([QA_RUNNER])
+    expect(t.guard().ctx.session).toContain('c2')
+  })
+
+  // /workbench qa stop enquanto o passo abre o navegador da c1, e clique logo depois: o Executar novo só é montado
+  // depois que o passo antigo termina (e acha o trabalho parado), então a c1 não entra duas vezes.
+  test('clique durante um passo em curso fica na fila até o passo acabar', async ($, on) => {
+    const { t, ui } = await toRun($, on, { hold: holdOnce(k => k.includes(' open ')).hold })
+    await click(t, ui)
+    await command($, 'qa stop')
+    await ui.press({ key: 'qa' })
+    await tick(t)
+    await t.clock.advance(1_000)
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(await label(ui)).toBe('QA: Executar')
+    await tick(t)
+    expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
+  })
+
+  test('qa stop enquanto o passo adota o agente: a trava fica em {}', async ($, on) => {
+    const list = holdOnce(k => k === 'agent.list', false)
+    const { t } = await running($, on, { hold: list.hold })
+    list.arm()
+    await tick(t)
+    await command($, 'qa stop')
+    await t.clock.advance(HOLD_MS)
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(JSON.parse(t.log.guards.at(-2) ?? '{}')).toMatchObject({ role: 'runner', agentId: 'a1' })
   })
 
   test('retomada: depois de um novo session.start o trabalho segue do item em curso', async ($, on) => {

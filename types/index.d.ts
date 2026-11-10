@@ -128,6 +128,9 @@ declare module 'claude-code' {
       qaGuarded: string[]
       // QA: HEAD e estado da árvore do app no começo do Executar.
       qaRunBase: { head: string; isDirty: boolean } | null
+      // QA: o código do nome do arquivo da trava; criado uma vez, não zera no session.start (o agente lançado antes de um
+      // reload continua lendo o mesmo arquivo, e o stop e o fim da execução chegam nele).
+      qaGuardToken: string | null
     }
   }
 }
