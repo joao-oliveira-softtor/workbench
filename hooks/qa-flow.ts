@@ -512,6 +512,7 @@ export async function resetFixOut($: EngineInterface, outDir: string): Promise<b
 }
 
 export type FixCheck = { kind: 'refuse'; reason: string } | { kind: 'unverified'; reason: string } | { kind: 'ok'; regression: string | null; pending: string[] }
+// `sha`: o HEAD do começo da tentativa; a recusa no commit desfaz só até ele, e o diff conferido é o da tentativa.
 type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; baseline: string; port: number }
 
 const refuse = (reason: string): FixCheck => ({ kind: 'refuse', reason })

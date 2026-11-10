@@ -1138,6 +1138,16 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(types(t)).toEqual([QA_FIXER, QA_FIXER])
   })
 
+  test('recusa no meio da tentativa 2 desfaz até o começo dela: o commit da tentativa 1 fica', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
+    await fixerEnds($, t)
+    expect(t.wt.head).toBe('c1')
+    await fixerEnds($, t, JSON.stringify({ retestable: true }))
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'c1'))
+    expect(t.wt.head).toBe('c1')
+    expect(t.log.spawns[2]?.prompt).toContain('mudança sem descrição de commit')
+  })
+
   test('o fix.json de uma tentativa recusada não vale para a seguinte', async ($, on) => {
     const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
     await fixerEnds($, t)

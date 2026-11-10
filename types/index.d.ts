@@ -133,13 +133,14 @@ declare module 'claude-code' {
       qaGuardToken: string | null
       // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
       qaArmed: { at: number } | null
-      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash) e o `git status` da worktree no começo da fase, o teste de
-      // regressão e as pendências do defeito em curso, e o que o clique leu da execução (a matriz e a fila inteira de defeitos):
-      // a fase não relê o matriz.md. Não zera no session.start (é o que permite retomar). `matrix` repete a forma de `Matrix`
-      // do hooks/qa-evidence.ts (o tsc confere as duas).
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o `git status` que o mod deixou na worktree, o HEAD do começo
+      // da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e o que o clique leu da execução (a
+      // matriz e a fila inteira de defeitos): a fase não relê o matriz.md. Não zera no session.start (é o que permite retomar).
+      // `matrix` repete a forma de `Matrix` do hooks/qa-evidence.ts (o tsc confere as duas).
       qaFix: {
         root: string
         baseline: string
+        attemptSha: string
         regression: string | null
         pending: string[]
         matrix: {

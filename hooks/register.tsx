@@ -904,7 +904,7 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   const root = await rootSnapOf($, env.root)
   await update($, qaFlow, f => ({ ...f, fixDir: ready.fixDir }))
   // A matriz (comandos, URL, células) fica no estado: a fase nunca mais relê o matriz.md.
-  await update($, qaFix, () => ({ root, baseline: ready.baseline, regression: null, pending: [], matrix, defects: all }))
+  await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], matrix, defects: all }))
   await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null })
   void refresh($, true).catch(() => {})
 }
@@ -1247,6 +1247,9 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
   const app = appMatrixOf(f.matrix, c.port)
   await rebaseline($, f)
+  // O HEAD do começo da tentativa: uma recusa no meio dela desfaz só até aqui (os commits das tentativas anteriores ficam).
+  const attemptSha = await headOf($, f.fixDir)
+  await update($, qaFix, x => (x === null ? x : { ...x, attemptSha }))
   const cdpPort = (await resetFixOut($, outDir)) ? await prepareSession($, f.env, f.matrix, target.cell, session, app.baseUrl) : null
   if (cdpPort === null) return finishDefect($, f, c, 'não reverificado', ['não deu para abrir o navegador do corretor'], [])
   const now = await $.clock.now()
@@ -1323,8 +1326,8 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
 }
 
 async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
-  const baseline = (await read($, qaFix))?.baseline ?? ''
-  const check = await checkFix($, { ...f, defectId: c.item, sha: c.sha, baseline, port: c.port })
+  const fix = await read($, qaFix)
+  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? '', port: c.port })
   await rebaseline($, f)
   switch (check.kind) {
     case 'refuse':
