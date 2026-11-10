@@ -478,6 +478,17 @@ describe('QA: fim dos agentes e qa_auth', () => {
     return JSON.stringify(await call.call(tool, { tool: QA_AUTH_TOOL, profile }))
   }
 
+  test('o hook do qa_auth deixa passar, sem mudar, a chamada de qualquer outra ferramenta', async ($, on) => {
+    on('tool.call', (_$, e, next) => {
+      const call: object = e
+      return Reflect.get(call, 'tool') === 'mcp__outro__x' ? { result: 'r', text: 'resposta-x' } : next(e)
+    })
+    await boot($, on)
+    const tool: object = $.tool
+    const call = Reflect.get(tool, 'call')
+    expect(JSON.stringify(await call.call(tool, { tool: 'mcp__outro__x', a: 1 }))).toContain('resposta-x')
+  })
+
   test('qa_auth responde só as contagens e recusa perfil de fora da matriz', async ($, on) => {
     const { t } = await toRun($, on)
     const ok = await auth($, 'admin')

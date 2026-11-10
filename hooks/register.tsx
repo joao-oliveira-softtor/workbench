@@ -733,12 +733,11 @@ const isAuthCall = (call: unknown): call is { tool: string; profile?: unknown } 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 120)
 const isoOf = (at: number): string => new Date(at).toISOString()
 
-// O clique só enfileira a etapa atual; com trabalho em curso devolve o aviso e nada muda.
-async function pressQa($: EngineInterface): Promise<string> {
+// O clique só enfileira a etapa atual; com trabalho em curso devolve o aviso e nada muda (null = enfileirado).
+async function pressQa($: EngineInterface): Promise<string | null> {
   if ((await read($, qaJob)) !== null) return 'QA em andamento (use /workbench qa stop)'
-  const step = (await read($, qaFlow)).step
-  qaQueued = step
-  return `QA: "${qaLabelOf(await read($, qaFlow), null)}" na fila`
+  qaQueued = (await read($, qaFlow)).step
+  return null
 }
 
 // Grava a etapa nova ANTES de enviar (o envio pode durar o turno inteiro); `{ drop }` ou erro devolve a anterior.
@@ -903,10 +902,16 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
   return nextRunOf(c, final) === 'repeat' ? startCell($, env, runDir, matrix, c.cell, 2) : null
 }
 
-// Grava o item novo; se o trabalho foi parado no meio, fecha a sessão que acabou de abrir.
+// Desmonta o que um item deixou aberto: a trava nega todo agente e a sessão do navegador fecha.
+async function teardownQa($: EngineInterface, env: QaEnv, current: QaCurrent | null | undefined): Promise<void> {
+  await $.fs.write(env.guardFile, '{}')
+  if (current) await closeSession($, env, current.session)
+}
+
+// Grava o item novo; se o trabalho foi parado no meio do passo, desmonta o que o passo acabou de abrir.
 async function setCurrent($: EngineInterface, env: QaEnv, next: QaCurrent | null): Promise<void> {
   await update($, qaJob, cur => (cur === null ? null : { ...cur, current: next }))
-  if (next !== null && (await read($, qaJob)) === null) await closeSession($, env, next.session)
+  if (next !== null && (await read($, qaJob)) === null) await teardownQa($, env, next)
 }
 
 // Fila vazia: relatório, etapa Corrigir, trava zerada e o resumo pendente para a sessão.
@@ -926,6 +931,7 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
   const loaded = await loadMatrix($, flow.runDir)
   if (loaded.kind !== 'ok') {
     await update($, qaJob, () => null)
+    await teardownQa($, env, job.current)
     $.ui.toast('QA: a matriz sumiu ou mudou no meio da execução; o trabalho parou.')
     return
   }
@@ -992,10 +998,9 @@ async function drainQa($: EngineInterface): Promise<void> {
 async function stopQa($: EngineInterface): Promise<string> {
   const job = await read($, qaJob)
   const env = qaEnv
-  if (env !== null) await $.fs.write(env.guardFile, '{}')
   await update($, qaJob, () => null)
   qaQueued = null
-  if (env !== null && job?.current) await closeSession($, env, job.current.session)
+  if (env !== null) await teardownQa($, env, job?.current)
   return job === null ? 'QA: nenhum trabalho em curso.' : 'QA parado. Clique em QA para retomar.'
 }
 
@@ -1159,7 +1164,7 @@ export const register: Register = on => {
       return { text: `${list}\n(o Haiku está sendo consultado em segundo plano; o painel mostra o resultado)` }
     }
     if (args === 'qa stop') return { text: await stopQa($) }
-    if (args === 'qa') return { text: await pressQa($) }
+    if (args === 'qa') return { text: (await pressQa($)) ?? 'QA: a etapa atual roda em segundo plano (veja o botão QA).' }
     await openPanel($)
     return { text: 'Painel do workbench aberto.' }
   })
@@ -1295,7 +1300,7 @@ export const register: Register = on => {
         <Button key="plan" plain onPress={() => void pressPlan($).catch(() => {})}>
           {PLAN_LABELS[(await read($, planFlow)).step]}
         </Button>
-        <Button key="qa" plain onPress={() => void pressQa($).then(text => $.ui.toast(text)).catch(() => {})}>
+        <Button key="qa" plain onPress={() => void pressQa($).then(text => text !== null && $.ui.toast(text)).catch(() => {})}>
           {qaLabelOf(await read($, qaFlow), await read($, qaJob))}
         </Button>
         <Button key="refresh" plain label="Atualizar" onPress={() => void refresh($, true).catch(() => {})} />

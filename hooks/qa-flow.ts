@@ -209,12 +209,12 @@ export async function cellVerdictOf($: EngineInterface, runDir: string, cell: st
   return text === null ? null : parseVerdict(text, DETECT_FAIL_RULES)
 }
 
-// Lê os vereditos (e a repetição, quando a pasta r2 existe), grava o relatorio.md e devolve a contagem.
+// Lê os vereditos (e o da repetição, quando r2/veredito.json existe), grava o relatorio.md e devolve a contagem.
 export async function writeReport($: EngineInterface, runDir: string, matrix: Matrix): Promise<string> {
   const outcomes: Record<string, CellOutcome> = {}
   for (const cell of matrix.cells) {
     const first = await cellVerdictOf($, runDir, cell.id, 1)
-    const second = (await exists($, cellDirOf(runDir, cell.id, 2))) ? await cellVerdictOf($, runDir, cell.id, 2) : undefined
+    const second = (await exists($, verdictPathOf(runDir, cell.id, 2))) ? await cellVerdictOf($, runDir, cell.id, 2) : undefined
     outcomes[cell.id] = outcomeOf(cell, first, second)
   }
   await $.fs.write(reportPathOf(runDir), reportOf({ runId: runDir.split('/').pop() ?? runDir, matrix, outcomes }))
