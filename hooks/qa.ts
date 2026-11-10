@@ -1,8 +1,7 @@
-// Fluxo de QA: regras puras, sem `$`, sem I/O e sem relógio (testáveis). Nomes, caminhos, textos de pedido, tipos de agente,
-// scripts das ferramentas e as decisões de "qual é o próximo passo". A ligação com os botões e o timer vive em register.tsx.
+// Fluxo de QA, puro (sem `$`, I/O nem relógio): a ligação com os botões e o timer fica em register.tsx.
 import type { EngineInterface } from 'claude-code'
 
-import { ANON_PROFILE, finalVerdictOf, isUnstable } from './qa-evidence'
+import { ANON_PROFILE, defectIdOf, finalVerdictOf, isUnstable } from './qa-evidence'
 import type { Cell, CellOutcome, CellVerdict, Defect, Matrix, Verdict } from './qa-evidence'
 import type { GuardCtx, QaRole } from './qa-guard'
 import { ARM_MS, END_GRACE_MS, ENDED, SPAWN_GRACE_MS, shellQuote } from './stale'
@@ -37,7 +36,7 @@ export const AGENT_TIMEOUT_MS = 20 * 60_000
 export const VIEW_HEIGHT = 800
 export const NODE_MIN = '22.6'
 
-function verbOf(role: QaRole, attempt: number, cell: string): string {
+function fixVerbOf(role: QaRole, attempt: number, cell: string): string {
   switch (role) {
     case 'fixer':
       return 'corrigindo'
@@ -50,19 +49,54 @@ function verbOf(role: QaRole, attempt: number, cell: string): string {
 }
 
 function runVerbOf(role: QaRole): string {
-  return role === 'observer' ? 'verificando' : 'executando'
+  switch (role) {
+    case 'observer':
+      return 'verificando'
+    case 'runner':
+    case 'fixer':
+      return 'executando'
+    default:
+      throw new Error('Caso não tratado: ' + String(role satisfies never))
+  }
+}
+
+function verbOf(phase: QaJob['phase'], c: QaCurrent): string {
+  switch (phase) {
+    case 'run':
+      return runVerbOf(c.role)
+    case 'fix':
+      return fixVerbOf(c.role, c.attempt, c.cell)
+    default:
+      throw new Error('Caso não tratado: ' + String(phase satisfies never))
+  }
 }
 
 export function qaLabelOf(flow: QaFlow, job: QaJob | null): string {
   const c = job?.current
   if (job === null || c === null || c === undefined) return QA_LABELS[flow.step]
-  const verb = job.phase === 'run' ? runVerbOf(c.role) : verbOf(c.role, c.attempt, c.cell)
-  return `QA: ${c.item} (${job.total - job.queue.length}/${job.total}) ${verb}`
+  return `QA: ${c.item} (${job.total - job.queue.length}/${job.total}) ${verbOf(job.phase, c)}`
 }
 
 // ---- Próximo passo (decisões puras) ----
 
 export type RunNext = 'observer' | 'repeat' | 'done'
+
+function isFailure(verdict: Verdict): boolean {
+  switch (verdict) {
+    case 'FAIL-APP':
+    case 'FAIL-VISUAL':
+      return true
+    case 'AMBIENTE':
+    case 'FAIL-AGENTE':
+    case 'INSTÁVEL':
+    case 'CANDIDATO-VISUAL':
+    case 'PASS':
+    case 'NÃO VERIFICADO':
+      return false
+    default:
+      throw new Error('Caso não tratado: ' + String(verdict satisfies never))
+  }
+}
 
 // `verdict` só importa quando o papel é `observer`: a célula que falha na primeira roda de novo, do zero, uma vez.
 export function nextRunOf(current: { role: QaRole; attempt: number }, verdict: Verdict): RunNext {
@@ -70,7 +104,7 @@ export function nextRunOf(current: { role: QaRole; attempt: number }, verdict: V
     case 'runner':
       return 'observer'
     case 'observer':
-      return current.attempt === 1 && (verdict === 'FAIL-APP' || verdict === 'FAIL-VISUAL') ? 'repeat' : 'done'
+      return current.attempt === 1 && isFailure(verdict) ? 'repeat' : 'done'
     case 'fixer':
       return 'done'
     default:
@@ -114,11 +148,13 @@ export function afterJudgeOf(attempt: number, accepted: boolean): 'corrigido' | 
 export type AgentStep = { step: 'wait' } | { step: 'adopt'; agentId: string } | { step: 'ended' }
 
 // Mesma lógica do `removalStepOf`, mais o tempo limite de runner e observer (o fixer nunca é abandonado por tempo).
+// `known`: ids de QA já conhecidos; um agente vivo deles (p. ex. abandonado por tempo) nunca é adotado como o do item novo.
 export function agentStepOf(
   current: { role: QaRole; agentId: string | null; at: number; isEnded: boolean },
   type: string,
   listed: readonly Listed[] | null,
   now: number,
+  known: readonly string[],
 ): AgentStep {
   if (current.isEnded) return { step: 'ended' }
   // O tempo limite não depende da lista: uma consulta que falha não pode prender um agente travado.
@@ -129,7 +165,7 @@ export function agentStepOf(
     const isOver = agent === undefined || ENDED.has(agent.status)
     return isOver && now - current.at >= END_GRACE_MS ? { step: 'ended' } : { step: 'wait' }
   }
-  const alive = listed.find(a => a.type === type && !ENDED.has(a.status))
+  const alive = listed.find(a => a.type === type && !ENDED.has(a.status) && !known.includes(a.id))
   if (alive !== undefined) return { step: 'adopt', agentId: alive.id }
   return now - current.at >= SPAWN_GRACE_MS ? { step: 'ended' } : { step: 'wait' }
 }
@@ -189,8 +225,7 @@ export const DETECT_FAIL_RULES = [
   'low-contrast',
   'gray-on-color',
 ] as const
-// Cada nome é o que a política do agent-browser 0.41.2 usa (medido). Ficam negados de propósito: ler cookies ou storage,
-// rodar JavaScript, salvar estado, HAR e ler HTML.
+// Nomes medidos na política do agent-browser 0.41.2; ficam negados de propósito cookies, storage, JavaScript, estado, HAR e HTML.
 export const AB_ACTIONS = [
   'launch', 'navigate', 'snapshot', 'click', 'dblclick', 'hover', 'focus', 'check', 'uncheck', 'scrollintoview',
   'fill', 'type', 'select', 'press', 'keyboard', 'scroll', 'wait', 'waitforloadstate', 'screenshot', 'gettext', 'inputvalue', 'getattribute',
@@ -330,15 +365,20 @@ function loginStepOf(o: { matrix: Matrix; qaRoot: string; toolsDir: string }, pr
   const bin = binOf(o.toolsDir, 'agent-browser')
   const session = `login-${profile}`
   const file = authFileOf(o.qaRoot, profile)
+  const q = `"${bin}" --session ${session}`
   const domains = [LOCAL_DOMAINS, ...o.matrix.allowedDomains].join(',')
   return [
     `   Perfil ${profile}: chame ${QA_AUTH_TOOL} com o perfil. Se o login não serve:`,
-    `   a. ${bin} --session ${session} --headed --allowed-domains ${domains} open ${o.matrix.baseUrl}${o.matrix.loginRoute}`,
-    `   b. peça pelo AskUserQuestion que o usuário entre com o perfil ${profile} na janela e confirme;`,
-    `   c. ${bin} --session ${session} state save ${file}`,
-    `   d. chmod 600 ${file}`,
-    `   e. ${bin} --session ${session} close`,
-    `   f. chame ${QA_AUTH_TOOL} de novo para conferir.`,
+    // O arquivo nasce vazio e fechado (600) antes de receber a sessão: nunca existe com permissão aberta.
+    `   a. mkdir -p "${o.qaRoot}/auth"`,
+    `   b. touch "${file}"`,
+    `   c. chmod 600 "${file}"`,
+    // A URL vem da matriz, então vai entre aspas simples (aspas duplas expandiriam `$`).
+    `   d. ${q} --headed --allowed-domains ${domains} open ${shellQuote(`${o.matrix.baseUrl}${o.matrix.loginRoute}`)}`,
+    `   e. peça pelo AskUserQuestion que o usuário entre com o perfil ${profile} na janela e confirme;`,
+    `   f. ${q} state save "${file}"`,
+    `   g. ${q} close`,
+    `   h. chame ${QA_AUTH_TOOL} de novo para conferir.`,
   ]
 }
 
@@ -349,8 +389,8 @@ export function qaLoginPromptOf(o: { matrixPath: string; matrix: Matrix; qaRoot:
   return [
     `Prepare o login do QA com o usuário. A matriz aprovada está em ${o.matrixPath}.`,
     `1. Rode \`node --version\`. Se for menor que ${NODE_MIN}, pare e explique que o QA precisa do Node ${NODE_MIN} ou mais novo.`,
-    `2. Se ${bin} não existe, rode: npm install --prefix ${o.toolsDir} agent-browser@${AGENT_BROWSER_VERSION} impeccable@${IMPECCABLE_VERSION}`,
-    `3. Se ${skill} não existe: clone https://github.com/pbakaus/impeccable na tag ${IMPECCABLE_SKILL_TAG} numa pasta temporária e copie SÓ .claude/skills/impeccable para ${skill}. Nunca sobrescreva uma pasta que já existe e nunca rode \`impeccable install\`.`,
+    `2. Se "${bin}" não existe, rode: npm install --prefix "${o.toolsDir}" agent-browser@${AGENT_BROWSER_VERSION} impeccable@${IMPECCABLE_VERSION}`,
+    `3. Se "${skill}" não existe: clone https://github.com/pbakaus/impeccable na tag ${IMPECCABLE_SKILL_TAG} numa pasta temporária e copie SÓ .claude/skills/impeccable para "${skill}". Nunca sobrescreva uma pasta que já existe e nunca rode \`impeccable install\`.`,
     ...(profiles.length === 0
       ? ['4. Como nenhum perfil da matriz exige login, não abra navegador.']
       : ['4. Para cada perfil abaixo (o anônimo não precisa de login):', ...profiles.flatMap(p => loginStepOf(o, p))]),
@@ -384,7 +424,12 @@ const SKILL_OF = { runner: 'workbench:qa-executar', observer: 'workbench:qa-veri
 function valuesOf(role: QaRole, o: SpawnInput): [string, string][] {
   const cell: [string, string] = ['Célula (JSON)', JSON.stringify(o.cell)]
   const common: [string, string][] = [['Script do agent-browser (AB)', o.ab], ['Sessão (S)', o.session]]
-  const port: [string, string] = ['Porta de depuração (PORTA)', String(o.cdpPort ?? '')]
+  const port: [string, string] = ['Porta de depuração (PORTA)', o.cdpPort === null ? '(sem porta: não rode o IMP)' : String(o.cdpPort)]
+  const isAnon = o.cell.profile === ANON_PROFILE
+  const testVars: [string, string] = [
+    'Variáveis do teste gerado',
+    isAnon ? 'QA_BASE_URL. O perfil não tem login: o teste gerado NÃO usa storageState nem a variável QA_AUTH_…' : `QA_BASE_URL e ${authEnvOf(o.cell.profile)}`,
+  ]
   switch (role) {
     case 'runner':
       return [
@@ -392,10 +437,10 @@ function valuesOf(role: QaRole, o: SpawnInput): [string, string][] {
         ['URL base (BASE)', o.baseUrl],
         ['Pasta de saída (SAIDA)', o.outDir],
         ...common,
-        ['Perfil', o.cell.profile],
+        ['Perfil', isAnon ? `${o.cell.profile} (não tem login)` : o.cell.profile],
         ['Largura', `${o.cell.width}`],
         ['Hora de início', o.startedAt],
-        ['Variáveis do teste gerado', `QA_BASE_URL e ${authEnvOf(o.cell.profile)}`],
+        testVars,
       ]
     case 'observer':
       return [
@@ -414,6 +459,7 @@ function valuesOf(role: QaRole, o: SpawnInput): [string, string][] {
     case 'fixer':
       return [
         ['Defeito (JSON)', JSON.stringify(o.defect)],
+        ['Id do defeito (DEFEITO)', o.defect === null ? '' : defectIdOf(o.cell.id, o.defect.id)],
         ['Célula do defeito (JSON)', JSON.stringify(o.cell)],
         ['Worktree (W)', o.worktree],
         ['URL do app da worktree (APP)', o.baseUrl],
@@ -423,7 +469,7 @@ function valuesOf(role: QaRole, o: SpawnInput): [string, string][] {
         ['Pasta de testes (TESTES)', o.testDir || '(vazia)'],
         ['Pasta de saída (SAIDA)', o.outDir],
         ['Tentativa', String(o.attempt)],
-        ['Motivos da recusa anterior', o.reasons.length === 0 ? '(nenhum)' : o.reasons.join(' | ')],
+        ['Motivos da recusa anterior', o.reasons.length === 0 ? '(nenhum)' : o.reasons.map(r => r.replace(/\s+/g, ' ').trim()).join(' | ')],
       ]
     default:
       throw new Error('Caso não tratado: ' + String(role satisfies never))

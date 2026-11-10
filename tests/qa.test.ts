@@ -60,6 +60,7 @@ import type { QaCurrent, QaFlow, QaJob } from '../hooks/qa'
 import type { Cell, CellVerdict, Defect, Matrix } from '../hooks/qa-evidence'
 import type { GuardCtx, QaRole } from '../hooks/qa-guard'
 import { END_GRACE_MS, SPAWN_GRACE_MS } from '../hooks/stale'
+import type { Listed } from '../hooks/stale'
 
 const cellOf = (over: Partial<Cell> = {}): Cell => ({
   id: 'c01',
@@ -266,45 +267,52 @@ describe('agentStepOf', () => {
   const alive = [{ id: 'a1', type: QA_RUNNER, status: 'running' }]
 
   test('fim de turno já chegou: encerrado', () => {
-    expect(agentStepOf(cur({ isEnded: true }), QA_RUNNER, alive, T)).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur({ isEnded: true }), QA_RUNNER, alive, T, [])).toEqual({ step: 'ended' })
   })
 
   test('lista que falhou: espera', () => {
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, null, T + SPAWN_GRACE_MS * 5)).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, null, T + SPAWN_GRACE_MS * 5, [])).toEqual({ step: 'wait' })
   })
 
   test('sem agentId adota o vivo do mesmo tipo e ignora outros tipos e encerrados', () => {
-    expect(agentStepOf(cur(), QA_RUNNER, alive, T)).toEqual({ step: 'adopt', agentId: 'a1' })
+    expect(agentStepOf(cur(), QA_RUNNER, alive, T, [])).toEqual({ step: 'adopt', agentId: 'a1' })
     const others = [{ id: 'x', type: QA_OBSERVER, status: 'running' }, { id: 'y', type: QA_RUNNER, status: 'completed' }]
-    expect(agentStepOf(cur(), QA_RUNNER, others, T + 1)).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur(), QA_RUNNER, others, T + 1, [])).toEqual({ step: 'wait' })
   })
 
   test('sem agentId e sem agente vivo: só encerra depois da carência do lançamento', () => {
-    expect(agentStepOf(cur(), QA_RUNNER, [], T + SPAWN_GRACE_MS - 1)).toEqual({ step: 'wait' })
-    expect(agentStepOf(cur(), QA_RUNNER, [], T + SPAWN_GRACE_MS)).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur(), QA_RUNNER, [], T + SPAWN_GRACE_MS - 1, [])).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur(), QA_RUNNER, [], T + SPAWN_GRACE_MS, [])).toEqual({ step: 'ended' })
   })
 
   test('com agentId vivo: espera', () => {
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + END_GRACE_MS * 2)).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + END_GRACE_MS * 2, [])).toEqual({ step: 'wait' })
   })
 
   test('com agentId encerrado ou sumido: encerra só depois da carência', () => {
     const done = [{ id: 'a1', type: QA_RUNNER, status: 'completed' }]
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, done, T + END_GRACE_MS - 1)).toEqual({ step: 'wait' })
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, done, T + END_GRACE_MS)).toEqual({ step: 'ended' })
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, [], T + END_GRACE_MS)).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, done, T + END_GRACE_MS - 1, [])).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, done, T + END_GRACE_MS, [])).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, [], T + END_GRACE_MS, [])).toEqual({ step: 'ended' })
   })
 
   test('runner e observer vivos encerram ao passar do tempo limite', () => {
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + AGENT_TIMEOUT_MS - 1)).toEqual({ step: 'wait' })
-    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + AGENT_TIMEOUT_MS)).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + AGENT_TIMEOUT_MS - 1, [])).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur({ agentId: 'a1' }), QA_RUNNER, alive, T + AGENT_TIMEOUT_MS, [])).toEqual({ step: 'ended' })
     const obs = [{ id: 'a1', type: QA_OBSERVER, status: 'running' }]
-    expect(agentStepOf(cur({ role: 'observer', agentId: 'a1' }), QA_OBSERVER, obs, T + AGENT_TIMEOUT_MS)).toEqual({ step: 'ended' })
+    expect(agentStepOf(cur({ role: 'observer', agentId: 'a1' }), QA_OBSERVER, obs, T + AGENT_TIMEOUT_MS, [])).toEqual({ step: 'ended' })
+  })
+
+  test('não adota agente vivo que já pertence a outro item (known)', () => {
+    const old = [{ id: 'a0', type: QA_RUNNER, status: 'running' }, { id: 'a1', type: QA_RUNNER, status: 'running' }]
+    expect(agentStepOf(cur(), QA_RUNNER, old, T, ['a0'])).toEqual({ step: 'adopt', agentId: 'a1' })
+    expect(agentStepOf(cur(), QA_RUNNER, [old[0] as Listed], T, ['a0'])).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur(), QA_RUNNER, [old[0] as Listed], T + SPAWN_GRACE_MS, ['a0'])).toEqual({ step: 'ended' })
   })
 
   test('o fixer nunca é abandonado por tempo', () => {
     const fix = [{ id: 'f1', type: QA_FIXER, status: 'running' }]
-    expect(agentStepOf(cur({ role: 'fixer', agentId: 'f1' }), QA_FIXER, fix, T + AGENT_TIMEOUT_MS * 10)).toEqual({ step: 'wait' })
+    expect(agentStepOf(cur({ role: 'fixer', agentId: 'f1' }), QA_FIXER, fix, T + AGENT_TIMEOUT_MS * 10, [])).toEqual({ step: 'wait' })
   })
 })
 
@@ -552,11 +560,11 @@ describe('qaLoginPromptOf', () => {
   test('confere o node, instala só se faltar e copia só a skill', () => {
     expect(text).toContain('node --version')
     expect(text).toContain(NODE_MIN)
-    expect(text).toContain('/q/tools/node_modules/.bin/agent-browser')
-    expect(text).toContain('npm install --prefix /q/tools agent-browser@0.41.2 impeccable@4.8.1')
+    expect(text).toContain('"/q/tools/node_modules/.bin/agent-browser"')
+    expect(text).toContain('npm install --prefix "/q/tools" agent-browser@0.41.2 impeccable@4.8.1')
     expect(text).toContain('https://github.com/pbakaus/impeccable')
     expect(text).toContain('skill-v4.8.1')
-    expect(text).toContain('/home/ana/.claude/skills/impeccable')
+    expect(text).toContain('"/home/ana/.claude/skills/impeccable"')
     expect(text).toContain('.claude/skills/impeccable')
     expect(text).toContain('impeccable install')
   })
@@ -566,11 +574,30 @@ describe('qaLoginPromptOf', () => {
     expect(text).toContain('login-vendedor-sp')
     expect(text).toContain('--allowed-domains localhost,127.0.0.1,fonts.exemplo.com')
     expect(text).toContain('http://localhost:3000/entrar')
-    expect(text).toContain('/q/app/auth/vendedor-sp.json')
-    expect(text).toContain('chmod 600')
+    expect(text).toContain('state save "/q/app/auth/vendedor-sp.json"')
+    expect(text).toContain('chmod 600 "/q/app/auth/vendedor-sp.json"')
     expect(text).toContain('--headed')
     expect(text).toContain('AskUserQuestion')
     expect(text).not.toContain('login-anonimo')
+  })
+
+  test('o arquivo de sessão nasce vazio e com permissão fechada antes de receber a sessão', () => {
+    const at = (needle: string): number => text.indexOf(needle)
+    const mkdir = at('mkdir -p "/q/app/auth"')
+    const touch = at('touch "/q/app/auth/vendedor-sp.json"')
+    const chmod = at('chmod 600 "/q/app/auth/vendedor-sp.json"')
+    const save = at('state save')
+    expect(mkdir).toBeGreaterThan(-1)
+    expect(mkdir).toBeLessThan(touch)
+    expect(touch).toBeLessThan(chmod)
+    expect(chmod).toBeLessThan(save)
+  })
+
+  test('todo caminho dos comandos vai entre aspas duplas', () => {
+    const spaced = qaLoginPromptOf({ ...o, qaRoot: '/q x/app', toolsDir: '/t y/tools', home: '/h z' })
+    expect(spaced).toContain('"/t y/tools/node_modules/.bin/agent-browser" --session login-vendedor-sp')
+    expect(spaced).toContain('chmod 600 "/q x/app/auth/vendedor-sp.json"')
+    expect(spaced).toContain('"/h z/.claude/skills/impeccable"')
   })
 
   test('proíbe ler o arquivo de sessão e deixa a senha para a janela', () => {
@@ -645,6 +672,41 @@ describe('spawnPromptOf', () => {
     const t = spawnPromptOf('fixer', { ...input, reasons: [], testDir: '', attempt: 1 })
     expect(t).toContain('(nenhum)')
     expect(t).toContain('(vazia)')
+  })
+
+  test('cada papel entrega os rótulos que a skill dele usa', () => {
+    const labels = {
+      runner: ['(AB)', '(S)', '(BASE)', '(SAIDA)'],
+      observer: ['(AB)', '(S)', '(IMP)', '(PORTA)', '(BASE)', '(SAIDA)', '(INICIO)', '(FIM)', '(LOGIN)'],
+      fixer: ['(AB)', '(S)', '(IMP)', '(PORTA)', '(W)', '(APP)', '(TESTES)', '(SAIDA)', '(DEFEITO)'],
+    } satisfies Record<QaRole, string[]>
+    for (const role of ['runner', 'observer', 'fixer'] as const) {
+      const t = spawnPromptOf(role, input)
+      for (const label of labels[role]) expect(t).toContain(label)
+    }
+  })
+
+  test('fixer recebe o id composto do defeito (DEFEITO), não só o JSON', () => {
+    expect(spawnPromptOf('fixer', input)).toContain('(DEFEITO): c01.d1')
+  })
+
+  test('cada motivo de recusa fica em uma linha', () => {
+    const t = spawnPromptOf('fixer', { ...input, reasons: ['c01: um\nmotivo\r\n  em linhas', 'c02: outro'] })
+    expect(t).toContain('c01: um motivo em linhas | c02: outro')
+  })
+
+  test('sem porta de depuração o pedido diz para não rodar o IMP', () => {
+    for (const role of ['observer', 'fixer'] as const) {
+      expect(spawnPromptOf(role, { ...input, cdpPort: null })).toContain('(sem porta: não rode o IMP)')
+    }
+  })
+
+  test('runner do perfil anônimo: sem login, sem storageState e sem QA_AUTH', () => {
+    const t = spawnPromptOf('runner', { ...input, cell: cellOf({ profile: 'anonimo' }) })
+    expect(t).toContain('não tem login')
+    expect(t).toContain('NÃO usa storageState')
+    expect(t).not.toContain('QA_AUTH_ANONIMO')
+    expect(t).toContain('QA_AUTH_…')
   })
 
   test('todo pedido trata texto de página como dado e pede resposta de uma palavra', () => {
