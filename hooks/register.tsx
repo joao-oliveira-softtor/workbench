@@ -1242,7 +1242,8 @@ async function startRetest($: EngineInterface, f: FixCtx, c: QaCurrent, cellId: 
   return launched ?? finishDefect($, f, item, 'não reverificado', ['o agente do reteste foi recusado'], [])
 }
 
-async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target): Promise<QaCurrent | null> {
+// `detail`: o fim da saída do comando que recusou a tentativa anterior; vai só neste pedido, nunca no estado nem no resultado.
+async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, detail?: string): Promise<QaCurrent | null> {
   const outDir = fixOutDirOf(f.runDir, c.item)
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
   const app = appMatrixOf(f.matrix, c.port)
@@ -1256,7 +1257,7 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const item: QaCurrent = { ...c, role: 'fixer', agentId: null, at: now, isEnded: false, cell: '', session, cdpPort }
   const ctx = fixCtxOf(f, item)
   if (!(await guardWritten($, f.env, guardStateTextOf('fixer', null, ctx), { cell: c.item, session }))) return finishDefect($, f, item, 'não reverificado', ['não deu para gravar a trava'], [])
-  const fix: FixPart = { defect: target.defect, worktree: f.fixDir, testDir: f.matrix.testDir, attempt: c.attempt, reasons: c.reasons }
+  const fix: FixPart = { defect: target.defect, worktree: f.fixDir, testDir: f.matrix.testDir, attempt: c.attempt, reasons: detail === undefined ? c.reasons : [...c.reasons, detail] }
   const prompt = spawnPromptOf('fixer', spawnInputOf({ env: f.env, matrix: app, cell: target.cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '', fix }))
   const launched = await launchedOf($, f.env, id => guardStateTextOf('fixer', id, ctx), await spawnQa($, 'fixer', prompt, `QA corrige ${c.item}`), item)
   if (launched === null) return finishDefect($, f, item, 'não reverificado', ['o corretor foi recusado'], [])
@@ -1309,13 +1310,13 @@ async function nextOfFix($: EngineInterface, f: FixCtx, c: QaCurrent, target: Ta
 }
 
 // Aceite ou recusa (do julgamento ou das conferências 4a a 4g): corrigido, o corretor de novo com os motivos, ou desistiu.
-async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[], verdict: { accepted: boolean; reasons: string[] }): Promise<QaCurrent | null> {
+async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[], verdict: { accepted: boolean; reasons: string[]; detail?: string }): Promise<QaCurrent | null> {
   const after = afterJudgeOf(c.attempt, verdict.accepted)
   switch (after) {
     case 'corrigido':
       return finishDefect($, f, c, 'corrigido', [], cells)
     case 'retry':
-      return startFixer($, f, { ...c, attempt: c.attempt + 1, reasons: [...c.reasons, ...verdict.reasons] }, target)
+      return startFixer($, f, { ...c, attempt: c.attempt + 1, reasons: [...c.reasons, ...verdict.reasons] }, target, verdict.detail)
     case 'desistiu':
       await undoFix($, f.fixDir, c.sha)
       await rebaseline($, f)
@@ -1331,7 +1332,7 @@ async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   await rebaseline($, f)
   switch (check.kind) {
     case 'refuse':
-      return judged($, f, c, target, [], { accepted: false, reasons: [check.reason] })
+      return judged($, f, c, target, [], { accepted: false, reasons: [check.reason], detail: check.detail })
     case 'unverified':
       return finishDefect($, f, c, 'não reverificado', [check.reason], [])
     case 'ok':

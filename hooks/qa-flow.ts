@@ -329,6 +329,11 @@ export async function runFull($: EngineInterface, argv: string[], init: { cwd?: 
 }
 
 export const tailOf = (out: string): string => out.trim().split('\n').slice(-5).join(' | ').slice(-300)
+// O que vai para aviso e arquivo quando um comando do projeto falha: nunca a saída dele, que pode ter segredo.
+const exitOf = (ran: Ran): string => (ran.code === null ? 'não terminou' : `código ${ran.code}`)
+// shortcut: o fim da saída vai no pedido da tentativa seguinte do corretor (ele precisa dela para corrigir); um teste escrito
+// pelo corretor pode imprimir um segredo e lê-lo ali (risco declarado no README). Para fechar, só o código de saída ao corretor.
+const outputOf = (command: string, ran: Ran): string => `saída de ${command}: ${tailOf(ran.out)}`
 const git = (dir: string, ...args: string[]): string[] => ['git', '-C', dir, ...args]
 // Todo git na worktree de correção passa por aqui. O teto (a pasta `.worktrees` que a contém) impede o git de subir até o
 // repositório da raiz quando a pasta perdeu o `.git`: ele falha com "not a git repository" em vez de mexer no checkout do usuário.
@@ -426,7 +431,7 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
-  if (installed.code !== 0) return { error: `a instalação (${matrix.installCommand}) falhou: ${tailOf(installed.out)}` }
+  if (installed.code !== 0) return { error: `o comando ${matrix.installCommand} falhou (${exitOf(installed)})` }
   const baseline = await run($, wtGit(real, 'status', '--porcelain'))
   return baseline === null ? { error: 'não deu para ler o git status da worktree' } : { fixDir: real, baseline }
 }
@@ -516,11 +521,12 @@ export async function resetFixOut($: EngineInterface, outDir: string): Promise<b
   return (await mkdirs($, outDir)) && (await run($, ['rm', '-f', `${outDir}/fix.json`])) !== null
 }
 
-export type FixCheck = { kind: 'refuse'; reason: string } | { kind: 'unverified'; reason: string } | { kind: 'ok'; regression: string | null; pending: string[] }
+// `detail`: o fim da saída do comando que falhou, só para o pedido da tentativa seguinte.
+export type FixCheck = { kind: 'refuse'; reason: string; detail?: string } | { kind: 'unverified'; reason: string } | { kind: 'ok'; regression: string | null; pending: string[] }
 // `sha`: o HEAD do começo da tentativa; a recusa no commit desfaz só até ele, e o diff conferido é o da tentativa.
 type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; baseline: string; port: number }
 
-const refuse = (reason: string): FixCheck => ({ kind: 'refuse', reason })
+const refuse = (reason: string, detail?: string): FixCheck => ({ kind: 'refuse', reason, ...(detail === undefined ? {} : { detail }) })
 const unverified = (fix: Fix): FixCheck => ({ kind: 'unverified', reason: fix.reason ?? 'o corretor marcou a correção como não retestável' })
 
 // Etapas b a d: o que mudou vira UM commit feito pelo mod, ou é desfeito. null = commitado (ou nada a commitar e retestável: segue).
@@ -552,11 +558,12 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
     return { kind: 'ok', regression: file, pending: ['teste de regressão não rodado: app original fora do ar'] }
   }
   const auth = Object.fromEntries(o.matrix.profiles.filter(p => p !== ANON_PROFILE).map(p => [authEnvOf(p), authFileOf(o.env.qaRoot, p)]))
-  const runAt = (url: string): Promise<Ran> => runFull($, ['npx', 'playwright', 'test', file], { cwd: o.fixDir, env: { ...auth, QA_BASE_URL: url }, timeoutMs: TEN_MIN })
+  const argv = ['npx', 'playwright', 'test', file]
+  const runAt = (url: string): Promise<Ran> => runFull($, argv, { cwd: o.fixDir, env: { ...auth, QA_BASE_URL: url }, timeoutMs: TEN_MIN })
   const original = await runAt(o.matrix.baseUrl)
   if (original.code === null || original.code === 0) return refuse(`o teste de regressão ${file} não falhou no app original`)
   const fixed = await runAt(baseUrlAt(o.matrix.baseUrl, o.port))
-  if (fixed.code !== 0) return refuse(`o teste de regressão ${file} não passou no app da worktree (${tailOf(fixed.out)})`)
+  if (fixed.code !== 0) return refuse(`o teste de regressão ${file} não passou no app da worktree (${exitOf(fixed)})`, outputOf(argv.join(' '), fixed))
   return { kind: 'ok', regression: file, pending: [] }
 }
 
@@ -571,7 +578,7 @@ export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> 
   if (!fix.retestable) return unverified(fix)
   if (o.matrix.testCommand !== '') {
     const tested = await runFull($, argvOf(o.matrix.testCommand), { cwd: o.fixDir, timeoutMs: TEN_MIN })
-    if (tested.code !== 0) return refuse(`os testes do projeto falharam (${tailOf(tested.out)})`)
+    if (tested.code !== 0) return refuse(`o comando ${o.matrix.testCommand} falhou (${exitOf(tested)})`, outputOf(o.matrix.testCommand, tested))
   }
   return regressionOf($, o, fix)
 }

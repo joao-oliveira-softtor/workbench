@@ -797,7 +797,8 @@ describe('QA: clique Corrigir', () => {
     expect(t.log.toasts.at(-1)).toContain('Aperte de novo')
     expect(t.log.runs.some(a => a.includes('worktree'))).toBe(false)
     await click(t, ui)
-    expect(t.log.toasts.at(-1)).toContain('ERR dependencias')
+    expect(t.log.toasts.at(-1)).toContain('o comando npm ci falhou (código 1)')
+    expect(t.log.toasts.join('\n')).not.toContain('ERR dependencias')
     await tick(t)
     expect(t.log.spawns).toEqual([])
     expect(await label(ui)).toBe('QA: Corrigir')
@@ -882,6 +883,28 @@ describe('QA: fase Corrigir', () => {
       expect(types(t)).toEqual([QA_FIXER, QA_FIXER])
       expect(t.log.spawns[1]?.prompt).toContain('- Tentativa: 2')
       expect(t.log.spawns[1]?.prompt).toContain(reason)
+    })
+  }
+
+  // A saída de um comando pode ter segredo: ela só vai no pedido da próxima tentativa do corretor, nunca em aviso nem em arquivo.
+  const outputs: [string, (a: readonly string[], env?: Record<string, string>) => Run | undefined, string][] = [
+    ['testCommand', a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'SAIDA-SECRETA' } : undefined), 'o comando npm test falhou (código 1)'],
+    ['Playwright', (a, env) => (a[0] === 'npx' && env?.QA_BASE_URL !== MATRIX.baseUrl ? { exitCode: 1, stdout: 'SAIDA-SECRETA' } : undefined), 'não passou no app da worktree (código 1)'],
+  ]
+  for (const [name, run, reason] of outputs) {
+    test(`saída do ${name} que falha: só no pedido da tentativa seguinte`, async ($, on) => {
+      const { t } = await fixing($, on, { run: (a, _cwd, env) => run(a, env) })
+      for (let i = 0; i < 3; i++) await fixerEnds($, t)
+      expect(t.log.spawns[1]?.prompt).toContain('SAIDA-SECRETA')
+      expect(t.log.spawns[2]?.prompt).toContain('SAIDA-SECRETA')
+      expect(resultOf(t)).toMatchObject({ status: 'desistiu' })
+      expect(resultOf(t).reasons).toHaveLength(3)
+      expect(resultOf(t).reasons[0]).toContain(reason)
+      await tick(t)
+      expect(t.files.get(`${t.runDir()}/correcoes.md`)).toContain(reason)
+      expect(JSON.stringify(resultOf(t))).not.toContain('SAIDA-SECRETA')
+      expect(t.files.get(`${t.runDir()}/correcoes.md`)).not.toContain('SAIDA-SECRETA')
+      expect(t.log.toasts.join('\n')).not.toContain('SAIDA-SECRETA')
     })
   }
 
