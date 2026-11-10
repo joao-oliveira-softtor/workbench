@@ -5,6 +5,10 @@ import type { Settled } from './model'
 import { jsonObjectIn } from './route'
 
 export type Risk = 'alto' | 'medio' | 'baixo'
+export const ANON_PROFILE = 'anonimo'
+// Regras fechadas das fontes de opinião: a identidade do defeito entre duas execuções é `fonte|rule`, e nome livre faria o mesmo defeito parecer sumido.
+export const AUDIT_RULES = ['contraste-fraco', 'alvo-de-toque-pequeno', 'campo-sem-rotulo', 'botao-sem-nome', 'titulos-pulados', 'rolagem-lateral', 'largura-fixa', 'imagem-sem-alt'] as const
+export const VISUAL_RULES = ['texto-cortado', 'desalinhado', 'area-quebrada', 'elemento-espremido'] as const
 export const WIDTHS = [360, 768, 1280] as const
 export type Width = (typeof WIDTHS)[number]
 export type Criterion = { given: string; when: string; then: string }
@@ -23,7 +27,8 @@ export type Cell = {
 }
 export type Matrix = {
   baseUrl: string
-  loginRoute: string
+  loginRoute: string // '' só quando todos os perfis são ANON_PROFILE (app sem login)
+  allowedDomains: string[] // endereços de fora que as telas carregam; o navegador de teste os acessa além do computador local
   installCommand: string
   startCommand: string
   testCommand: string
@@ -199,10 +204,25 @@ function relPathAt(o: Rec, key: string, opts: { required: boolean }, at = ''): s
   return v
 }
 
+const HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+const MAX_DOMAINS = 10
+
+function domainsAt(o: Rec): string[] {
+  const hosts = stringsAt(o, 'allowedDomains')
+  need(hosts.length <= MAX_DOMAINS, `allowedDomains: no máximo ${MAX_DOMAINS} itens`)
+  hosts.forEach((h, i) => {
+    need(h !== 'localhost' && !h.startsWith('127.'), `allowedDomains[${i}]: o computador local já é acessível`)
+    need(HOST.test(h), `allowedDomains[${i}]: precisa ser um nome de host em minúsculas, com ponto, sem esquema, porta, caminho nem *`)
+  })
+  need(new Set(hosts).size === hosts.length, 'allowedDomains: item repetido')
+  return hosts
+}
+
 function commandAt(o: Rec, key: string, opts: { required: boolean; port?: boolean }): string {
   const v = textAt(o, key)
   need(!opts.required || v.trim() !== '', `${key}: não pode ser vazio`)
   need(COMMAND_CHARS.test(opts.port ? v.replace(PORT_MARK, '') : v), `${key}: só letras, números, espaço e _ . : / = @ + , - (sem aspas nem shell)`)
+  need(!(argvOf(v)[0] ?? '').includes('='), `${key}: não há shell, então "VAR=valor programa" não funciona; a porta vai pela variável QA_PORT ou pelo texto {QA_PORT} num argumento`)
   const program = (argvOf(v)[0] ?? '').split('/').pop()?.toLowerCase().replace(/\.exe$/, '') ?? ''
   need(!COMMAND_DENY.includes(program), `${key}: programa "${program}" não é aceito`)
   return v
@@ -249,7 +269,6 @@ function matrixOf(markdown: string): Matrix {
   need(blocks.length === 1, `matriz.md precisa ter exatamente um bloco json (achei ${blocks.length})`)
   const m = recOf(jsonObjectIn(blocks[0]?.[1] ?? ''), 'bloco json')
   const baseUrl = baseUrlOf(m)
-  const loginRoute = routeAt(m, 'loginRoute')
   const installCommand = commandAt(m, 'installCommand', { required: true })
   const startCommand = commandAt(m, 'startCommand', { required: true, port: true })
   const testCommand = commandAt(m, 'testCommand', { required: false })
@@ -259,6 +278,9 @@ function matrixOf(markdown: string): Matrix {
   const profiles = stringsAt(m, 'profiles')
   const seenProfiles = new Set<string>()
   profiles.forEach((p, i) => identAt(p, PROFILE_ID, `profiles[${i}]`, seenProfiles))
+  // Sem login só quando todos os perfis são anônimos.
+  const loginRoute = m.loginRoute === '' && profiles.length > 0 && profiles.every(p => p === ANON_PROFILE) ? '' : routeAt(m, 'loginRoute')
+  const allowedDomains = domainsAt(m)
   const seenReqs = new Set<string>()
   const requirements = listAt(m, 'requirements').map((r, i) => {
     const at = `requirements[${i}].`
@@ -269,7 +291,7 @@ function matrixOf(markdown: string): Matrix {
   need(rawCells.length >= 1 && rawCells.length <= MAX_CELLS, `cells: precisa ter de 1 a ${MAX_CELLS} células (achei ${rawCells.length})`)
   const seenCells = new Set<string>()
   const cells = rawCells.map((c, i) => cellAt(c, i, { requirements: seenReqs, profiles: seenProfiles }, seenCells))
-  return { baseUrl, loginRoute, installCommand, startCommand, testCommand, testDir, backend: { containers }, profiles, requirements, cells, cut: stringsAt(m, 'cut') }
+  return { baseUrl, loginRoute, allowedDomains, installCommand, startCommand, testCommand, testDir, backend: { containers }, profiles, requirements, cells, cut: stringsAt(m, 'cut') }
 }
 
 // `matriz.md` é texto livre com exatamente um bloco ```json; o erro vai para um aviso na tela.
@@ -463,6 +485,8 @@ function defectAt(raw: unknown, i: number, failRules: readonly string[], seen: S
   const source = oneOf(SOURCES, o.source, `${at}source`)
   const rule = optionalTextAt(o, 'rule', at)
   need(source !== 'criterio' || (rule !== undefined && /^(0|[1-9]\d*)$/.test(rule)), `${at}rule: defeito de critério exige o índice do critério`)
+  const closed: readonly string[] | undefined = source === 'impeccable-audit' ? AUDIT_RULES : source === 'pergunta-visual' ? VISUAL_RULES : undefined
+  need(closed === undefined || (rule !== undefined && closed.includes(rule)), `${at}rule: ${source} exige uma regra da lista: ${closed?.join(', ')}`)
   const where = textAt(o, 'where', at)
   need(where.trim() !== '', `${at}where: não pode ser vazio`)
   const text = optionalTextAt(o, 'text', at)

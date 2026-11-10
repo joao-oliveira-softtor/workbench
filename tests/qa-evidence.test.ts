@@ -2,7 +2,9 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   acceptFixOf,
+  ANON_PROFILE,
   argvOf,
+  AUDIT_RULES,
   authSummaryOf,
   baseUrlAt,
   checkedDefectsOf,
@@ -24,6 +26,7 @@ import {
   sessionLoadOf,
   signatureOf,
   startArgvOf,
+  VISUAL_RULES,
 } from '../hooks/qa-evidence'
 import type { Cell, CellOutcome, CellResult, CellVerdict, Defect, Evidence, Fix, FixResult, Matrix, Verdict } from '../hooks/qa-evidence'
 
@@ -47,6 +50,7 @@ const cellOf = (over: Partial<Cell> = {}): Cell => ({
 const matrixOf = (over: Partial<Matrix> = {}): Matrix => ({
   baseUrl: 'http://localhost:3000',
   loginRoute: '/entrar',
+  allowedDomains: [],
   installCommand: 'npm ci',
   startCommand: 'npm run dev -- --port {QA_PORT}',
   testCommand: 'npm test',
@@ -133,6 +137,28 @@ describe('parseMatrix', () => {
     ['testDir com segmento vazio', { testDir: 'a//b' }, 'testDir'],
     ['testDir com barra no fim', { testDir: 'e2e/' }, 'testDir'],
     ['testDir com segmento só de pontos', { testDir: 'web/...' }, 'testDir'],
+    ['allowedDomains faltando', { allowedDomains: undefined }, 'allowedDomains'],
+    ['allowedDomains que não é lista', { allowedDomains: 'cdn.exemplo.com' }, 'allowedDomains'],
+    ['allowedDomains com 11 itens', { allowedDomains: Array.from({ length: 11 }, (_, i) => `h${i}.exemplo.com`) }, 'allowedDomains'],
+    ['allowedDomains com número', { allowedDomains: [5] }, 'allowedDomains'],
+    ['allowedDomains sem ponto', { allowedDomains: ['cdn'] }, 'allowedDomains'],
+    ['allowedDomains com esquema', { allowedDomains: ['https://cdn.exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains com porta', { allowedDomains: ['cdn.exemplo.com:443'] }, 'allowedDomains'],
+    ['allowedDomains com caminho', { allowedDomains: ['cdn.exemplo.com/a'] }, 'allowedDomains'],
+    ['allowedDomains com *', { allowedDomains: ['*.exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains com espaço', { allowedDomains: ['cdn .exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains com maiúscula', { allowedDomains: ['CDN.exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains com ponto no fim', { allowedDomains: ['cdn.exemplo.com.'] }, 'allowedDomains'],
+    ['allowedDomains com hífen na ponta', { allowedDomains: ['-cdn.exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains com localhost', { allowedDomains: ['localhost'] }, 'allowedDomains'],
+    ['allowedDomains com 127.0.0.1', { allowedDomains: ['127.0.0.1'] }, 'allowedDomains'],
+    ['allowedDomains com 127.exemplo.com', { allowedDomains: ['127.exemplo.com'] }, 'allowedDomains'],
+    ['allowedDomains repetido', { allowedDomains: ['cdn.exemplo.com', 'cdn.exemplo.com'] }, 'allowedDomains'],
+    ['loginRoute vazio com outro perfil', { loginRoute: '' }, 'loginRoute'],
+    ['loginRoute vazio com anonimo e outro perfil', { loginRoute: '', profiles: ['anonimo', 'admin'] }, 'loginRoute'],
+    ['installCommand com variável antes do programa', { installCommand: 'CI=1 npm ci' }, 'installCommand'],
+    ['startCommand com variável antes do programa', { startCommand: 'PORT={QA_PORT} npm run dev' }, 'startCommand'],
+    ['testCommand com variável antes do programa', { testCommand: 'CI=1 npm test' }, 'testCommand'],
     ['campo faltando', { profiles: undefined }, 'profiles'],
     ['tipo errado', { cut: 'nada' }, 'cut'],
     ['sem células', { cells: [] }, 'cells'],
@@ -180,6 +206,39 @@ describe('parseMatrix', () => {
     expect(parseMatrix(mdOf(matrixOf({ installCommand: 'npm ci {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: 'npm test {QA_PORT}' }))).ok).toBe(false)
     expect(parseMatrix(mdOf(matrixOf({ testCommand: '' }))).ok).toBe(true)
+  })
+})
+
+describe('allowedDomains, perfil anônimo e variável antes do programa', () => {
+  const okOf = (patch: Partial<Matrix>): boolean => parseMatrix(mdOf(matrixOf(patch))).ok
+  const errorOf = (patch: Record<string, unknown>): string => {
+    const r = parseMatrix(mdOf({ ...matrixOf(), ...patch }))
+    return r.ok ? '' : r.error
+  }
+
+  test('allowedDomains: [] é o padrão; hosts válidos, até 10, passam', () => {
+    expect(okOf({ allowedDomains: [] })).toBe(true)
+    expect(okOf({ allowedDomains: ['fonts.exemplo.com', 'cdn-1.exemplo.com.br', 'a1.b2.c3.exemplo.org'] })).toBe(true)
+    expect(okOf({ allowedDomains: Array.from({ length: 10 }, (_, i) => `h${i}.exemplo.com`) })).toBe(true)
+  })
+
+  test('ANON_PROFILE é "anonimo"; só ele permite loginRoute vazio', () => {
+    expect(ANON_PROFILE).toBe('anonimo')
+    const anon = { loginRoute: '', profiles: ['anonimo'], cells: [cellOf({ profile: 'anonimo' })] }
+    expect(okOf(anon)).toBe(true)
+    expect(okOf({ ...anon, loginRoute: '/entrar' })).toBe(true)
+    expect(okOf({ ...anon, profiles: ['anonimo', 'admin'] })).toBe(false)
+  })
+
+  test('a mensagem de variável antes do programa diz que não há shell e como passar a porta', () => {
+    const e = errorOf({ startCommand: 'PORT={QA_PORT} npm run dev' })
+    expect(e).toContain('startCommand')
+    expect(e).toContain('shell')
+    expect(e).toContain('QA_PORT')
+  })
+
+  test('= em argumento depois do programa continua valendo', () => {
+    expect(okOf({ startCommand: 'npm run dev -- --port={QA_PORT}', installCommand: 'npm ci --foo=bar' })).toBe(true)
   })
 })
 
@@ -329,9 +388,23 @@ describe('parseVerdict', () => {
 
   test('opinião de modelo nunca reprova: impeccable-audit e pergunta-visual viram candidate', () => {
     for (const source of ['impeccable-audit', 'pergunta-visual']) {
-      const v = parseV(rawVerdict({ defects: [rawDefect({ source, rule: 'overlap', severity: 'fail' })] }))
+      const rule = source === 'impeccable-audit' ? AUDIT_RULES[0] : VISUAL_RULES[0]
+      const v = parseV(rawVerdict({ defects: [rawDefect({ source, rule, severity: 'fail' })] }))
       expect(v?.defects[0]?.severity).toBe('candidate')
     }
+  })
+
+  test('fontes de opinião só aceitam regra da lista fechada da própria fonte', () => {
+    const rules = (source: string, rule?: string): CellVerdict | null => parseV(rawVerdict({ defects: [rawDefect({ source, rule })] }))
+    for (const rule of AUDIT_RULES) expect(rules('impeccable-audit', rule)?.defects[0]?.rule).toBe(rule)
+    for (const rule of VISUAL_RULES) expect(rules('pergunta-visual', rule)?.defects[0]?.rule).toBe(rule)
+    expect(rules('impeccable-audit', 'texto-cortado')).toBeNull() // regra da outra fonte
+    expect(rules('pergunta-visual', 'contraste-fraco')).toBeNull()
+    expect(rules('impeccable-audit', 'contraste')).toBeNull()
+    expect(rules('pergunta-visual', 'qualquer coisa')).toBeNull()
+    expect(rules('impeccable-audit')).toBeNull()
+    expect(rules('pergunta-visual')).toBeNull()
+    expect(rules('impeccable-audit', '')).toBeNull()
   })
 
   test('impeccable-detect só reprova com regra de failRules', () => {
@@ -353,8 +426,8 @@ describe('parseVerdict', () => {
       parseV(rawVerdict({ defects: [rawDefect({ source, kind: 'funcional', ...extra })] }))?.defects[0]?.kind
     expect(kind('impeccable-detect')).toBe('design')
     expect(kind('geometria')).toBe('design')
-    expect(kind('impeccable-audit')).toBe('design')
-    expect(kind('pergunta-visual')).toBe('design')
+    expect(kind('impeccable-audit', { rule: AUDIT_RULES[0] })).toBe('design')
+    expect(kind('pergunta-visual', { rule: VISUAL_RULES[0] })).toBe('design')
     expect(kind('rede')).toBe('funcional')
     expect(kind('console')).toBe('funcional')
     expect(kind('criterio', { rule: '0' })).toBe('funcional')
