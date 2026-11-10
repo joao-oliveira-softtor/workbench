@@ -11,8 +11,10 @@ import {
   QA_RUNNER,
   authFileOf,
   binOf,
+  qaFlowKeyOf,
   qaLoginPromptOf,
   qaRootOf,
+  qaTokenKeyOf,
   toolsDirOf,
   wrapperOf,
 } from '../hooks/qa'
@@ -85,15 +87,40 @@ type Over = {
   failWrite?: (path: string, text: string) => boolean
   // `stall`: a resposta àquele comando nunca chega (o passo some, como num reload do mod no meio dele).
   stall?: (key: string) => boolean
+  // O que o `$.store` e os arquivos já têm antes do session.start (uma sessão anterior do Claude Code).
+  store?: Record<string, unknown>
+  files?: Record<string, string>
+  dirs?: string[]
 }
 const HOLD_MS = 4_000
 type Agent = { id: string; type: string; status: 'running' | 'completed'; description: string }
 
 async function boot($: Engine, on: On, over: Over = {}) {
   const clock = mock.clock(on)
-  mock.store(on)
-  const files = new Map<string, string>()
-  const dirs = new Set<string>()
+  // O `$.store` (sobrevive a fechar o Claude Code) num mapa que o teste lê.
+  const store = new Map<string, unknown>(Object.entries(over.store ?? {}))
+  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_$, e) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  on('store.delete', (_$, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  // Fechar e reabrir: com `proc.isNew`, todo valor do `$.state` lê como nunca escrito até o mod gravá-lo de novo.
+  const proc = { isNew: false, written: new Set<string>() }
+  on('state.get', async (_$, e, next) => {
+    const got = await next(e)
+    return proc.isNew && !proc.written.has(e.key) && got.value !== undefined ? { value: { ...got.value, value: undefined } } : got
+  })
+  on('state.set', (_$, e, next) => {
+    proc.written.add(e.key)
+    return next(e)
+  })
+  const files = new Map<string, string>(Object.entries(over.files ?? {}))
+  const dirs = new Set<string>(over.dirs)
   const box = { text: over.typed ?? '' }
   const listed: Agent[] = []
   const log = {
@@ -269,7 +296,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   await start($)
   const runDir = () => [...dirs].find(d => /\/\d{8}-\d{4}$/.test(d)) ?? ''
   const guard = () => JSON.parse(log.guards.at(-1) ?? '{}')
-  return { clock, files, dirs, box, listed, log, runDir, guard, wt }
+  return { clock, files, dirs, box, listed, log, runDir, guard, wt, store, proc }
 }
 
 type T = Awaited<ReturnType<typeof boot>>
@@ -791,6 +818,83 @@ async function fixerEnds($: Engine, t: T, fix: string | null = FIX_OK, status = 
   t.wt.status = status
   await finishAgent($, t, fix === null ? {} : { [`${outOf(t)}/fix.json`]: fix })
 }
+
+// Fechar e reabrir o Claude Code: o `$.state` volta ao inicial, o `$.store` fica e o session.start roda de novo.
+const FLOW_KEY = qaFlowKeyOf(REPO)
+const TOKEN_KEY = qaTokenKeyOf(REPO)
+const RUN_DIR = `${QA_ROOT}/20261110-1200`
+async function reopen($: Engine, t: T) {
+  t.proc.isNew = true
+  t.proc.written.clear()
+  await start($)
+}
+const guardFiles = (t: T) => t.log.agents.filter(a => a.name === 'qa-runner').map(a => /guard-([a-z0-9]+)\.json/.exec(a.command)?.[1])
+
+describe('QA: fechar e reabrir', () => {
+  test('etapa Corrigir guardada: depois de reabrir o botão segue em Corrigir e o clique pede a confirmação', async ($, on) => {
+    const { t, ui } = await toFix($, on)
+    expect(await label(ui)).toBe('QA: Corrigir')
+    expect(t.store.get(FLOW_KEY)).toMatchObject({ step: 'fix', runDir: t.runDir() })
+    await reopen($, t)
+    expect(await label(ui)).toBe('QA: Corrigir')
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('- instalar: npm ci')
+  })
+
+  test('pasta da execução que não existe mais: começa do Planejar e o guardado sai', async ($, on) => {
+    const t = await boot($, on, { store: { [FLOW_KEY]: { step: 'run', runDir: RUN_DIR, fixDir: '' } } })
+    expect(await label(await mount($))).toBe('QA')
+    expect(t.store.get(FLOW_KEY)).toBeUndefined()
+    expect(t.log.toasts).toEqual([])
+  })
+
+  test('matriz que não passa mais: começa do Planejar e o guardado sai', async ($, on) => {
+    const t = await boot($, on, { store: { [FLOW_KEY]: { step: 'run', runDir: RUN_DIR, fixDir: '' } }, files: { [`${RUN_DIR}/matriz.md`]: mdOf({ x: 1 }) }, dirs: [RUN_DIR] })
+    expect(await label(await mount($))).toBe('QA')
+    expect(t.store.get(FLOW_KEY)).toBeUndefined()
+  })
+
+  test('pasta guardada fora da raiz do QA deste repositório: ignorada, mesmo existindo', async ($, on) => {
+    const other = `${qaRootOf(HOME, '/work/outro')}/20261110-1200`
+    const t = await boot($, on, { store: { [FLOW_KEY]: { step: 'run', runDir: other, fixDir: '' } }, files: { [`${other}/matriz.md`]: mdOf(MATRIX) }, dirs: [other] })
+    expect(await label(await mount($))).toBe('QA')
+    expect(t.store.get(FLOW_KEY)).toBeUndefined()
+  })
+
+  test('o guardado de outro repositório não é usado', async ($, on) => {
+    const other = `${qaRootOf(HOME, '/work/outro')}/20261110-1200`
+    const otherKey = qaFlowKeyOf('/work/outro')
+    const t = await boot($, on, { store: { [otherKey]: { step: 'run', runDir: other, fixDir: '' } }, files: { [`${other}/matriz.md`]: mdOf(MATRIX) }, dirs: [other] })
+    expect(await label(await mount($))).toBe('QA')
+    expect(t.store.get(otherKey)).toMatchObject({ step: 'run' })
+  })
+
+  for (const bad of [{ step: 'xpto', runDir: RUN_DIR, fixDir: '' }, { step: 'run', runDir: 5, fixDir: '' }, { step: 'run', runDir: `${QA_ROOT}/../x`, fixDir: '' }, 'run', null]) {
+    test(`forma inválida (${JSON.stringify(bad)}): ignorada e apagada`, async ($, on) => {
+      const t = await boot($, on, { store: { [FLOW_KEY]: bad }, files: { [`${RUN_DIR}/matriz.md`]: mdOf(MATRIX) }, dirs: [RUN_DIR] })
+      expect(await label(await mount($))).toBe('QA')
+      expect(t.store.get(FLOW_KEY)).toBeUndefined()
+    })
+  }
+
+  test('guardado coerente sem passar pela sessão anterior: o botão volta na etapa guardada', async ($, on) => {
+    await boot($, on, { store: { [FLOW_KEY]: { step: 'run', runDir: RUN_DIR, fixDir: '' } }, files: { [`${RUN_DIR}/matriz.md`]: mdOf(MATRIX) }, dirs: [RUN_DIR] })
+    expect(await label(await mount($))).toBe('QA: Executar')
+  })
+
+  test('o código do arquivo da trava é reaproveitado depois de reabrir; o guardado inválido é trocado', async ($, on) => {
+    const t = await boot($, on)
+    await reopen($, t)
+    const [first, second] = guardFiles(t)
+    expect(first).toMatch(/^[a-z0-9]+$/)
+    expect(second).toBe(first)
+    expect(t.store.get(TOKEN_KEY)).toBe(first)
+    t.store.set(TOKEN_KEY, '../x')
+    await reopen($, t)
+    expect(guardFiles(t)[2]).toMatch(/^[a-z0-9]+$/)
+    expect(t.store.get(TOKEN_KEY)).toBe(guardFiles(t)[2])
+  })
+})
 
 describe('QA: clique Corrigir', () => {
   test('sem defeito marcado: avisa onde ficaram os testes gerados e volta para o começo', async ($, on) => {

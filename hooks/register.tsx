@@ -46,11 +46,14 @@ import {
   guardStateTextOf,
   handbackAgentOf,
   hookCommandOf,
+  isGuardToken,
   nextFixOf,
   nextRunOf,
+  qaFlowKeyOf,
   qaLabelOf,
   qaLoginPromptOf,
   qaPlanPromptOf,
+  qaTokenKeyOf,
   retestDirOf,
   runDirOf,
   runDonePromptOf,
@@ -58,6 +61,7 @@ import {
   sessionOf,
   spawnPromptOf,
   statusSumOf,
+  storedFlowOf,
   toolsDirOf,
   wrapperOf,
 } from './qa'
@@ -94,6 +98,7 @@ import {
   writeFixResult,
   cellVerdictOf,
   closeSession,
+  exists,
   guardCtxOf,
   guardRefusalOf,
   liveQaIdsOf,
@@ -800,10 +805,10 @@ async function pressQa($: EngineInterface): Promise<string | null> {
 
 // Grava a etapa nova ANTES de enviar (o envio pode durar o turno inteiro); `{ drop }` ou erro devolve a anterior.
 async function sendQaStep($: EngineInterface, before: QaFlow, after: QaFlow, text: string): Promise<void> {
-  await update($, qaFlow, () => after)
+  await setFlow($, () => after)
   const sent = await settle(() => $.prompt.submit({ text }))
   if (sent.ok && sent.value.drop === undefined) return
-  await update($, qaFlow, () => before)
+  await setFlow($, () => before)
   $.ui.toast(`QA: o pedido não entrou (${sent.ok ? sent.value.drop : sent.error.slice(0, 80)})`)
 }
 
@@ -824,7 +829,7 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   const gate = await runGateOf($, env, matrix, await $.clock.now())
   if (gate !== null) {
     $.ui.toast(gate.text)
-    if (gate.back) await update($, qaFlow, () => ({ ...flow, step: 'login' }))
+    if (gate.back) await setFlow($, () => ({ ...flow, step: 'login' }))
     return
   }
   const refusal = guardRefusalOf(guardCtxOf(env, matrix, flow.runDir, '', null))
@@ -847,7 +852,7 @@ async function clickMatrixOf($: EngineInterface, flow: QaFlow): Promise<Matrix |
   const loaded = await loadMatrix($, flow.runDir)
   switch (loaded.kind) {
     case 'missing':
-      await update($, qaFlow, () => QA_START)
+      await setFlow($, () => QA_START)
       $.ui.toast('QA: não achei o matriz.md desta execução; o botão voltou para o começo.')
       return null
     case 'invalid':
@@ -892,7 +897,7 @@ const runIdIn = (runDir: string): string => runDir.split('/').pop() ?? ''
 async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matrix): Promise<void> {
   const { all, left } = await fixQueueAt($, flow.runDir, await outcomesOf($, flow.runDir, matrix))
   if (left.length === 0) {
-    await update($, qaFlow, f => ({ ...f, step: 'plan' as const }))
+    await setFlow($, f => ({ ...f, step: 'plan' as const }))
     $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${flow.runDir}/celulas/<id>/teste.spec.ts.`)
     return
   }
@@ -910,7 +915,7 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
     return
   }
   const root = await rootSnapOf($, env.root)
-  await update($, qaFlow, f => ({ ...f, fixDir: ready.fixDir }))
+  await setFlow($, f => ({ ...f, fixDir: ready.fixDir }))
   // A matriz (comandos, URL, células) fica no estado: a fase nunca mais relê o matriz.md.
   await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], matrix, defects: all }))
   await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null })
@@ -1052,7 +1057,7 @@ async function setCurrent($: EngineInterface, env: QaEnv, next: QaCurrent | null
 // Fila vazia: relatório, etapa Corrigir, trava zerada e o resumo pendente para a sessão.
 async function closeRun($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix): Promise<void> {
   const counts = await writeReport($, runDir, matrix)
-  await update($, qaFlow, f => ({ ...f, step: 'fix' as const }))
+  await setFlow($, f => ({ ...f, step: 'fix' as const }))
   await update($, qaJob, () => null)
   await $.fs.write(env.guardFile, '{}')
   qaPending = runDonePromptOf({ reportPath: reportPathOf(runDir), counts })
@@ -1427,7 +1432,7 @@ async function closeFix($: EngineInterface, f: FixCtx): Promise<void> {
       return err.message
     },
   )
-  await update($, qaFlow, x => ({ ...x, step: 'plan' as const }))
+  await setFlow($, x => ({ ...x, step: 'plan' as const }))
   await update($, qaJob, () => null)
   await update($, qaFix, () => null)
   await teardownQa($, f.env, null)
@@ -1473,9 +1478,39 @@ async function drainQa($: EngineInterface): Promise<void> {
 }
 
 // O código do arquivo da trava fica no estado, criado uma vez: um reload não troca o arquivo que os agentes já lançados leem.
-async function guardTokenOf($: EngineInterface): Promise<string> {
-  const fresh = Math.random().toString(36).slice(2, 10)
-  return (await update($, qaGuardToken, cur => cur ?? fresh)) ?? fresh
+// Também fica no `$.store` deste repositório: fechar e reabrir o Claude Code reaproveita o arquivo, sem deixar guard-*.json velhos.
+async function guardTokenOf($: EngineInterface, root: string): Promise<string> {
+  const key = qaTokenKeyOf(root)
+  const stored = await settle(() => $.store.get(key))
+  const fresh = stored.ok && isGuardToken(stored.value) ? stored.value : Math.random().toString(36).slice(2, 10)
+  const token = (await update($, qaGuardToken, cur => cur ?? fresh)) ?? fresh
+  await settle(() => $.store.set(key, token))
+  return token
+}
+
+// Toda mudança da etapa vai também ao `$.store` deste repositório: o `$.state` não sobrevive a fechar o Claude Code.
+async function setFlow($: EngineInterface, change: (flow: QaFlow) => QaFlow): Promise<void> {
+  const flow = await update($, qaFlow, change)
+  const env = qaEnv
+  if (env !== null) await settle(() => $.store.set(qaFlowKeyOf(env.root), flow))
+}
+
+// A pasta da execução existe e, fora do `plan`, a matriz passa.
+async function isFlowAlive($: EngineInterface, flow: QaFlow): Promise<boolean> {
+  return (await exists($, flow.runDir)) && (flow.step === 'plan' || (await loadMatrix($, flow.runDir)).kind === 'ok')
+}
+
+// Processo novo (etapa no inicial): volta a etapa guardada se ela ainda vale; senão o guardado sai. O trabalho em curso
+// (`qaJob`, `qaFix`) não volta: o clique o recomeça.
+async function restoreFlow($: EngineInterface, env: QaEnv): Promise<void> {
+  const cur = await read($, qaFlow)
+  if (cur.step !== 'plan' || cur.runDir !== '') return
+  const key = qaFlowKeyOf(env.root)
+  const raw = await settle(() => $.store.get(key))
+  if (!raw.ok || raw.value === undefined) return
+  const flow = storedFlowOf(raw.value, env.qaRoot)
+  if (flow !== null && (await isFlowAlive($, flow))) await update($, qaFlow, () => flow)
+  else await settle(() => $.store.delete(key))
 }
 
 // Para o trabalho: a trava nega todo agente antigo, a sessão do navegador fecha e a etapa do botão fica (um clique retoma).
@@ -1586,10 +1621,11 @@ export const register: Register = on => {
     qaApp = null
     await update($, qaArmed, () => null)
     // Cada item num settle: o QA que falha fica desligado com o motivo, sem derrubar o painel.
-    const env = await settle(async () => qaEnvOf($, await guardTokenOf($)))
+    const env = await settle(async () => qaEnvOf($, root => guardTokenOf($, root)))
     if (env.ok && env.value !== null) {
       const ready = env.value
       qaEnv = ready
+      await settle(() => restoreFlow($, ready))
       const registered = await settle(() => registerQa($, ready, $.plugin.root))
       qaBlocked = registered.ok ? registered.value : `QA: falha ao registrar os agentes (${registered.error.slice(0, 80)})`
     }

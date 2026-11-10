@@ -192,6 +192,24 @@ export const statusSumOf = (status: string): string => `${status.length}:${hashO
 
 export const qaRootOf = (home: string, root: string): string => `${qaHomeOf(home)}/${projectSlugOf(root)}`
 
+// Chaves do `$.store` por repositório: a etapa do botão e o código do arquivo da trava sobrevivem a fechar o Claude Code.
+export const qaFlowKeyOf = (root: string): string => `qa:flow:${projectSlugOf(root)}`
+export const qaTokenKeyOf = (root: string): string => `qa:guard:${projectSlugOf(root)}`
+export const isGuardToken = (raw: unknown): raw is string => typeof raw === 'string' && /^[a-z0-9]{1,16}$/.test(raw)
+
+const QA_STEPS: readonly unknown[] = ['plan', 'login', 'run', 'fix'] satisfies QaStep[]
+const isQaStep = (raw: unknown): raw is QaStep => QA_STEPS.includes(raw)
+
+// O guardado é dado de fora: forma conferida e a pasta da execução direto dentro da raiz do QA deste repositório. O `fixDir`
+// volta vazio: o Corrigir sempre o refaz pela worktree antes de usar.
+export function storedFlowOf(raw: unknown, qaRoot: string): QaFlow | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const [step, runDir, fixDir]: unknown[] = ['step', 'runDir', 'fixDir'].map(k => Reflect.get(raw, k))
+  if (!isQaStep(step) || typeof runDir !== 'string' || typeof fixDir !== 'string') return null
+  const isInside = runDir.startsWith(`${qaRoot}/`) && /^\d{8}-\d{4}$/.test(runDir.slice(qaRoot.length + 1))
+  return isInside ? { step, runDir, fixDir: '' } : null
+}
+
 export function runIdOf(now: number): string {
   const d = new Date(now)
   const p = (n: number): string => String(n).padStart(2, '0')

@@ -66,6 +66,8 @@ Numa worktree `.worktrees/qa-<AAAAMMDD-HHMM>`, em branch própria `qa/<AAAAMMDD-
 
 `/workbench qa stop` para o trabalho em curso, fecha o navegador de teste e deixa o botão na mesma etapa; clicar de novo retoma. `/workbench qa` faz o mesmo que o botão.
 
+Dá para fechar e reabrir o Claude Code entre as etapas: no mesmo repositório, o botão volta na etapa em que estava. Fechar no meio de uma etapa em andamento (Executar ou Corrigir) também deixa o botão nela, mas a etapa recomeça no clique seguinte: o Executar pula os testes que já têm veredito e o Corrigir pede a confirmação de novo e segue só pelos defeitos ainda sem resultado.
+
 ### Limites e riscos
 
 Leia antes de usar em um projeto com dados que importam.

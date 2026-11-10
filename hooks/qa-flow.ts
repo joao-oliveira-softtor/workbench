@@ -61,7 +61,8 @@ import {
 // `removerFile`: o contexto da trava do remover (botão "Aceitar remoções"), com o mesmo código do arquivo da trava do QA.
 export type QaEnv = { home: string; root: string; qaRoot: string; guardFile: string; removerFile: string }
 
-export async function qaEnvOf($: EngineInterface, token: string): Promise<QaEnv | null> {
+// `tokenOf`: o código do arquivo da trava, que depende da raiz (é guardado por repositório).
+export async function qaEnvOf($: EngineInterface, tokenOf: (root: string) => Promise<string>): Promise<QaEnv | null> {
   const home = nonEmpty(await settle(() => $.env.get('HOME'))) ?? nonEmpty(await settle(() => $.env.get('USERPROFILE')))
   const found = await repoRoot($)
   if (home === undefined || found === null) return null
@@ -69,6 +70,7 @@ export async function qaEnvOf($: EngineInterface, token: string): Promise<QaEnv 
   const [realHome, realRoot] = (await run($, ['realpath', home, found]))?.split('\n') ?? []
   const root = realRoot || found
   const qaRoot = qaRootOf(realHome || home, root)
+  const token = await tokenOf(root)
   return { home: realHome || home, root, qaRoot, guardFile: guardFileOf(qaRoot, token), removerFile: removerFileOf(qaRoot, token) }
 }
 
@@ -109,7 +111,7 @@ export async function loadMatrix($: EngineInterface, runDir: string): Promise<Lo
   return parsed.ok ? { kind: 'ok', matrix: parsed.value } : { kind: 'invalid', error: parsed.error }
 }
 
-async function exists($: EngineInterface, path: string): Promise<boolean> {
+export async function exists($: EngineInterface, path: string): Promise<boolean> {
   const found = await settle(() => $.fs.exists(path))
   return found.ok && found.value
 }
