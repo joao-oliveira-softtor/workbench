@@ -1189,6 +1189,12 @@ async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | nu
 
 async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Promise<QaCurrent | null> {
   await assertFixDir($, f.fixDir)
+  // Mudança que o mod não deixou (um corretor cortado no meio): o próximo commit a levaria junto. O usuário decide.
+  if ((await statusOf($, f.fixDir)) !== (await read($, qaFix))?.baseline) {
+    await update($, qaJob, () => null)
+    $.ui.toast(`QA: a worktree ${f.fixDir} tem mudanças que nenhum commit levou (de um corretor cortado no meio?); a fase parou sem commitar nem desfazer. Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
+    return null
+  }
   const target = await targetOf($, baseDirOf(f.runDir), f.matrix, defectId)
   if (target === null) {
     $.ui.toast(`QA: o defeito ${defectId} não está mais no veredito da execução; ficou de fora.`)
@@ -1239,9 +1245,7 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const outDir = fixOutDirOf(f.runDir, c.item)
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
   const app = appMatrixOf(f.matrix, c.port)
-  // A linha de base é relida antes de cada corretor: o commit ou o desfazer anterior mudou o `git status` da worktree.
-  const baseline = await statusOf($, f.fixDir)
-  await update($, qaFix, x => (x === null || baseline === null ? x : { ...x, baseline }))
+  await rebaseline($, f)
   const cdpPort = (await resetFixOut($, outDir)) ? await prepareSession($, f.env, f.matrix, target.cell, session, app.baseUrl) : null
   if (cdpPort === null) return finishDefect($, f, c, 'não reverificado', ['não deu para abrir o navegador do corretor'], [])
   const now = await $.clock.now()
@@ -1251,7 +1255,17 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const fix: FixPart = { defect: target.defect, worktree: f.fixDir, testDir: f.matrix.testDir, attempt: c.attempt, reasons: c.reasons }
   const prompt = spawnPromptOf('fixer', spawnInputOf({ env: f.env, matrix: app, cell: target.cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '', fix }))
   const launched = await launchedOf($, f.env, id => guardStateTextOf('fixer', id, ctx), await spawnQa($, 'fixer', prompt, `QA corrige ${c.item}`), item)
-  return launched ?? finishDefect($, f, item, 'não reverificado', ['o corretor foi recusado'], [])
+  if (launched === null) return finishDefect($, f, item, 'não reverificado', ['o corretor foi recusado'], [])
+  // Sem id, o contexto aceitaria qualquer agente do papel: fica `{}` até a adoção gravá-lo com o id.
+  if (launched.agentId === null) await teardownQa($, f.env, null)
+  return launched
+}
+
+// A linha de base é o `git status` que o próprio mod deixou na worktree (antes de cada corretor e depois de commitar ou
+// desfazer); o que fugir dela no começo de um defeito veio de um corretor cortado.
+async function rebaseline($: EngineInterface, f: FixCtx): Promise<void> {
+  const baseline = await statusOf($, f.fixDir)
+  await update($, qaFix, x => (x === null || baseline === null ? x : { ...x, baseline }))
 }
 
 // O agente do item acabou: runner → observer; observer → próxima célula ou julgamento; corretor → as conferências do mod.
@@ -1300,6 +1314,7 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
       return startFixer($, f, { ...c, attempt: c.attempt + 1, reasons: [...c.reasons, ...verdict.reasons] }, target)
     case 'desistiu':
       await undoFix($, f.fixDir, c.sha)
+      await rebaseline($, f)
       return finishDefect($, f, c, 'desistiu', verdict.reasons, cells)
     default:
       throw new Error('Caso não tratado: ' + String(after satisfies never))
@@ -1309,6 +1324,7 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
 async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
   const baseline = (await read($, qaFix))?.baseline ?? ''
   const check = await checkFix($, { ...f, defectId: c.item, sha: c.sha, baseline, port: c.port })
+  await rebaseline($, f)
   switch (check.kind) {
     case 'refuse':
       return judged($, f, c, target, [], { accepted: false, reasons: [check.reason] })

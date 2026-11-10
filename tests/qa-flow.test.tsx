@@ -741,10 +741,10 @@ const lastId = (t: T) => `a${t.log.spawns.length}`
 const gitIn = (t: T, ...args: string[]) => ['env', `GIT_CEILING_DIRECTORIES=${REPO}/.worktrees`, 'git', '-C', wtOf(t), ...args]
 
 // Executar sem célula pendente (os vereditos já existem): o relatório sai com c1.d1 marcado e a etapa vai para Corrigir.
-async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX) {
+async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX, defects: unknown[] = [FAIL_DEFECT]) {
   const r = await toRun($, on, over, matrix)
   const runDir = r.t.runDir()
-  r.t.files.set(`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT]))
+  r.t.files.set(`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', defects))
   r.t.files.set(`${runDir}/celulas/c2/veredito.json`, verdictOf('c2', 'PASS'))
   r.t.files.set(`${runDir}/celulas/c2/teste.spec.ts`, 'test()')
   r.t.files.set(`${REPO}/.env`, 'SEGREDO=1')
@@ -755,8 +755,8 @@ async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MA
 }
 
 // Os dois cliques do Corrigir: o segundo, no prazo, prepara a worktree e começa o primeiro defeito no mesmo tique.
-async function fixing($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX) {
-  const r = await toFix($, on, over, matrix)
+async function fixing($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX, defects: unknown[] = [FAIL_DEFECT]) {
+  const r = await toFix($, on, over, matrix, defects)
   await click(r.t, r.ui)
   await click(r.t, r.ui)
   return r
@@ -822,7 +822,8 @@ describe('QA: fase Corrigir', () => {
     expect(t.log.full).toContainEqual(expect.objectContaining({ argv: ['npm', 'ci'], cwd: wt }))
     expect(t.log.apps[0]).toEqual({ argv: ['npm', 'run', 'dev', '--', '--port', '4100'], cwd: wt, env: { QA_PORT: '4100', PORT: '4100' } })
     expect(types(t)).toEqual([QA_FIXER])
-    expect(t.guard()).toMatchObject({ role: 'fixer', agentId: null, ctx: { fixDir: wt, origins: ['http://localhost:4100'] } })
+    expect(JSON.parse(t.log.guards.at(-2) ?? '{}')).toMatchObject({ role: 'fixer', agentId: null, ctx: { fixDir: wt, origins: ['http://localhost:4100'] } })
+    expect(t.log.guards.at(-1)).toBe('{}')
     const ab = t.log.runs.filter(a => a[0] === AB).map(a => a.slice(3).join(' '))
     expect(ab).toContain('open http://localhost:4100/entrar')
     expect(ab).toContain('storage local set tok SEGREDO2')
@@ -1062,6 +1063,35 @@ describe('QA: fase Corrigir, worktree que sumiu', () => {
     expect(t.wt.commits).toHaveLength(1)
     expect(touched(t, 'add').filter(a => a.includes('--'))).toEqual([])
     expect(t.log.toasts.at(-1)).toContain(LOST)
+  })
+})
+
+describe('QA: fase Corrigir, corretor cortado e contexto sem id', () => {
+  test('lançamento sem id: a trava fica {} até a adoção, que grava o contexto com o id', async ($, on) => {
+    const { t } = await fixing($, on)
+    expect(t.log.guards.at(-1)).toBe('{}')
+    await tick(t)
+    expect(t.guard()).toMatchObject({ role: 'fixer', agentId: 'a1', ctx: { fixDir: wtOf(t) } })
+  })
+
+  test('mudança de um corretor cortado: o defeito seguinte não começa, nada é commitado nem desfeito e o aviso sai', async ($, on) => {
+    const D2 = { ...FAIL_DEFECT, id: 'd2', where: 'button.outro' }
+    const app = { down: 0 }
+    const curl = (a: readonly string[]) => (a[0] === 'curl' && a.includes('http://localhost:4100') && app.down > 0 && app.down-- > 0 ? { exitCode: 7, stdout: '' } : undefined)
+    const { t, ui } = await fixing($, on, { run: curl }, FIX_MATRIX, [FAIL_DEFECT, D2])
+    await tick(t)
+    t.wt.status = ' M src/meio.ts'
+    // Reload com o corretor no meio: o app morreu e não volta nas 30 tentativas; o defeito acaba com a mudança no meio.
+    await start($)
+    app.down = 30
+    await t.clock.advance(66_000)
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['o app não subiu pela worktree'] })
+    await tick(t)
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(t.wt.commits).toEqual([])
+    expect(t.log.runs.some(a => a.includes('-C') && (a.includes('reset') || a.includes('add')))).toBe(false)
+    expect(t.log.toasts.at(-1)).toContain('mudanças que nenhum commit levou')
+    expect(await label(ui)).toBe('QA: Corrigir')
   })
 })
 
