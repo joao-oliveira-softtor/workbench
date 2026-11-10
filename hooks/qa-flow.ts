@@ -233,12 +233,19 @@ export function guardCtxOf(env: QaEnv, matrix: Matrix, runDir: string, session: 
   }
 }
 
+// Fase Corrigir: os agentes gravam só na pasta do defeito (`correcoes/<defeito>`, onde fica também o reteste); a pasta da
+// execução inteira (matriz, vereditos, resultado dos outros defeitos) só é lida.
+export function fixGuardCtxOf(env: QaEnv, matrix: Matrix, at: { runDir: string; defect: string; fixDir: string }, session: string, cdpPort: number | null): GuardCtx {
+  const ctx = guardCtxOf(env, matrix, fixOutDirOf(at.runDir, at.defect), session, cdpPort, at.fixDir)
+  return { ...ctx, readDirs: [...ctx.readDirs, at.runDir] }
+}
+
 // A validação da própria trava sobre um contexto de exemplo (o runner lendo a matriz; o corretor lendo um arquivo da worktree):
 // o motivo da recusa, null = aceita. O exemplo não toca o disco: cada caminho é o próprio caminho real e todo alvo é arquivo.
-export function guardRefusalOf(env: QaEnv, matrix: Matrix, runDir: string, role: QaRole = 'runner', fixDir = ''): string | null {
-  const probe = { tool_name: 'Read', tool_input: { file_path: probeFileOf(role, runDir, fixDir) }, cwd: env.root, agent_id: '' }
+export function guardRefusalOf(ctx: GuardCtx, role: QaRole = 'runner'): string | null {
+  const probe = { tool_name: 'Read', tool_input: { file_path: probeFileOf(role, ctx.runDir, ctx.fixDir) }, cwd: ctx.repoRoot, agent_id: '' }
   const asIs = { realOf: (p: string) => p, isFile: () => true }
-  const got = guardDecisionOf(role, probe, guardStateTextOf(role, null, guardCtxOf(env, matrix, runDir, '', null, fixDir)), asIs)
+  const got = guardDecisionOf(role, probe, guardStateTextOf(role, null, ctx), asIs)
   return got.decision === 'allow' ? null : got.reason
 }
 
@@ -335,6 +342,8 @@ export async function assertFixDir($: EngineInterface, fixDir: string): Promise<
 export const fixResultPathOf = (runDir: string, defect: string): string => `${fixOutDirOf(runDir, defect)}.json`
 export const fixReportPathOf = (runDir: string): string => `${runDir}/correcoes.md`
 export const appMatrixOf = (matrix: Matrix, port: number): Matrix => ({ ...matrix, baseUrl: baseUrlAt(matrix.baseUrl, port) })
+// A foto dos vereditos "antes" e dos testes das células, tirada no clique do Corrigir: nenhum agente da fase grava nela.
+export const baseDirOf = (runDir: string): string => `${runDir}/antes`
 
 // Os defeitos marcados no relatório, na ordem da fila, e os que ainda não têm `correcoes/<defeito>.json`.
 export async function fixQueueAt($: EngineInterface, runDir: string, outcomes: Record<string, CellOutcome>): Promise<{ all: string[]; left: string[] }> {
@@ -394,15 +403,23 @@ async function appendLines($: EngineInterface, file: string, lines: readonly str
   return (await settle(() => $.fs.write(file, `${text}${sep}${add.join('\n')}\n`))).ok
 }
 
-// A worktree da correção pronta: criada (ou reaproveitada), conferida pela trava do corretor, com os `.env` não versionados e as
-// dependências instaladas. Devolve o caminho real e o `git status` de base, ou o motivo.
-export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matrix, runDir: string, fixDir: string, branch: string): Promise<{ fixDir: string; baseline: string } | { error: string }> {
-  const made = await worktreeOf($, env.root, fixDir, branch)
+// A pasta `celulas` da execução copiada para a foto (a cópia começa vazia).
+async function snapBase($: EngineInterface, runDir: string): Promise<boolean> {
+  const base = baseDirOf(runDir)
+  return (await freshDir($, base)) && (await run($, ['cp', '-r', `${runDir}/celulas`, `${base}/celulas`])) !== null
+}
+
+// A worktree da correção pronta: criada (ou reaproveitada), conferida pela trava do corretor (no contexto do primeiro defeito),
+// com os `.env` não versionados, a foto dos vereditos e as dependências instaladas. Devolve o caminho real e o `git status` de
+// base, ou o motivo.
+export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matrix, at: { runDir: string; defect: string; fixDir: string }, branch: string): Promise<{ fixDir: string; baseline: string } | { error: string }> {
+  const made = await worktreeOf($, env.root, at.fixDir, branch)
   if (made !== null) return { error: made }
-  const real = (await run($, ['realpath', fixDir]))?.trim() || fixDir
-  const refusal = guardRefusalOf(env, matrix, runDir, 'fixer', real)
+  const real = (await run($, ['realpath', at.fixDir]))?.trim() || at.fixDir
+  const refusal = guardRefusalOf(fixGuardCtxOf(env, matrix, { ...at, fixDir: real }, '', null), 'fixer')
   if (refusal !== null) return { error: `a trava recusaria o corretor na worktree ${real} (${refusal})` }
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
+  if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
   if (installed.code !== 0) return { error: `a instalação (${matrix.installCommand}) falhou: ${tailOf(installed.out)}` }
   const baseline = await run($, wtGit(real, 'status', '--porcelain'))
@@ -467,7 +484,7 @@ export async function judgeOf($: EngineInterface, o: { runDir: string; matrix: M
   const before: Record<string, Evidence> = {}
   const after: Record<string, Evidence> = {}
   for (const c of cells) {
-    before[c.id] = await evidenceIn($, cellDirOf(o.runDir, c.id, 1))
+    before[c.id] = await evidenceIn($, cellDirOf(baseDirOf(o.runDir), c.id, 1))
     after[c.id] = await evidenceIn($, retestDirOf(o.runDir, o.defectId, o.attempt, c.id))
   }
   return acceptFixOf({ target: { cell: o.target.cell.id, defect: o.target.defect }, cells, before, after })
@@ -573,13 +590,13 @@ export async function writeFixResult(
   await $.fs.write(fixResultPathOf(o.runDir, o.defectId), JSON.stringify(result, null, 2))
 }
 
-// Fim da fila: os testes das células PASS vão para a pasta de testes da worktree, num commit próprio.
+// Fim da fila: os testes das células PASS (da foto tirada no clique) vão para a pasta de testes da worktree, num commit próprio.
 export async function commitPassTests($: EngineInterface, runDir: string, matrix: Matrix, outcomes: Record<string, CellOutcome>, fixDir: string): Promise<void> {
   if (matrix.testDir === '') return
   const dir = `${fixDir}/${matrix.testDir}`
   const copied: string[] = []
   for (const cell of matrix.cells.filter(c => outcomes[c.id]?.final === 'PASS')) {
-    const src = `${cellDirOf(runDir, cell.id, 1)}/teste.spec.ts`
+    const src = `${cellDirOf(baseDirOf(runDir), cell.id, 1)}/teste.spec.ts`
     const dst = `${dir}/qa-${cell.id}.spec.ts`
     if ((await exists($, src)) && (await mkdirs($, dir)) && (await run($, ['cp', src, dst])) !== null) copied.push(cell.id)
   }

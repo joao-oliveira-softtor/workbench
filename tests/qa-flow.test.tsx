@@ -1104,11 +1104,32 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.log.spawns[2]?.prompt).toContain('fix.json ausente ou inválido')
   })
 
-  test('defeito que sumiu do veredito enquanto o corretor rodava: não reverificado', async ($, on) => {
+  test('o corretor só grava na pasta do defeito; a pasta da execução inteira só é lida', async ($, on) => {
     const { t } = await fixing($, on)
-    t.files.set(`${t.runDir()}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP'))
+    const fixer = JSON.parse(t.log.guards.find(g => g.includes('"role":"fixer"')) ?? '{}')
+    expect(fixer.ctx.runDir).toBe(outOf(t))
+    expect(fixer.ctx.readDirs).toContain(t.runDir())
+    expect(t.dirs.has(outOf(t))).toBe(true)
+  })
+
+  test('matriz e vereditos da execução reescritos no meio da fase não valem: tudo foi lido no clique', async ($, on) => {
+    const { t } = await fixing($, on)
+    t.files.set(`${t.runDir()}/matriz.md`, mdOf({ ...FIX_MATRIX, testCommand: 'npm run mal', startCommand: 'npm run mal' }))
+    t.files.set(`${t.runDir()}/celulas/c1/veredito.json`, verdictOf('c1', 'PASS'))
+    t.files.set(`${t.runDir()}/celulas/c2/teste.spec.ts`, 'forjado()')
     await fixerEnds($, t)
-    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['o defeito sumiu do veredito da execução'] })
+    expect(t.log.runs).toContainEqual(['npm', 'test'])
+    expect(t.log.runs.some(a => a.includes('mal'))).toBe(false)
+    expect(t.log.apps.every(a => !a.argv.includes('mal'))).toBe(true)
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+    const re = (cell: string) => `${outOf(t)}/reteste-1/${cell}/veredito.json`
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c1')]: verdictOf('c1', 'PASS') })
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c2')]: verdictOf('c2', 'PASS') })
+    expect(resultOf(t)).toMatchObject({ status: 'corrigido' })
+    await tick(t)
+    expect(t.files.get(`${wtOf(t)}/e2e/qa-c2.spec.ts`)).toBe('test()')
   })
 
   test('projeto sem Playwright: o teste de regressão não roda e vira pendência', async ($, on) => {

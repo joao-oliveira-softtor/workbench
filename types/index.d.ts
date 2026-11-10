@@ -133,9 +133,43 @@ declare module 'claude-code' {
       qaGuardToken: string | null
       // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
       qaArmed: { at: number } | null
-      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash) e o `git status` da worktree no começo da fase, e o teste de
-      // regressão e as pendências do defeito em curso. Não zera no session.start (é o que permite retomar).
-      qaFix: { root: string; baseline: string; regression: string | null; pending: string[] } | null
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash) e o `git status` da worktree no começo da fase, o teste de
+      // regressão e as pendências do defeito em curso, e o que o clique leu da execução (a matriz e a fila inteira de defeitos):
+      // a fase não relê o matriz.md. Não zera no session.start (é o que permite retomar). `matrix` repete a forma de `Matrix`
+      // do hooks/qa-evidence.ts (o tsc confere as duas).
+      qaFix: {
+        root: string
+        baseline: string
+        regression: string | null
+        pending: string[]
+        matrix: {
+          baseUrl: string
+          loginRoute: string
+          allowedDomains: string[]
+          installCommand: string
+          startCommand: string
+          testCommand: string
+          testDir: string
+          backend: { containers: string[] }
+          profiles: string[]
+          requirements: { id: string; text: string; source: string }[]
+          cells: {
+            id: string
+            requirement: string
+            risk: 'alto' | 'medio' | 'baixo'
+            flow: string
+            route: string
+            profile: string
+            width: 360 | 768 | 1280
+            reason: string
+            steps: string[]
+            criteria: { given: string; when: string; then: string }[]
+            expectedStatus: { url: string; status: number }[]
+          }[]
+          cut: string[]
+        }
+        defects: string[]
+      } | null
     }
   }
 }
