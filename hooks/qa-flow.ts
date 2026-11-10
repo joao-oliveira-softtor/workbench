@@ -340,24 +340,34 @@ async function worktreeOf($: EngineInterface, root: string, fixDir: string, bran
 
 const ENV_FILE = /^\.env(\..+)?$/
 
-// `.worktrees/` e os `.env` copiados ficam fora do status (e do `git clean`) pelo info/exclude comum; o conteúdo nunca é lido.
-async function excludeAndCopyEnv($: EngineInterface, root: string, fixDir: string): Promise<boolean> {
-  const common = (await run($, ['git', 'rev-parse', '--git-common-dir'], root))?.trim()
-  if (!common) return false
-  const exclude = `${common.startsWith('/') ? common : `${root}/${common}`}/info/exclude`
+// Copia os `.env` da raiz que não são versionados, sem ler o conteúdo; devolve as linhas do exclude (null = a cópia falhou).
+async function copyEnvFiles($: EngineInterface, root: string, fixDir: string): Promise<string[] | null> {
   const listed = await settle(() => $.fs.list(root))
   const names = listed.ok ? listed.value.filter(e => e.kind === 'file' && ENV_FILE.test(e.name)).map(e => e.name) : []
   const copied: string[] = []
   for (const name of names) {
     if ((await run($, ['git', 'ls-files', '--error-unmatch', name], root)) !== null) continue
-    if ((await run($, ['cp', `${root}/${name}`, `${fixDir}/${name}`])) === null) return false
+    if ((await run($, ['cp', `${root}/${name}`, `${fixDir}/${name}`])) === null) return null
     copied.push(`/${name}`)
   }
-  const text = (await readText($, exclude)) ?? ''
-  const add = ['.worktrees/', ...copied].filter(line => !text.split('\n').includes(line))
+  return copied
+}
+
+// `.worktrees/` e os `.env` copiados ficam fora do status (e do `git clean`) pelo info/exclude comum.
+async function excludeAndCopyEnv($: EngineInterface, root: string, fixDir: string): Promise<boolean> {
+  const common = (await run($, ['git', 'rev-parse', '--git-common-dir'], root))?.trim()
+  const copied = common ? await copyEnvFiles($, root, fixDir) : null
+  if (!common || copied === null) return false
+  return appendLines($, `${common.startsWith('/') ? common : `${root}/${common}`}/info/exclude`, ['.worktrees/', ...copied])
+}
+
+// Acrescenta ao arquivo as linhas que ele ainda não tem.
+async function appendLines($: EngineInterface, file: string, lines: readonly string[]): Promise<boolean> {
+  const text = (await readText($, file)) ?? ''
+  const add = lines.filter(line => !text.split('\n').includes(line))
   if (add.length === 0) return true
   const sep = text === '' || text.endsWith('\n') ? '' : '\n'
-  return (await settle(() => $.fs.write(exclude, `${text}${sep}${add.join('\n')}\n`))).ok
+  return (await settle(() => $.fs.write(file, `${text}${sep}${add.join('\n')}\n`))).ok
 }
 
 // A worktree da correção pronta: criada (ou reaproveitada), conferida pela trava do corretor, com os `.env` não versionados e as

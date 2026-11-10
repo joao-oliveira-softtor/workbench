@@ -1109,12 +1109,7 @@ async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: Qa
 
 async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void> {
   const c = job.current
-  if (c === null) {
-    const [next, ...rest] = job.queue
-    if (next === undefined) return closeFix($, f)
-    await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
-    return setFixCurrent($, f, await startDefect($, f, next))
-  }
+  if (c === null) return nextDefect($, f, job.queue)
   if (!(await isAppUp($, f, c.port))) return setFixCurrent($, f, await finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], []))
   const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
@@ -1128,6 +1123,14 @@ async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void>
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
   }
+}
+
+// Sem item em curso: o próximo defeito da fila, ou o fim da fila.
+async function nextDefect($: EngineInterface, f: FixCtx, queue: readonly string[]): Promise<void> {
+  const [next, ...rest] = queue
+  if (next === undefined) return closeFix($, f)
+  await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
+  return setFixCurrent($, f, await startDefect($, f, next))
 }
 
 // Depois de um reload (ou se o app caiu) o processo sumiu: sobe de novo na MESMA porta (a sessão e a trava apontam para ela).
