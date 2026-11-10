@@ -131,6 +131,11 @@ declare module 'claude-code' {
       // QA: o código do nome do arquivo da trava; criado uma vez, não zera no session.start (o agente lançado antes de um
       // reload continua lendo o mesmo arquivo, e o stop e o fim da execução chegam nele).
       qaGuardToken: string | null
+      // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
+      qaArmed: { at: number } | null
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash) e o `git status` da worktree no começo da fase, e o teste de
+      // regressão e as pendências do defeito em curso. Não zera no session.start (é o que permite retomar).
+      qaFix: { root: string; baseline: string; regression: string | null; pending: string[] } | null
     }
   }
 }

@@ -17,6 +17,7 @@ import {
   wrapperOf,
 } from '../hooks/qa'
 import type { Matrix } from '../hooks/qa-evidence'
+import { ARM_MS } from '../hooks/stale'
 
 // O fluxo de QA pelo engine: a faixa montada, o botão QA, o timer de 3 s e hooks do teste no lugar do engine para env,
 // processos (respostas por comando), arquivos (um mapa em memória), agentes, ferramenta e campo de prompt. Nenhum processo
@@ -78,7 +79,7 @@ type Over = {
   home?: string
   typed?: string
   drop?: boolean
-  run?: (argv: readonly string[]) => Run | undefined
+  run?: (argv: readonly string[], cwd?: string, env?: Record<string, string>) => Run | undefined
   spawns?: { unlisted?: boolean; deny?: string }[]
   hold?: (key: string) => boolean
   failWrite?: (path: string, text: string) => boolean
@@ -101,9 +102,13 @@ async function boot($: Engine, on: On, over: Over = {}) {
     spawns: [] as { type: string; prompt: string }[],
     agents: [] as { name: string; command: string }[],
     tools: [] as string[],
+    full: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
+    apps: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
   }
+  // A worktree da fase Corrigir: o `git status` dela (o teste o muda como faria o corretor) e os commits feitos pelo mod.
+  const wt = { status: '', commits: [] as string[][] }
   let n = 0
-  const answer = (argv: readonly string[]): Run => {
+  const answer = (argv: readonly string[], env?: Record<string, string>): Run => {
     const ok = (stdout = ''): Run => ({ exitCode: 0, stdout })
     const line = argv.join(' ')
     if (line.includes('--git-common-dir')) return ok(`${REPO}/.git\n`)
@@ -119,7 +124,35 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (line === 'git rev-parse HEAD') return ok('abc123\n')
     if (line === 'git status --porcelain') return ok('')
     if (argv[0] === AB) return line.endsWith('get cdp-url') ? ok('ws://127.0.0.1:9333/devtools/browser/x\n') : ok()
+    if (argv[0] === 'git' && argv[1] === '-C') return worktreeGit(argv.slice(3), ok)
+    if (line.startsWith('git worktree add ')) {
+      dirs.add(argv[3] ?? '')
+      return ok()
+    }
+    if (argv[0] === 'cp') {
+      files.set(argv[2] ?? '', files.get(argv[1] ?? '') ?? '')
+      return ok()
+    }
+    if (argv[0] === 'node') return ok('4100\n')
+    if (argv[0] === 'npm') return ok()
+    if (line === 'git ls-files --error-unmatch .env.example') return ok('.env.example\n')
+    // O teste de regressão falha no app original e passa no da worktree.
+    if (argv[0] === 'npx') return { exitCode: env?.QA_BASE_URL === MATRIX.baseUrl ? 1 : 0, stdout: '' }
     return { exitCode: 1, stdout: '' }
+  }
+  const worktreeGit = (args: readonly string[], ok: (stdout?: string) => Run): Run => {
+    const sub = args.join(' ')
+    if (sub === 'rev-parse HEAD') return ok('abc123\n')
+    if (sub === 'rev-parse --abbrev-ref HEAD') return ok('main\n')
+    if (sub === 'status --porcelain') return ok(wt.status)
+    if (args[0] === 'commit') {
+      wt.commits.push([...args])
+      wt.status = ''
+      return ok()
+    }
+    if (args[0] === 'reset' || args[0] === 'clean') wt.status = ''
+    if (args[0] === 'log') return ok(wt.commits.map((_, i) => `f${i} corrige`).join('\n'))
+    return ok()
   }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: REPO }))
@@ -127,10 +160,21 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('process.run', async (_$, e) => {
     if (over.hold?.(e.argv.join(' ')) === true) await clock.sleep(HOLD_MS)
     log.runs.push([...e.argv])
-    const r = over.run?.(e.argv) ?? answer(e.argv)
+    log.full.push({ argv: [...e.argv], cwd: e.init?.cwd ?? '', env: { ...e.init?.env } })
+    const r = over.run?.(e.argv, e.init?.cwd, e.init?.env) ?? answer(e.argv, e.init?.env)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.exists', (_$, e) => ({ value: files.has(e.path) || dirs.has(e.path) }))
+  on('fs.list', (_$, e) => ({
+    value: [...files.keys()].filter(k => k.startsWith(`${e.path}/`) && !k.slice(e.path.length + 1).includes('/')).map(k => ({ name: k.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+  }))
+  // O app da worktree: vive até o mod chamar return() no iterador (o sinal do hook aborta).
+  on('process.spawn', async function* (_$, e, next) {
+    log.apps.push({ argv: [...e.argv], cwd: e.cwd ?? '', env: { ...e.env } })
+    yield { stream: 'stdout' as const, text: 'pronto' }
+    await new Promise<void>(r => next.signal.addEventListener('abort', () => r()))
+    return { value: { code: null, signal: 'SIGTERM' } }
+  })
   on('fs.read', (_$, e, next) => {
     const text = files.get(e.path)
     return text === undefined ? next(e) : { value: text }
@@ -187,7 +231,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   await start($)
   const runDir = () => [...dirs].find(d => /\/\d{8}-\d{4}$/.test(d)) ?? ''
   const guard = () => JSON.parse(log.guards.at(-1) ?? '{}')
-  return { clock, files, dirs, box, listed, log, runDir, guard }
+  return { clock, files, dirs, box, listed, log, runDir, guard, wt }
 }
 
 type T = Awaited<ReturnType<typeof boot>>
@@ -462,8 +506,6 @@ describe('QA: fase Executar', () => {
     await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 'm1', reason: 'answer' })
     await tick(t)
     expect(t.log.submits.at(-1)).toContain(`${runDir}/relatorio.md`)
-    await click(t, ui)
-    expect(t.log.toasts.at(-1)).toBe('Corrigir entra na próxima versão desta branch')
   })
 
   test('adoção: lançamento sem agentId adota o agente vivo do tipo, que entra na trava e em qaGuarded', async ($, on) => {
@@ -656,5 +698,224 @@ describe('QA: fim dos agentes e qa_auth', () => {
     t.files.delete(AUTH)
     expect(await auth($, 'admin')).toContain('não serve')
     expect(await auth($, 'outro')).toContain('fora da matriz')
+  })
+})
+
+// ---- Fase Corrigir ----
+
+const D1 = 'c1.d1'
+const FIX_MATRIX: Matrix = { ...MATRIX, testDir: 'e2e' }
+const FIX_OK = JSON.stringify({ retestable: true, regressionTest: 'e2e/qa-c1.d1.spec.ts', subject: 'Salvar volta a confirmar', body: ['Por quê: x', 'O que mudou: y'] })
+const wtOf = (t: T) => `${REPO}/.worktrees/qa-${t.runDir().split('/').pop()}`
+const outOf = (t: T) => `${t.runDir()}/correcoes/${D1}`
+const resultOf = (t: T) => JSON.parse(t.files.get(`${outOf(t)}.json`) ?? '{}')
+const lastId = (t: T) => `a${t.log.spawns.length}`
+const gitIn = (t: T, ...args: string[]) => ['git', '-C', wtOf(t), ...args]
+
+// Executar sem célula pendente (os vereditos já existem): o relatório sai com c1.d1 marcado e a etapa vai para Corrigir.
+async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX) {
+  const r = await toRun($, on, over, matrix)
+  const runDir = r.t.runDir()
+  r.t.files.set(`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT]))
+  r.t.files.set(`${runDir}/celulas/c2/veredito.json`, verdictOf('c2', 'PASS'))
+  r.t.files.set(`${runDir}/celulas/c2/teste.spec.ts`, 'test()')
+  r.t.files.set(`${REPO}/.env`, 'SEGREDO=1')
+  r.t.files.set(`${REPO}/.env.example`, 'X=')
+  await click(r.t, r.ui)
+  return r
+}
+
+// Os dois cliques do Corrigir: o segundo, no prazo, prepara a worktree e começa o primeiro defeito no mesmo tique.
+async function fixing($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MATRIX) {
+  const r = await toFix($, on, over, matrix)
+  await click(r.t, r.ui)
+  await click(r.t, r.ui)
+  return r
+}
+
+// O agente mais recente é adotado, grava os arquivos dele e termina; o tique seguinte avança o item.
+async function finishAgent($: Engine, t: T, written: Record<string, string> = {}) {
+  const id = lastId(t)
+  await tick(t)
+  for (const [path, text] of Object.entries(written)) t.files.set(path, text)
+  await ended($, id)
+  await tick(t)
+}
+
+// O corretor termina com o fix.json dado (null = sem arquivo) e, se `status`, com a worktree mudada.
+async function fixerEnds($: Engine, t: T, fix: string | null = FIX_OK, status = ' M src/salvar.ts') {
+  t.wt.status = status
+  await finishAgent($, t, fix === null ? {} : { [`${outOf(t)}/fix.json`]: fix })
+}
+
+describe('QA: clique Corrigir', () => {
+  test('sem defeito marcado: avisa onde ficaram os testes gerados e volta para o começo', async ($, on) => {
+    const { t, ui } = await toFix($, on)
+    const rel = `${t.runDir()}/relatorio.md`
+    t.files.set(rel, (t.files.get(rel) ?? '').replace(`- [x] ${D1}`, `- [ ] ${D1}`))
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('celulas/<id>/teste.spec.ts')
+    expect(await label(ui)).toBe('QA')
+  })
+
+  test('o primeiro clique só mostra os comandos, o segundo fora do prazo arma de novo; instalação que falha não avança', async ($, on) => {
+    const { t, ui } = await toFix($, on, { run: argv => (argv.join(' ') === 'npm ci' ? { exitCode: 1, stdout: 'ERR dependencias' } : undefined) })
+    expect(await label(ui)).toBe('QA: Corrigir')
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('- instalar: npm ci')
+    await t.clock.advance(ARM_MS)
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('Aperte de novo')
+    expect(t.log.runs.some(a => a.includes('worktree'))).toBe(false)
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('ERR dependencias')
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(await label(ui)).toBe('QA: Corrigir')
+  })
+
+  test('a trava recusaria o corretor na worktree real: avisa e não lança nada', async ($, on) => {
+    const { t } = await fixing($, on, { run: argv => (argv[0] === 'realpath' && argv.length === 2 ? { exitCode: 0, stdout: '/fora/wt\n' } : undefined) })
+    expect(t.log.toasts.at(-1)).toContain('trava recusaria o corretor')
+    expect(t.log.spawns).toEqual([])
+  })
+})
+
+describe('QA: fase Corrigir', () => {
+  test('caminho feliz: corretor, commit pelo mod, testes, regressão, reteste, aceito e o fim da fila', async ($, on) => {
+    const { t, ui } = await fixing($, on)
+    const wt = wtOf(t)
+    expect(t.log.runs).toContainEqual(['git', 'worktree', 'add', wt, '-b', `qa/${t.runDir().split('/').pop()}`])
+    expect(t.files.get(`${wt}/.env`)).toBe('SEGREDO=1')
+    expect(t.files.has(`${wt}/.env.example`)).toBe(false)
+    expect(t.files.get(`${REPO}/.git/info/exclude`)).toBe('.worktrees/\n/.env\n')
+    expect(t.log.full).toContainEqual(expect.objectContaining({ argv: ['npm', 'ci'], cwd: wt }))
+    expect(t.log.apps[0]).toEqual({ argv: ['npm', 'run', 'dev', '--', '--port', '4100'], cwd: wt, env: { QA_PORT: '4100', PORT: '4100' } })
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(t.guard()).toMatchObject({ role: 'fixer', agentId: null, ctx: { fixDir: wt, origins: ['http://localhost:4100'] } })
+    const ab = t.log.runs.filter(a => a[0] === AB).map(a => a.slice(3).join(' '))
+    expect(ab).toContain('open http://localhost:4100/entrar')
+    expect(ab).toContain('storage local set tok SEGREDO2')
+    expect(t.log.spawns[0]?.prompt).toContain(`Worktree (W): ${wt}`)
+    await fixerEnds($, t)
+    expect(t.wt.commits[0]).toEqual(['commit', '-q', '-m', 'Salvar volta a confirmar', '-m', 'Por quê: x', '-m', 'O que mudou: y'])
+    expect(t.log.full).toContainEqual(expect.objectContaining({ argv: ['npm', 'test'], cwd: wt }))
+    const pw = t.log.full.filter(r => r.argv[0] === 'npx')
+    expect(pw.map(r => r.env['QA_BASE_URL'])).toEqual(['http://localhost:3000', 'http://localhost:4100'])
+    expect(pw[0]?.env['QA_AUTH_ADMIN']).toBe(AUTH)
+    expect(t.log.apps).toHaveLength(2)
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+    const re = (cell: string) => `${outOf(t)}/reteste-1/${cell}/veredito.json`
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c1')]: verdictOf('c1', 'PASS') })
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c2')]: verdictOf('c2', 'PASS') })
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER, QA_OBSERVER, QA_RUNNER, QA_OBSERVER])
+    expect(resultOf(t)).toMatchObject({ defect: D1, status: 'corrigido', attempts: 1, commits: ['f0 corrige'], regressionTest: 'e2e/qa-c1.d1.spec.ts', pending: [], retest: [{ cell: 'c1', verdict: 'PASS' }, { cell: 'c2', verdict: 'PASS' }] })
+    await $.turn.start({ text: 'trabalhando', turnId: 'm1' })
+    const before = t.log.submits.length
+    await tick(t)
+    expect(t.files.get(`${wt}/e2e/qa-c2.spec.ts`)).toBe('test()')
+    expect(t.wt.commits[1]?.slice(0, 4)).toEqual(['commit', '-q', '-m', 'Testes de regressão gerados pelo QA'])
+    const report = t.files.get(`${t.runDir()}/correcoes.md`) ?? ''
+    expect(report).toContain('- corrigido: 1')
+    expect(report).toContain('sem os hooks de pré-commit')
+    expect(await label(ui)).toBe('QA')
+    expect(t.log.guards.at(-1)).toBe('{}')
+    await tick(t)
+    expect(t.log.submits).toHaveLength(before)
+    await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 'm1', reason: 'answer' })
+    await tick(t)
+    expect(t.log.submits.at(-1)).toContain(`${t.runDir()}/correcoes.md`)
+  })
+
+  const refusals: [string, () => Over, string | null, string, string][] = [
+    ['4a fix.json ausente', () => ({}), null, ' M a.ts', 'fix.json ausente ou inválido'],
+    ['4b mudança sem descrição', () => ({}), JSON.stringify({ retestable: true }), ' M a.ts', 'mudança sem descrição de commit'],
+    ['4b nada mudou', () => ({}), FIX_OK, '', 'o corretor não mudou nada'],
+    ['4c teste alterado', () => ({ run: a => (a.includes('--name-status') ? { exitCode: 0, stdout: 'M\te2e/velho.spec.ts\n' } : undefined) }), FIX_OK, ' M a.ts', 'teste ou configuração de teste alterado'],
+    ['4f testes do projeto', () => ({ run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU x' } : undefined) }), FIX_OK, ' M a.ts', 'FALHOU x'],
+    ['4g passa no original', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 0, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não falhou no app original'],
+    ['4g falha na worktree', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 1, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não passou no app da worktree'],
+  ]
+  for (const [name, over, fix, status, reason] of refusals) {
+    test(`recusa ${name}: vira motivo e o corretor volta`, async ($, on) => {
+      const { t } = await fixing($, on, over())
+      await fixerEnds($, t, fix, status)
+      expect(types(t)).toEqual([QA_FIXER, QA_FIXER])
+      expect(t.log.spawns[1]?.prompt).toContain('- Tentativa: 2')
+      expect(t.log.spawns[1]?.prompt).toContain(reason)
+    })
+  }
+
+  test('migração: desfaz e o defeito fica não reverificado', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a.includes('--name-status') ? { exitCode: 0, stdout: 'A\tdb/migrations/001.sql\n' } : undefined) })
+    await fixerEnds($, t)
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['a correção cria migração'] })
+    expect(t.wt.commits).toEqual([])
+  })
+
+  test('retestable false: commita o que mudou e fica não reverificado, com o motivo do corretor', async ($, on) => {
+    const { t } = await fixing($, on)
+    await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend em contêiner', subject: 'Corrige a API' }))
+    expect(t.wt.commits).toHaveLength(1)
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['backend em contêiner'], commits: ['f0 corrige'] })
+    expect(types(t)).toEqual([QA_FIXER])
+  })
+
+  test('três recusas: desistiu, com reset e clean na worktree', async ($, on) => {
+    const { t } = await fixing($, on)
+    for (let i = 0; i < 3; i++) await fixerEnds($, t, null)
+    expect(types(t)).toEqual([QA_FIXER, QA_FIXER, QA_FIXER])
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(t.log.runs).toContainEqual(gitIn(t, 'clean', '-fdq'))
+    expect(resultOf(t)).toMatchObject({ status: 'desistiu', attempts: 3, reasons: ['fix.json ausente ou inválido', 'fix.json ausente ou inválido', 'fix.json ausente ou inválido'] })
+  })
+
+  test('árvore suja na execução: confere antes de corrigir; defeito que não aparece dá não reproduzido', async ($, on) => {
+    const dirty = (a: readonly string[], cwd?: string) => (a.join(' ') === 'git status --porcelain' && cwd === REPO ? { exitCode: 0, stdout: ' M x\n' } : undefined)
+    const { t } = await fixing($, on, { run: dirty })
+    expect(types(t)).toEqual([QA_RUNNER])
+    expect(t.dirs.has(`${outOf(t)}/reteste-0/c1`)).toBe(true)
+    await finishAgent($, t)
+    await finishAgent($, t, { [`${outOf(t)}/reteste-0/c1/veredito.json`]: verdictOf('c1', 'PASS') })
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER])
+    expect(resultOf(t)).toMatchObject({ status: 'não reproduzido na worktree', attempts: 0 })
+  })
+
+  test('app que não sobe pela worktree: o defeito fica não reverificado', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a[0] === 'curl' && a.includes('http://localhost:4100') ? { exitCode: 7, stdout: '' } : undefined) })
+    await t.clock.advance(61_000)
+    expect(t.log.spawns).toEqual([])
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['o app não subiu pela worktree'] })
+  })
+
+  test('retomada depois de um session.start no meio do reteste: o app sobe de novo na mesma porta', async ($, on) => {
+    const { t } = await fixing($, on)
+    await fixerEnds($, t)
+    expect(t.log.apps).toHaveLength(2)
+    await start($)
+    await finishAgent($, t)
+    expect(t.log.apps).toHaveLength(3)
+    expect(t.log.apps[2]?.env).toEqual({ QA_PORT: '4100', PORT: '4100' })
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER, QA_OBSERVER])
+  })
+
+  test('/workbench qa stop desfaz o defeito em curso e a etapa continua Corrigir', async ($, on) => {
+    const { t, ui } = await fixing($, on)
+    await command($, 'qa stop')
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(t.log.runs).toContainEqual(gitIn(t, 'clean', '-fdq'))
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(await label(ui)).toBe('QA: Corrigir')
+  })
+
+  test('aviso quando o HEAD do checkout principal muda durante a correção', async ($, on) => {
+    const root = { head: 'abc123' }
+    const { t } = await fixing($, on, { run: a => (a.join(' ') === `git -C ${REPO} rev-parse HEAD` ? { exitCode: 0, stdout: `${root.head}\n` } : undefined) })
+    root.head = 'outro'
+    await fixerEnds($, t)
+    expect(t.log.toasts.some(x => x.includes('checkout principal'))).toBe(true)
   })
 })

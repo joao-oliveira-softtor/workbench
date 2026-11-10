@@ -35,14 +35,22 @@ import {
   QA_RUNNER,
   QA_START,
   QA_TYPE,
+  afterJudgeOf,
   agentStepOf,
   cellDirOf,
+  fixBranchOf,
+  fixConfirmTextOf,
+  fixDirOf,
+  fixDonePromptOf,
+  fixOutDirOf,
   guardStateTextOf,
   handbackAgentOf,
+  nextFixOf,
   nextRunOf,
   qaLabelOf,
   qaLoginPromptOf,
   qaPlanPromptOf,
+  retestDirOf,
   runDirOf,
   runDonePromptOf,
   runIdOf,
@@ -51,11 +59,30 @@ import {
   toolsDirOf,
   wrapperOf,
 } from './qa'
-import type { QaCurrent, QaFlow, QaStep, SpawnInput } from './qa'
-import { finalVerdictOf } from './qa-evidence'
-import type { Cell, Matrix } from './qa-evidence'
+import type { QaCurrent, QaFlow, QaJob, QaStep, SpawnInput } from './qa'
+import { finalVerdictOf, retestCellsOf } from './qa-evidence'
+import type { Cell, Defect, FixStatus, Matrix } from './qa-evidence'
+import type { GuardCtx } from './qa-guard'
 import {
+  appMatrixOf,
   authReplyOf,
+  checkFix,
+  commitPassTests,
+  fixQueueAt,
+  freePortOf,
+  headOf,
+  isReproduced,
+  judgeOf,
+  outcomesOf,
+  resetFixOut,
+  rootSnapOf,
+  setupWorktree,
+  startApp,
+  stopApp,
+  targetOf,
+  undoFix,
+  writeFixReport,
+  writeFixResult,
   cellVerdictOf,
   closeSession,
   guardCtxOf,
@@ -75,7 +102,7 @@ import {
   writeReport,
   writeScripts,
 } from './qa-flow'
-import type { QaEnv } from './qa-flow'
+import type { QaApp, QaEnv } from './qa-flow'
 import { bandOf, fetchAgeLabel, freedKb, handoffTable, idleDays, isFetchStale, lineOf, pushLabel, settle, sizeLabel, sortRows, summaryOf } from './model'
 import { DELEGATE_CONTEXT, formatRoute, isUserOrigin, parseRoute, shouldDelegate, tierOf } from './route'
 import {
@@ -135,6 +162,8 @@ const qaJob = atom({ plugin: 'workbench', key: 'qaJob' } as const, null)
 const qaGuarded = atom({ plugin: 'workbench', key: 'qaGuarded' } as const, [])
 const qaRunBase = atom({ plugin: 'workbench', key: 'qaRunBase' } as const, null)
 const qaGuardToken = atom({ plugin: 'workbench', key: 'qaGuardToken' } as const, null)
+const qaArmed = atom({ plugin: 'workbench', key: 'qaArmed' } as const, null)
+const qaFix = atom({ plugin: 'workbench', key: 'qaFix' } as const, null)
 // Tentativas de refazer a coleta antes de a remoção abortar (um refresh em voo faz o launchRemoval voltar cedo).
 const MAX_TRIES = 3
 
@@ -170,6 +199,8 @@ let isQaStepping = false
 let qaPending: string | null = null
 let qaEnv: QaEnv | null = null
 let qaBlocked: string | null = QA_OFF
+// O app da worktree na fase Corrigir: o processo morre com o módulo, então um reload o perde e o passo o sobe de novo.
+let qaApp: QaApp | null = null
 
 function hhmm(at: number): string {
   const d = new Date(at)
@@ -825,14 +856,48 @@ async function runQaClick($: EngineInterface, step: QaStep): Promise<void> {
     case 'run':
       return qaRun($, env, flow, matrix)
     case 'fix':
-      $.ui.toast('Corrigir entra na próxima versão desta branch')
-      return
+      return qaFixClick($, env, flow, matrix)
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
   }
 }
 
-function spawnInputOf(o: { env: QaEnv; matrix: Matrix; cell: Cell; outDir: string; session: string; cdpPort: number | null; startedAt: string; endedAt: string }): SpawnInput {
+const runIdIn = (runDir: string): string => runDir.split('/').pop() ?? ''
+
+// Dois tempos: o primeiro clique mostra os comandos e arma; o segundo em até ARM_MS prepara a worktree e monta a fila.
+async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matrix): Promise<void> {
+  const { left } = await fixQueueAt($, flow.runDir, await outcomesOf($, flow.runDir, matrix))
+  if (left.length === 0) {
+    await update($, qaFlow, f => ({ ...f, step: 'plan' as const }))
+    $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${flow.runDir}/celulas/<id>/teste.spec.ts.`)
+    return
+  }
+  const runId = runIdIn(flow.runDir)
+  const fixDir = fixDirOf(env.root, runId)
+  const now = await $.clock.now()
+  const armedAt = (await read($, qaArmed))?.at
+  if (armedAt === undefined || now - armedAt > ARM_MS) {
+    await update($, qaArmed, () => ({ at: now }))
+    $.ui.toast(fixConfirmTextOf(matrix, fixDir))
+    return
+  }
+  await update($, qaArmed, () => null)
+  const ready = await setupWorktree($, env, matrix, flow.runDir, fixDir, fixBranchOf(runId))
+  if ('error' in ready) {
+    $.ui.toast(`QA: ${ready.error}`)
+    return
+  }
+  const root = await rootSnapOf($, env.root)
+  await update($, qaFlow, f => ({ ...f, fixDir: ready.fixDir }))
+  await update($, qaFix, () => ({ root, baseline: ready.baseline, regression: null, pending: [] }))
+  await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null })
+  void refresh($, true).catch(() => {})
+}
+
+type FixPart = Pick<SpawnInput, 'defect' | 'worktree' | 'testDir' | 'attempt' | 'reasons'>
+const NO_FIX: FixPart = { defect: null, worktree: '', testDir: '', attempt: 0, reasons: [] }
+
+function spawnInputOf(o: { env: QaEnv; matrix: Matrix; cell: Cell; outDir: string; session: string; cdpPort: number | null; startedAt: string; endedAt: string; fix?: FixPart }): SpawnInput {
   return {
     cell: o.cell,
     baseUrl: o.matrix.baseUrl,
@@ -845,11 +910,7 @@ function spawnInputOf(o: { env: QaEnv; matrix: Matrix; cell: Cell; outDir: strin
     cdpPort: o.cdpPort,
     loginRoute: o.matrix.loginRoute,
     containers: o.matrix.backend.containers,
-    defect: null,
-    worktree: '',
-    testDir: '',
-    attempt: 0,
-    reasons: [],
+    ...(o.fix ?? NO_FIX),
   }
 }
 
@@ -882,8 +943,7 @@ async function startCell($: EngineInterface, env: QaEnv, runDir: string, matrix:
   const cell = matrix.cells.find(c => c.id === cellId)
   if (cell === undefined) return null
   const now = await $.clock.now()
-  const runId = runDir.split('/').pop() ?? ''
-  const session = sessionOf(runId, attempt === 2 ? `${cellId}-r2` : cellId)
+  const session = sessionOf(runIdIn(runDir), attempt === 2 ? `${cellId}-r2` : cellId)
   const outDir = cellDirOf(runDir, cellId, attempt)
   const cdpPort = (await mkdirs($, outDir)) ? await prepareSession($, env, matrix, cell, session) : null
   if (cdpPort === null) {
@@ -906,15 +966,8 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
     return null
   }
   switch (c.role) {
-    case 'runner': {
-      const now = await $.clock.now()
-      const ctx = guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)
-      if (!(await guardWritten($, env, guardStateTextOf('observer', null, ctx), c))) return null
-      const outDir = cellDirOf(runDir, c.cell, c.attempt)
-      const prompt = spawnPromptOf('observer', spawnInputOf({ env, matrix, cell, outDir, session: c.session, cdpPort: c.cdpPort, startedAt: isoOf(c.at), endedAt: isoOf(now) }))
-      const spawned = await spawnQa($, 'observer', prompt, `QA ${c.cell} (verificação)`)
-      return launchedOf($, env, id => guardStateTextOf('observer', id, ctx), spawned, { ...c, role: 'observer', agentId: null, at: now, isEnded: false })
-    }
+    case 'runner':
+      return launchObserver($, env, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort), matrix, cell, cellDirOf(runDir, c.cell, c.attempt), c)
     case 'observer': {
       await closeSession($, env, c.session)
       const final = finalVerdictOf(cell, await cellVerdictOf($, runDir, c.cell, c.attempt))
@@ -926,6 +979,15 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
     default:
       throw new Error('Caso não tratado: ' + String(c.role satisfies never))
   }
+}
+
+// O runner acabou: o observer confere na MESMA sessão do navegador (fases Executar e Corrigir).
+async function launchObserver($: EngineInterface, env: QaEnv, ctx: GuardCtx, matrix: Matrix, cell: Cell, outDir: string, c: QaCurrent): Promise<QaCurrent | null> {
+  const now = await $.clock.now()
+  if (!(await guardWritten($, env, guardStateTextOf('observer', null, ctx), c))) return null
+  const prompt = spawnPromptOf('observer', spawnInputOf({ env, matrix, cell, outDir, session: c.session, cdpPort: c.cdpPort, startedAt: isoOf(c.at), endedAt: isoOf(now) }))
+  const spawned = await spawnQa($, 'observer', prompt, `QA ${c.cell} (verificação)`)
+  return launchedOf($, env, id => guardStateTextOf('observer', id, ctx), spawned, { ...c, role: 'observer', agentId: null, at: now, isEnded: false })
 }
 
 // Desmonta o que um item deixou aberto: a trava nega todo agente e a sessão do navegador fecha.
@@ -963,30 +1025,53 @@ async function closeRun($: EngineInterface, env: QaEnv, runDir: string, matrix: 
 // Um passo por tique: começa o próximo item, adota o agente sem id, ou avança o item cujo agente acabou.
 async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
   const job = await read($, qaJob)
-  if (job === null || job.phase !== 'run') return
+  if (job === null) return
   const flow = await read($, qaFlow)
   const loaded = await loadMatrix($, flow.runDir)
   if (loaded.kind !== 'ok') {
     await update($, qaJob, () => null)
-    await teardownQa($, env, job.current)
+    await teardownJob($, env, flow, job)
     $.ui.toast('QA: a matriz sumiu ou mudou no meio da execução; o trabalho parou.')
     return
   }
+  switch (job.phase) {
+    case 'run':
+      return stepRun($, env, flow.runDir, loaded.matrix, job)
+    case 'fix':
+      return stepFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix: loaded.matrix }, job)
+    default:
+      throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
+  }
+}
+
+async function stepRun($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, job: QaJob): Promise<void> {
   const c = job.current
   if (c === null) {
     const [next, ...rest] = job.queue
-    if (next === undefined) return closeRun($, env, flow.runDir, loaded.matrix)
+    if (next === undefined) return closeRun($, env, runDir, matrix)
     await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
-    return setCurrent($, env, await startCell($, env, flow.runDir, loaded.matrix, next, 1))
+    return setCurrent($, env, await startCell($, env, runDir, matrix, next, 1))
   }
-  return stepCurrent($, env, flow.runDir, loaded.matrix, c)
+  return stepCurrent($, env, runDir, matrix, c)
+}
+
+// Desmonta o trabalho parado: na fase Corrigir também para o app e desfaz o defeito em curso.
+async function teardownJob($: EngineInterface, env: QaEnv, flow: QaFlow, job: QaJob): Promise<void> {
+  switch (job.phase) {
+    case 'run':
+      return teardownQa($, env, job.current)
+    case 'fix':
+      return teardownFix($, env, flow.fixDir, job.current)
+    default:
+      throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
+  }
 }
 
 // Adota o agente lançado sem id: ele entra em qaGuarded e na trava. Parado no meio da adoção, a trava acabou de ganhar o
 // id depois do `{}` do stop: volta a `{}`.
-async function adoptAgent($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent, id: string): Promise<void> {
+async function adoptAgent($: EngineInterface, env: QaEnv, ctx: GuardCtx, c: QaCurrent, id: string): Promise<void> {
   await update($, qaGuarded, ids => [...ids, id])
-  await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)))
+  await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, ctx))
   await update($, qaJob, cur => (cur?.current?.item === c.item && cur.current.role === c.role ? { ...cur, current: { ...cur.current, agentId: id } } : cur))
   if ((await read($, qaJob)) === null) await teardownQa($, env, c)
 }
@@ -998,13 +1083,220 @@ async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matri
     case 'wait':
       return
     case 'adopt':
-      return adoptAgent($, env, runDir, matrix, c, step.agentId)
+      return adoptAgent($, env, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort), c, step.agentId)
     case 'ended':
       if (c.agentId === null) await guardLive($)
       return setCurrent($, env, await advanceCell($, env, runDir, matrix, c))
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
   }
+}
+
+// ---- QA, fase Corrigir: um passo por tique, como a Executar ----
+
+type FixCtx = { env: QaEnv; runDir: string; fixDir: string; matrix: Matrix }
+type Target = { cell: Cell; defect: Defect }
+
+// O contexto da trava de um item da fase Corrigir: a origem é a do app da worktree e a worktree é a pasta do corretor.
+const fixCtxOf = (f: FixCtx, c: QaCurrent): GuardCtx => guardCtxOf(f.env, appMatrixOf(f.matrix, c.port), f.runDir, c.session, c.cdpPort, f.fixDir)
+
+async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: QaCurrent | null): Promise<void> {
+  await teardownQa($, env, c)
+  await stopApp(qaApp)
+  qaApp = null
+  if (c !== null) await undoFix($, fixDir, c.sha)
+}
+
+async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void> {
+  const c = job.current
+  if (c === null) {
+    const [next, ...rest] = job.queue
+    if (next === undefined) return closeFix($, f)
+    await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
+    return setFixCurrent($, f, await startDefect($, f, next))
+  }
+  if (!(await isAppUp($, f, c.port))) return setFixCurrent($, f, await finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], []))
+  const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
+  switch (step.step) {
+    case 'wait':
+      return
+    case 'adopt':
+      return adoptAgent($, f.env, fixCtxOf(f, c), c, step.agentId)
+    case 'ended':
+      if (c.agentId === null) await guardLive($)
+      return setFixCurrent($, f, await advanceFix($, f, c))
+    default:
+      throw new Error('Caso não tratado: ' + String(step satisfies never))
+  }
+}
+
+// Depois de um reload (ou se o app caiu) o processo sumiu: sobe de novo na MESMA porta (a sessão e a trava apontam para ela).
+async function isAppUp($: EngineInterface, f: FixCtx, port: number): Promise<boolean> {
+  if (qaApp !== null && !qaApp.isDone) return true
+  qaApp = await startApp($, f.matrix, f.fixDir, port)
+  return qaApp !== null
+}
+
+// Item novo; trabalho parado no meio do passo: desmonta (e desfaz) o que o passo acabou de abrir.
+async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | null): Promise<void> {
+  await update($, qaJob, cur => (cur === null ? null : { ...cur, current: next }))
+  if ((await read($, qaJob)) === null) return teardownFix($, f.env, f.fixDir, next)
+  if (next === null) await teardownQa($, f.env, null)
+}
+
+async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Promise<QaCurrent | null> {
+  const target = await targetOf($, f.runDir, f.matrix, defectId)
+  if (target === null) {
+    $.ui.toast(`QA: o defeito ${defectId} não está mais no veredito da execução; ficou de fora.`)
+    return null
+  }
+  await update($, qaFix, x => (x === null ? null : { ...x, regression: null, pending: [] }))
+  const sha = await headOf($, f.fixDir)
+  const c: QaCurrent = { item: defectId, role: 'runner', attempt: 0, agentId: null, at: await $.clock.now(), isEnded: false, cell: target.cell.id, sha, port: 0, session: '', cdpPort: null, reasons: [] }
+  const port = await freePortOf($)
+  qaApp = port === null ? null : await startApp($, f.matrix, f.fixDir, port)
+  if (port === null || qaApp === null) return finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], [])
+  const base = await read($, qaRunBase)
+  // A execução viu outra árvore (suja ou outro HEAD): antes de corrigir, confere se o defeito aparece na worktree.
+  const isCheck = base === null || base.isDirty || base.head !== sha
+  return isCheck ? startRetest($, f, { ...c, port }, target.cell.id, 0) : startFixer($, f, { ...c, port, attempt: 1 }, target)
+}
+
+// O defeito acabou: para o app e grava `correcoes/<defeito>.json`.
+async function finishDefect($: EngineInterface, f: FixCtx, c: QaCurrent, status: FixStatus, reasons: string[], cells: readonly string[]): Promise<null> {
+  await closeSession($, f.env, c.session)
+  await stopApp(qaApp)
+  qaApp = null
+  const fix = await read($, qaFix)
+  await writeFixResult($, { ...f, defectId: c.item, sha: c.sha, status, attempt: c.attempt, reasons: [...c.reasons, ...reasons], cells, regression: fix?.regression ?? null, pending: fix?.pending ?? [] })
+  return null
+}
+
+// Reteste de uma célula (runner, depois observer) contra o app da worktree; tentativa 0 é a conferência antes de corrigir.
+async function startRetest($: EngineInterface, f: FixCtx, c: QaCurrent, cellId: string, attempt: number): Promise<QaCurrent | null> {
+  const cell = f.matrix.cells.find(x => x.id === cellId)
+  const session = sessionOf(runIdIn(f.runDir), `${c.item}-${attempt}-${cellId}`)
+  const outDir = retestDirOf(f.runDir, c.item, attempt, cellId)
+  const app = appMatrixOf(f.matrix, c.port)
+  const cdpPort = cell !== undefined && (await mkdirs($, outDir)) ? await prepareSession($, f.env, f.matrix, cell, session, app.baseUrl) : null
+  if (cell === undefined || cdpPort === null) return finishDefect($, f, c, 'não reverificado', [`não deu para abrir o navegador do reteste de ${cellId}`], [])
+  const now = await $.clock.now()
+  const item: QaCurrent = { ...c, role: 'runner', attempt, agentId: null, at: now, isEnded: false, cell: cellId, session, cdpPort }
+  const ctx = fixCtxOf(f, item)
+  if (!(await guardWritten($, f.env, guardStateTextOf('runner', null, ctx), item))) return finishDefect($, f, item, 'não reverificado', ['não deu para gravar a trava'], [])
+  const prompt = spawnPromptOf('runner', spawnInputOf({ env: f.env, matrix: app, cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '' }))
+  const launched = await launchedOf($, f.env, id => guardStateTextOf('runner', id, ctx), await spawnQa($, 'runner', prompt, `QA ${c.item} reteste ${cellId}`), item)
+  return launched ?? finishDefect($, f, item, 'não reverificado', ['o agente do reteste foi recusado'], [])
+}
+
+async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target): Promise<QaCurrent | null> {
+  const outDir = fixOutDirOf(f.runDir, c.item)
+  const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
+  const app = appMatrixOf(f.matrix, c.port)
+  const cdpPort = (await resetFixOut($, outDir)) ? await prepareSession($, f.env, f.matrix, target.cell, session, app.baseUrl) : null
+  if (cdpPort === null) return finishDefect($, f, c, 'não reverificado', ['não deu para abrir o navegador do corretor'], [])
+  const now = await $.clock.now()
+  const item: QaCurrent = { ...c, role: 'fixer', agentId: null, at: now, isEnded: false, cell: '', session, cdpPort }
+  const ctx = fixCtxOf(f, item)
+  if (!(await guardWritten($, f.env, guardStateTextOf('fixer', null, ctx), { cell: c.item, session }))) return finishDefect($, f, item, 'não reverificado', ['não deu para gravar a trava'], [])
+  const fix: FixPart = { defect: target.defect, worktree: f.fixDir, testDir: f.matrix.testDir, attempt: c.attempt, reasons: c.reasons }
+  const prompt = spawnPromptOf('fixer', spawnInputOf({ env: f.env, matrix: app, cell: target.cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '', fix }))
+  const launched = await launchedOf($, f.env, id => guardStateTextOf('fixer', id, ctx), await spawnQa($, 'fixer', prompt, `QA corrige ${c.item}`), item)
+  return launched ?? finishDefect($, f, item, 'não reverificado', ['o corretor foi recusado'], [])
+}
+
+// O agente do item acabou: runner → observer; observer → próxima célula ou julgamento; corretor → as conferências do mod.
+async function advanceFix($: EngineInterface, f: FixCtx, c: QaCurrent): Promise<QaCurrent | null> {
+  const target = await targetOf($, f.runDir, f.matrix, c.item)
+  if (target === null) return finishDefect($, f, c, 'não reverificado', ['o defeito sumiu do veredito da execução'], [])
+  const cells = retestCellsOf(f.matrix, target.cell.id, await outcomesOf($, f.runDir, f.matrix))
+  const cell = f.matrix.cells.find(x => x.id === c.cell)
+  switch (c.role) {
+    case 'runner':
+      return cell === undefined ? finishDefect($, f, c, 'não reverificado', [`célula ${c.cell} sumiu da matriz`], []) : launchObserver($, f.env, fixCtxOf(f, c), appMatrixOf(f.matrix, c.port), cell, retestDirOf(f.runDir, c.item, c.attempt, c.cell), c)
+    case 'observer':
+      await closeSession($, f.env, c.session)
+      return nextOfFix($, f, c, target, cells)
+    case 'fixer':
+      await closeSession($, f.env, c.session)
+      await warnRootMoved($, f.env)
+      return afterFixer($, f, c, target, cells)
+    default:
+      throw new Error('Caso não tratado: ' + String(c.role satisfies never))
+  }
+}
+
+async function nextOfFix($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
+  const next = nextFixOf(c, cells)
+  switch (next.kind) {
+    case 'retest':
+      return startRetest($, f, c, next.cell, c.attempt)
+    case 'judge':
+      if (c.attempt === 0) return (await isReproduced($, f.runDir, c.item, target)) ? startFixer($, f, { ...c, attempt: 1 }, target) : finishDefect($, f, c, 'não reproduzido na worktree', [], [])
+      return judged($, f, c, target, cells, await judgeOf($, { ...f, target, defectId: c.item, attempt: c.attempt, cells }))
+    case 'observer':
+      throw new Error('nextFixOf não devolve observer depois do observer nem do corretor')
+    default:
+      throw new Error('Caso não tratado: ' + String(next satisfies never))
+  }
+}
+
+// Aceite ou recusa (do julgamento ou das conferências 4a a 4g): corrigido, o corretor de novo com os motivos, ou desistiu.
+async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[], verdict: { accepted: boolean; reasons: string[] }): Promise<QaCurrent | null> {
+  const after = afterJudgeOf(c.attempt, verdict.accepted)
+  switch (after) {
+    case 'corrigido':
+      return finishDefect($, f, c, 'corrigido', [], cells)
+    case 'retry':
+      return startFixer($, f, { ...c, attempt: c.attempt + 1, reasons: [...c.reasons, ...verdict.reasons] }, target)
+    case 'desistiu':
+      await undoFix($, f.fixDir, c.sha)
+      return finishDefect($, f, c, 'desistiu', verdict.reasons, cells)
+    default:
+      throw new Error('Caso não tratado: ' + String(after satisfies never))
+  }
+}
+
+async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
+  const baseline = (await read($, qaFix))?.baseline ?? ''
+  const check = await checkFix($, { ...f, defectId: c.item, sha: c.sha, baseline, port: c.port })
+  switch (check.kind) {
+    case 'refuse':
+      return judged($, f, c, target, [], { accepted: false, reasons: [check.reason] })
+    case 'unverified':
+      return finishDefect($, f, c, 'não reverificado', [check.reason], [])
+    case 'ok':
+      await update($, qaFix, x => (x === null ? null : { ...x, regression: check.regression, pending: check.pending }))
+      // Reinicia o app para carregar a mudança, na mesma porta.
+      await stopApp(qaApp)
+      qaApp = await startApp($, f.matrix, f.fixDir, c.port)
+      if (qaApp === null) return finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], [])
+      return nextOfFix($, f, c, target, cells)
+    default:
+      throw new Error('Caso não tratado: ' + String(check satisfies never))
+  }
+}
+
+// O checkout do usuário mudou durante a fase? Só avisa (pode ter sido ele) e guarda a foto nova.
+async function warnRootMoved($: EngineInterface, env: QaEnv): Promise<void> {
+  const snap = await rootSnapOf($, env.root)
+  const fix = await read($, qaFix)
+  if (fix === null || fix.root === snap) return
+  await update($, qaFix, x => (x === null ? null : { ...x, root: snap }))
+  $.ui.toast(`QA: o checkout principal (${env.root}) mudou durante a correção (HEAD, branch ou stash); confira se foi você.`)
+}
+
+// Fim da fila: testes das células PASS na worktree, correcoes.md, etapa de volta ao começo e o resumo para a sessão.
+async function closeFix($: EngineInterface, f: FixCtx): Promise<void> {
+  const outcomes = await outcomesOf($, f.runDir, f.matrix)
+  await commitPassTests($, f.runDir, f.matrix, outcomes, f.fixDir)
+  const reportPath = await writeFixReport($, f.runDir, (await fixQueueAt($, f.runDir, outcomes)).all)
+  await update($, qaFlow, x => ({ ...x, step: 'plan' as const }))
+  await update($, qaJob, () => null)
+  await update($, qaFix, () => null)
+  await teardownQa($, f.env, null)
+  void refresh($, true).catch(() => {})
+  qaPending = fixDonePromptOf({ reportPath, fixDir: f.fixDir, branch: fixBranchOf(runIdIn(f.runDir)) })
 }
 
 // Roda no timer de 3 s. O clique e o pedido pendente são tirados da fila antes de qualquer `await`; os envios à sessão
@@ -1014,8 +1306,14 @@ async function drainQaClick($: EngineInterface): Promise<void> {
   const step = qaQueued
   if (step === null || isQaStepping || (isMainTurn && (step === 'plan' || step === 'login'))) return
   qaQueued = null
-  const ran = await settle(() => runQaClick($, step))
-  if (!ran.ok) $.ui.toast(`QA falhou: ${ran.error.slice(0, 120)}`)
+  // O clique Corrigir prepara a worktree por minutos: com a trava do passo, nenhum outro clique nem passo roda junto.
+  isQaStepping = true
+  try {
+    const ran = await settle(() => runQaClick($, step))
+    if (!ran.ok) $.ui.toast(`QA falhou: ${ran.error.slice(0, 120)}`)
+  } finally {
+    isQaStepping = false
+  }
 }
 
 async function drainQa($: EngineInterface): Promise<void> {
@@ -1050,7 +1348,7 @@ async function stopQa($: EngineInterface): Promise<string> {
   await update($, qaJob, () => null)
   qaQueued = null
   await guardLive($)
-  if (env !== null) await teardownQa($, env, job?.current)
+  if (env !== null) await (job === null ? teardownQa($, env, null) : teardownJob($, env, await read($, qaFlow), job))
   return job === null ? 'QA: nenhum trabalho em curso.' : 'QA parado. Clique em QA para retomar.'
 }
 
@@ -1147,6 +1445,8 @@ export const register: Register = on => {
     qaPending = null
     qaEnv = null
     qaBlocked = QA_OFF
+    qaApp = null
+    await update($, qaArmed, () => null)
     // Cada item num settle: o QA que falha fica desligado com o motivo, sem derrubar o painel.
     const env = await settle(async () => qaEnvOf($, await guardTokenOf($)))
     if (env.ok && env.value !== null) {
