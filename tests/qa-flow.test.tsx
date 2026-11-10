@@ -305,6 +305,13 @@ describe('QA: Planejar e Login', () => {
     await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
     await tick(t)
     expect(t.log.submits).toHaveLength(1)
+    t.files.set(`${t.runDir()}/matriz.md`, mdOf(MATRIX))
+    await $.turn.start({ text: 'trabalhando', turnId: 't2' })
+    await click(t, ui)
+    expect(t.log.submits).toHaveLength(1)
+    await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+    await tick(t)
+    expect(t.log.submits).toHaveLength(2)
   })
 
   test('pasta da execução que não deu para criar: o texto do campo fica', async ($, on) => {
