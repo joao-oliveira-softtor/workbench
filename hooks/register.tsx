@@ -1150,7 +1150,7 @@ async function lostFix($: EngineInterface, env: QaEnv, err: unknown): Promise<vo
 async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void> {
   const c = job.current
   if (c === null) return nextDefect($, f, job.queue)
-  if (!(await isAppUp($, f, c.port))) return setFixCurrent($, f, await finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], []))
+  if (!(await isAppUp($, f, c.port))) return setFixCurrent($, f, await finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], []), c)
   const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
@@ -1159,7 +1159,7 @@ async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void>
       return adoptAgent($, f.env, fixCtxOf(f, c), c, step.agentId)
     case 'ended':
       if (c.agentId === null) await guardLive($)
-      return setFixCurrent($, f, await advanceFix($, f, c))
+      return setFixCurrent($, f, await advanceFix($, f, c), c)
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
   }
@@ -1180,10 +1180,11 @@ async function isAppUp($: EngineInterface, f: FixCtx, port: number): Promise<boo
   return qaApp !== null
 }
 
-// Item novo; trabalho parado no meio do passo: desmonta (e desfaz) o que o passo acabou de abrir.
-async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | null): Promise<void> {
+// Item novo; trabalho parado no meio do passo: desmonta (e desfaz) o que o passo acabou de abrir. Sem item novo, desfaz pelo
+// item com que o passo começou (`from`): um commit que chegou depois do stop também volta.
+async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | null, from: QaCurrent | null = null): Promise<void> {
   await update($, qaJob, cur => (cur === null ? null : { ...cur, current: next }))
-  if ((await read($, qaJob)) === null) return teardownFix($, f.env, f.fixDir, next)
+  if ((await read($, qaJob)) === null) return teardownFix($, f.env, f.fixDir, next ?? from)
   if (next === null) await teardownQa($, f.env, null)
 }
 

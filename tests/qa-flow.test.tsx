@@ -939,6 +939,17 @@ describe('QA: fase Corrigir', () => {
     expect(types(t)).toEqual([QA_FIXER, QA_RUNNER, QA_OBSERVER])
   })
 
+  test('stop no meio das conferências do corretor: o commit que chega depois do stop também é desfeito', async ($, on) => {
+    const { t } = await fixing($, on, { hold: holdOnce(k => k.includes(' commit -q -m Corrige a API')).hold })
+    t.wt.status = ' M a.ts'
+    await finishAgent($, t, { [`${outOf(t)}/fix.json`]: JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }) })
+    await command($, 'qa stop')
+    await t.clock.advance(HOLD_MS)
+    await tick(t)
+    expect(t.wt.commits).toHaveLength(1)
+    expect(t.wt.head).toBe('abc123')
+  })
+
   test('/workbench qa stop desfaz o defeito em curso e a etapa continua Corrigir', async ($, on) => {
     const { t, ui } = await fixing($, on)
     await command($, 'qa stop')
