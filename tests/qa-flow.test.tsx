@@ -104,6 +104,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     tools: [] as string[],
     full: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
     apps: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
+    appStops: 0,
   }
   // A worktree da fase Corrigir: o `git status` dela (o teste o muda como faria o corretor) e os commits feitos pelo mod.
   const wt = { status: '', commits: [] as string[][] }
@@ -173,6 +174,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     log.apps.push({ argv: [...e.argv], cwd: e.cwd ?? '', env: { ...e.env } })
     yield { stream: 'stdout' as const, text: 'pronto' }
     await new Promise<void>(r => next.signal.addEventListener('abort', () => r()))
+    log.appStops += 1
     return { value: { code: null, signal: 'SIGTERM' } }
   })
   on('fs.read', (_$, e, next) => {
@@ -614,7 +616,11 @@ const guardPathOf = (t: T): string => /"[^"]*\/(?:[^"/]+\/)*guard-[a-z0-9]+\.jso
 describe('QA: pendências da revisão da 7a', () => {
   test('agente de uma execução parada antes da adoção não é adotado pela execução nova', async ($, on) => {
     const { t, ui } = await running($, on)
+    t.listed.push({ id: 'o1', type: 'general-purpose', status: 'running', description: 'outro' })
     await command($, 'qa stop')
+    const before = t.log.submits.length
+    await $.prompt.submit({ text: '<agent-message from="o1">ok</agent-message>', isMeta: true, wait: false, origin: { kind: 'composer' } })
+    expect(t.log.submits).toHaveLength(before + 1)
     await click(t, ui)
     await tick(t)
     expect(types(t)).toEqual([QA_RUNNER, QA_RUNNER])
@@ -721,6 +727,7 @@ async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MA
   r.t.files.set(`${runDir}/celulas/c2/teste.spec.ts`, 'test()')
   r.t.files.set(`${REPO}/.env`, 'SEGREDO=1')
   r.t.files.set(`${REPO}/.env.example`, 'X=')
+  r.t.files.set(`${REPO}/package.json`, '{}')
   await click(r.t, r.ui)
   return r
 }
@@ -788,6 +795,7 @@ describe('QA: fase Corrigir', () => {
     expect(t.log.runs).toContainEqual(['git', 'worktree', 'add', wt, '-b', `qa/${t.runDir().split('/').pop()}`])
     expect(t.files.get(`${wt}/.env`)).toBe('SEGREDO=1')
     expect(t.files.has(`${wt}/.env.example`)).toBe(false)
+    expect(t.files.has(`${wt}/package.json`)).toBe(false)
     expect(t.files.get(`${REPO}/.git/info/exclude`)).toBe('.worktrees/\n/.env\n')
     expect(t.log.full).toContainEqual(expect.objectContaining({ argv: ['npm', 'ci'], cwd: wt }))
     expect(t.log.apps[0]).toEqual({ argv: ['npm', 'run', 'dev', '--', '--port', '4100'], cwd: wt, env: { QA_PORT: '4100', PORT: '4100' } })
@@ -804,13 +812,19 @@ describe('QA: fase Corrigir', () => {
     expect(pw.map(r => r.env['QA_BASE_URL'])).toEqual(['http://localhost:3000', 'http://localhost:4100'])
     expect(pw[0]?.env['QA_AUTH_ADMIN']).toBe(AUTH)
     expect(t.log.apps).toHaveLength(2)
+    expect(t.log.appStops).toBe(1)
     expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+    expect(t.log.spawns[1]?.prompt).toContain('"id":"c1"')
+    await tick(t)
+    expect(types(t)).toEqual([QA_FIXER, QA_RUNNER])
+    expect(t.log.toasts.some(x => x.includes('checkout principal'))).toBe(false)
     const re = (cell: string) => `${outOf(t)}/reteste-1/${cell}/veredito.json`
     await finishAgent($, t)
     await finishAgent($, t, { [re('c1')]: verdictOf('c1', 'PASS') })
     await finishAgent($, t)
     await finishAgent($, t, { [re('c2')]: verdictOf('c2', 'PASS') })
     expect(types(t)).toEqual([QA_FIXER, QA_RUNNER, QA_OBSERVER, QA_RUNNER, QA_OBSERVER])
+    expect(t.log.spawns.slice(2).map(x => /"id":"(c\d)"/.exec(x.prompt)?.[1])).toEqual(['c1', 'c2', 'c2'])
     expect(resultOf(t)).toMatchObject({ defect: D1, status: 'corrigido', attempts: 1, commits: ['f0 corrige'], regressionTest: 'e2e/qa-c1.d1.spec.ts', pending: [], retest: [{ cell: 'c1', verdict: 'PASS' }, { cell: 'c2', verdict: 'PASS' }] })
     await $.turn.start({ text: 'trabalhando', turnId: 'm1' })
     const before = t.log.submits.length
@@ -888,7 +902,7 @@ describe('QA: fase Corrigir', () => {
     const { t } = await fixing($, on, { run: a => (a[0] === 'curl' && a.includes('http://localhost:4100') ? { exitCode: 7, stdout: '' } : undefined) })
     await t.clock.advance(61_000)
     expect(t.log.spawns).toEqual([])
-    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['o app não subiu pela worktree'] })
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 0, reasons: ['o app não subiu pela worktree'] })
   })
 
   test('retomada depois de um session.start no meio do reteste: o app sobe de novo na mesma porta', async ($, on) => {
@@ -917,5 +931,93 @@ describe('QA: fase Corrigir', () => {
     root.head = 'outro'
     await fixerEnds($, t)
     expect(t.log.toasts.some(x => x.includes('checkout principal'))).toBe(true)
+  })
+})
+
+describe('QA: fase Corrigir, bordas', () => {
+  test('árvore suja e o defeito aparece na worktree: o corretor começa na tentativa 1', async ($, on) => {
+    const dirty = (a: readonly string[], cwd?: string) => (a.join(' ') === 'git status --porcelain' && cwd === REPO ? { exitCode: 0, stdout: ' M x\n' } : undefined)
+    const { t } = await fixing($, on, { run: dirty })
+    await finishAgent($, t)
+    await finishAgent($, t, { [`${outOf(t)}/reteste-0/c1/veredito.json`]: verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT]) })
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER, QA_FIXER])
+    expect(t.log.spawns[2]?.prompt).toContain('- Tentativa: 1')
+  })
+
+  test('navegador do reteste que não abre: o defeito fica não reverificado', async ($, on) => {
+    const opens = { n: 0 }
+    const { t } = await fixing($, on, { run: a => (a[0] === AB && a[3] === 'open' && ++opens.n === 2 ? { exitCode: 1, stdout: '' } : undefined) })
+    await fixerEnds($, t)
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['não deu para abrir o navegador do reteste de c1'] })
+  })
+
+  test('clique durante a preparação da worktree espera ela acabar', async ($, on) => {
+    const { t, ui } = await toFix($, on, { hold: holdOnce(k => k === 'npm ci').hold })
+    await click(t, ui)
+    await click(t, ui)
+    const before = t.log.toasts.length
+    await ui.press({ key: 'qa' })
+    await tick(t)
+    expect(t.log.toasts).toHaveLength(before)
+  })
+})
+
+describe('QA: fase Corrigir, preparação e retomada', () => {
+  // A worktree da branch já existe (o rev-parse dela diz a branch): é reaproveitada.
+  const ownBranch = (a: readonly string[]) => {
+    const dir = a[2] ?? ''
+    return a.join(' ').endsWith('rev-parse --abbrev-ref HEAD') && dir.includes('/.worktrees/') ? { exitCode: 0, stdout: `qa/${dir.split('/qa-').pop()}\n` } : undefined
+  }
+
+  test('pasta da worktree que já existe e é de outra branch: avisa e não lança nada', async ($, on) => {
+    const r = await toFix($, on)
+    r.t.dirs.add(wtOf(r.t))
+    await click(r.t, r.ui)
+    await click(r.t, r.ui)
+    expect(r.t.log.toasts.at(-1)).toContain('já existe e não é a worktree')
+    expect(r.t.log.spawns).toEqual([])
+  })
+
+  test('cópia do .env que falha: avisa e não lança nada', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a[0] === 'cp' ? { exitCode: 1, stdout: '' } : undefined) })
+    expect(t.log.toasts.at(-1)).toContain('.env da worktree')
+    expect(t.log.spawns).toEqual([])
+  })
+
+  test('stop e novo clique: reaproveita a worktree, não repete o exclude e o corretor volta', async ($, on) => {
+    const { t, ui } = await fixing($, on, { run: ownBranch })
+    await command($, 'qa stop')
+    await click(t, ui)
+    await click(t, ui)
+    expect(t.log.runs.filter(a => a[1] === 'worktree')).toHaveLength(1)
+    expect(t.files.get(`${REPO}/.git/info/exclude`)).toBe('.worktrees/\n/.env\n')
+    expect(types(t)).toEqual([QA_FIXER, QA_FIXER])
+  })
+
+  test('o fix.json de uma tentativa recusada não vale para a seguinte', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
+    await fixerEnds($, t)
+    await fixerEnds($, t, null)
+    expect(t.log.spawns[2]?.prompt).toContain('fix.json ausente ou inválido')
+  })
+
+  test('defeito que sumiu do veredito enquanto o corretor rodava: não reverificado', async ($, on) => {
+    const { t } = await fixing($, on)
+    t.files.set(`${t.runDir()}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP'))
+    await fixerEnds($, t)
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['o defeito sumiu do veredito da execução'] })
+  })
+
+  test('projeto sem Playwright: o teste de regressão não roda e vira pendência', async ($, on) => {
+    const { t } = await fixing($, on, {}, MATRIX)
+    await fixerEnds($, t)
+    expect(t.log.runs.some(a => a[0] === 'npx')).toBe(false)
+    const re = (cell: string) => `${outOf(t)}/reteste-1/${cell}/veredito.json`
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c1')]: verdictOf('c1', 'PASS') })
+    await finishAgent($, t)
+    await finishAgent($, t, { [re('c2')]: verdictOf('c2', 'PASS') })
+    expect(resultOf(t)).toMatchObject({ status: 'corrigido', regressionTest: 'e2e/qa-c1.d1.spec.ts', pending: ['teste de regressão não rodado'] })
   })
 })
