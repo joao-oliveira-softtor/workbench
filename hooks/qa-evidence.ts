@@ -211,8 +211,10 @@ function domainsAt(o: Rec): string[] {
   const hosts = stringsAt(o, 'allowedDomains')
   need(hosts.length <= MAX_DOMAINS, `allowedDomains: no máximo ${MAX_DOMAINS} itens`)
   hosts.forEach((h, i) => {
-    need(h !== 'localhost' && !h.startsWith('127.'), `allowedDomains[${i}]: o computador local já é acessível`)
-    need(HOST.test(h), `allowedDomains[${i}]: precisa ser um nome de host em minúsculas, com ponto, sem esquema, porta, caminho nem *`)
+    need(h !== 'localhost' && !h.endsWith('.localhost'), `allowedDomains[${i}]: o computador local já é acessível`)
+    // Tamanho antes do padrão (limites do DNS). Último rótulo começando com letra: nenhum IP, em qualquer notação (0x7f.1, 0177.0.0.1, 10.0.0.1).
+    // shortcut: nome público que aponta para o computador local por DNS (serviço de DNS coringa) não é barrado por sintaxe, só o IP direto, melhorar se isso virar risco real.
+    need(h.length <= 253 && h.split('.').every(l => l.length <= 63) && /^[a-z]/.test(h.slice(h.lastIndexOf('.') + 1)) && HOST.test(h), `allowedDomains[${i}]: precisa ser um nome de host em minúsculas, com ponto, sem esquema, porta, caminho nem *`)
   })
   need(new Set(hosts).size === hosts.length, 'allowedDomains: item repetido')
   return hosts

@@ -152,13 +152,20 @@ describe('parseMatrix', () => {
     ['allowedDomains com hífen na ponta', { allowedDomains: ['-cdn.exemplo.com'] }, 'allowedDomains'],
     ['allowedDomains com localhost', { allowedDomains: ['localhost'] }, 'allowedDomains'],
     ['allowedDomains com 127.0.0.1', { allowedDomains: ['127.0.0.1'] }, 'allowedDomains'],
-    ['allowedDomains com 127.exemplo.com', { allowedDomains: ['127.exemplo.com'] }, 'allowedDomains'],
+    ...['0x7f.1', '0x7f.0.0.1', '0177.0.0.1', '0x7f.0x0.0x0.0x1', '0.0.0.0', '0.1', '10.0.0.1', '192.168.0.1', '169.254.169.254', '1.2.3.4', 'sub.localhost', 'a.b.localhost'].map(
+      (host): [string, unknown, string] => [`allowedDomains com ${host}`, { allowedDomains: [host] }, 'allowedDomains'],
+    ),
+    ['allowedDomains com rótulo de 64 caracteres', { allowedDomains: [`${'a'.repeat(64)}.exemplo.com`] }, 'allowedDomains'],
+    ['allowedDomains com nome de 254 caracteres', { allowedDomains: [`${['a'.repeat(63), 'b'.repeat(63), 'c'.repeat(63), 'd'.repeat(58)].join('.')}.com`] }, 'allowedDomains'],
     ['allowedDomains repetido', { allowedDomains: ['cdn.exemplo.com', 'cdn.exemplo.com'] }, 'allowedDomains'],
     ['loginRoute vazio com outro perfil', { loginRoute: '' }, 'loginRoute'],
     ['loginRoute vazio com anonimo e outro perfil', { loginRoute: '', profiles: ['anonimo', 'admin'] }, 'loginRoute'],
     ['installCommand com variável antes do programa', { installCommand: 'CI=1 npm ci' }, 'installCommand'],
     ['startCommand com variável antes do programa', { startCommand: 'PORT={QA_PORT} npm run dev' }, 'startCommand'],
     ['testCommand com variável antes do programa', { testCommand: 'CI=1 npm test' }, 'testCommand'],
+    ['installCommand com = colado no programa', { installCommand: 'npm= ci' }, 'installCommand'],
+    ['installCommand com espaço antes da variável', { installCommand: ' A=1 npm ci' }, 'installCommand'],
+    ['startCommand com = no caminho do programa', { startCommand: './a=b/prog {QA_PORT}' }, 'startCommand'],
     ['campo faltando', { profiles: undefined }, 'profiles'],
     ['tipo errado', { cut: 'nada' }, 'cut'],
     ['sem células', { cells: [] }, 'cells'],
@@ -219,7 +226,16 @@ describe('allowedDomains, perfil anônimo e variável antes do programa', () => 
   test('allowedDomains: [] é o padrão; hosts válidos, até 10, passam', () => {
     expect(okOf({ allowedDomains: [] })).toBe(true)
     expect(okOf({ allowedDomains: ['fonts.exemplo.com', 'cdn-1.exemplo.com.br', 'a1.b2.c3.exemplo.org'] })).toBe(true)
+    expect(okOf({ allowedDomains: ['a'.repeat(63) + '.exemplo.com', 'xn--nxasmq6b.com'] })).toBe(true)
     expect(okOf({ allowedDomains: Array.from({ length: 10 }, (_, i) => `h${i}.exemplo.com`) })).toBe(true)
+  })
+
+  test('nenhum host aceito vira IP na hora de o navegador abrir', () => {
+    const accepted = ['127.exemplo.com', 'fonts.exemplo.com', 'cdn.exemplo.com.br', 'xn--nxasmq6b.com', 'a1.b2.c3.exemplo.org', 'cdn-1.exemplo.com']
+    for (const host of accepted) {
+      expect(okOf({ allowedDomains: [host] })).toBe(true)
+      expect(new URL(`http://${host}`).hostname).toBe(host)
+    }
   })
 
   test('ANON_PROFILE é "anonimo"; só ele permite loginRoute vazio', () => {
