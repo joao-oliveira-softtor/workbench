@@ -628,8 +628,9 @@ export async function writeFixResult(
 
 // Fim da fila: os testes das células PASS (da foto tirada no clique) vão para a pasta de testes da worktree, num commit próprio.
 export async function commitPassTests($: EngineInterface, runDir: string, matrix: Matrix, outcomes: Record<string, CellOutcome>, fixDir: string): Promise<void> {
-  if (matrix.testDir === '') return
+  // confere antes da saída sem pasta de testes: é por aqui que o fim da fila sabe que a worktree sumiu
   await assertFixDir($, fixDir)
+  if (matrix.testDir === '') return
   const dir = `${fixDir}/${matrix.testDir}`
   const copied: string[] = []
   for (const cell of matrix.cells.filter(c => outcomes[c.id]?.final === 'PASS')) {

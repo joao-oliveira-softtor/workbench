@@ -1115,6 +1115,17 @@ describe('QA: fase Corrigir, worktree que sumiu', () => {
     expect(t.log.submits.at(-1)).not.toContain(`qa/${t.runDir().split('/').pop()}`)
   })
 
+  test('fim da fila sem pasta de testes: o resumo também diz que a worktree sumiu, sem a pasta', async ($, on) => {
+    const { t } = await fixing($, on, {}, { ...FIX_MATRIX, testDir: '' })
+    await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }))
+    t.wt.lost = true
+    await tick(t)
+    await tick(t)
+    expect(t.log.toasts.at(-1)).toContain(LOST)
+    expect(t.log.submits.at(-1)).toContain('worktree de correção sumiu')
+    expect(t.log.submits.at(-1)).not.toContain(wtOf(t))
+  })
+
   test('reload com a worktree sumida: o app não sobe de novo nela e a fase para', async ($, on) => {
     const { t, ui } = await fixing($, on)
     const apps = t.log.apps.length
