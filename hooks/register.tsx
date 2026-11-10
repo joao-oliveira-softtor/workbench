@@ -780,29 +780,38 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   await update($, qaJob, cur => cur ?? { phase: 'run' as const, queue, total: queue.length, current: null })
 }
 
-async function runQaClick($: EngineInterface, step: QaStep): Promise<void> {
-  const env = qaEnv
-  if (env === null || qaBlocked !== null) {
-    $.ui.toast(qaBlocked ?? QA_OFF)
-    return
-  }
-  const flow = await read($, qaFlow)
-  if (step === 'plan') return qaPlan($, env, flow)
+// Portão da matriz em todo clique fora do `plan`: ausente volta ao começo; inválida avisa e fica.
+async function clickMatrixOf($: EngineInterface, flow: QaFlow): Promise<Matrix | null> {
   const loaded = await loadMatrix($, flow.runDir)
   switch (loaded.kind) {
     case 'missing':
       await update($, qaFlow, () => QA_START)
       $.ui.toast('QA: não achei o matriz.md desta execução; o botão voltou para o começo.')
-      return
+      return null
     case 'invalid':
       $.ui.toast(`QA: matriz inválida: ${loaded.error.slice(0, 120)}`)
-      return
+      return null
     case 'ok':
-      break
+      return loaded.matrix
     default:
       throw new Error('Caso não tratado: ' + String(loaded satisfies never))
   }
-  const matrix = loaded.matrix
+}
+
+// HEAD, raiz e tipos registrados: sem um deles o clique só avisa.
+function readyEnvOf($: EngineInterface): QaEnv | null {
+  if (qaEnv !== null && qaBlocked === null) return qaEnv
+  $.ui.toast(qaBlocked ?? QA_OFF)
+  return null
+}
+
+async function runQaClick($: EngineInterface, step: QaStep): Promise<void> {
+  const env = readyEnvOf($)
+  if (env === null) return
+  const flow = await read($, qaFlow)
+  if (step === 'plan') return qaPlan($, env, flow)
+  const matrix = await clickMatrixOf($, flow)
+  if (matrix === null) return
   switch (step) {
     case 'login':
       return sendQaStep($, flow, { ...flow, step: 'run' }, qaLoginPromptOf({ matrixPath: matrixPathOf(flow.runDir), matrix, qaRoot: env.qaRoot, toolsDir: toolsDirOf(env.home), home: env.home }))
@@ -927,6 +936,11 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
     await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
     return setCurrent($, env, await startCell($, env, flow.runDir, loaded.matrix, next, 1))
   }
+  return stepCurrent($, env, flow.runDir, loaded.matrix, c)
+}
+
+// O item em curso: espera, adota o agente sem id (trava e qaGuarded), ou avança quando o agente acabou.
+async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent): Promise<void> {
   const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
@@ -934,12 +948,12 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
     case 'adopt': {
       const id = step.agentId
       await update($, qaGuarded, ids => [...ids, id])
-      await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, guardCtxOf(env, loaded.matrix, flow.runDir, c.session, c.cdpPort)))
+      await $.fs.write(env.guardFile, guardStateTextOf(c.role, id, guardCtxOf(env, matrix, runDir, c.session, c.cdpPort)))
       await update($, qaJob, cur => (cur?.current?.item === c.item && cur.current.role === c.role ? { ...cur, current: { ...cur.current, agentId: id } } : cur))
       return
     }
     case 'ended':
-      return setCurrent($, env, await advanceCell($, env, flow.runDir, loaded.matrix, c))
+      return setCurrent($, env, await advanceCell($, env, runDir, matrix, c))
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
   }
@@ -947,13 +961,16 @@ async function stepQaJob($: EngineInterface, env: QaEnv): Promise<void> {
 
 // Roda no timer de 3 s. O clique e o pedido pendente são tirados da fila antes de qualquer `await`; os envios à sessão
 // esperam a sessão parar. O passo do trabalho não espera a sessão, mas nunca roda dois ao mesmo tempo.
-async function drainQa($: EngineInterface): Promise<void> {
+async function drainQaClick($: EngineInterface): Promise<void> {
   const step = qaQueued
-  if (step !== null && !(isMainTurn && (step === 'plan' || step === 'login'))) {
-    qaQueued = null
-    const ran = await settle(() => runQaClick($, step))
-    if (!ran.ok) $.ui.toast(`QA falhou: ${ran.error.slice(0, 120)}`)
-  }
+  if (step === null || (isMainTurn && (step === 'plan' || step === 'login'))) return
+  qaQueued = null
+  const ran = await settle(() => runQaClick($, step))
+  if (!ran.ok) $.ui.toast(`QA falhou: ${ran.error.slice(0, 120)}`)
+}
+
+async function drainQa($: EngineInterface): Promise<void> {
+  await drainQaClick($)
   const prompt = qaPending
   if (prompt !== null && !isMainTurn) {
     qaPending = null

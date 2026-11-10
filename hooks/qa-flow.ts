@@ -157,17 +157,24 @@ async function loadAuth($: EngineInterface, env: QaEnv, matrix: Matrix, profile:
   return true
 }
 
-// Abre o navegador da célula já logado e na largura dela; devolve a porta de depuração. Falhou: fecha e devolve null.
-export async function prepareSession($: EngineInterface, env: QaEnv, matrix: Matrix, cell: Cell, session: string): Promise<number | null> {
+// Abre, loga, ajusta a largura e lê a porta de depuração; qualquer passo que falha devolve null.
+async function openSession($: EngineInterface, env: QaEnv, matrix: Matrix, cell: Cell, session: string): Promise<number | null> {
   const isAnon = cell.profile === ANON_PROFILE
-  const port = await settle(async () => {
-    if ((await run($, ab(env, session, 'open', isAnon ? matrix.baseUrl : `${matrix.baseUrl}${matrix.loginRoute}`))) === null) return null
-    if (!isAnon && !(await loadAuth($, env, matrix, cell.profile, session))) return null
-    if ((await run($, ab(env, session, 'set', 'viewport', String(cell.width), String(VIEW_HEIGHT)))) === null) return null
-    const url = await run($, ab(env, session, 'get', 'cdp-url'))
-    const found = /^ws:\/\/[^/:]+:(\d+)\//.exec(url?.trim() ?? '')?.[1]
-    return found === undefined ? null : Number(found)
-  })
+  if ((await run($, ab(env, session, 'open', isAnon ? matrix.baseUrl : `${matrix.baseUrl}${matrix.loginRoute}`))) === null) return null
+  if (!isAnon && !(await loadAuth($, env, matrix, cell.profile, session))) return null
+  if ((await run($, ab(env, session, 'set', 'viewport', String(cell.width), String(VIEW_HEIGHT)))) === null) return null
+  return cdpPortOf(await run($, ab(env, session, 'get', 'cdp-url')))
+}
+
+// `ws://127.0.0.1:<porta>/…` → a porta.
+function cdpPortOf(url: string | null): number | null {
+  const found = /^ws:\/\/[^/:]+:(\d+)\//.exec(url?.trim() ?? '')?.[1]
+  return found === undefined ? null : Number(found)
+}
+
+// O navegador da célula já logado e na largura dela; devolve a porta de depuração. Falhou: fecha e devolve null.
+export async function prepareSession($: EngineInterface, env: QaEnv, matrix: Matrix, cell: Cell, session: string): Promise<number | null> {
+  const port = await settle(() => openSession($, env, matrix, cell, session))
   if (port.ok && port.value !== null) return port.value
   await closeSession($, env, session)
   return null
