@@ -1687,6 +1687,8 @@ export const register: Register = on => {
       const list = listOf(await read($, stale))
       return { text: `${list}\n(o Haiku está sendo consultado em segundo plano; o painel mostra o resultado)` }
     }
+    // Os dois cliques do Corrigir só confirmam se quem pede é a pessoa: o modelo (ou outra fonte) não roda nem para o QA.
+    if ((args === 'qa' || args === 'qa stop') && !isUserOrigin(e.origin.kind)) return { text: 'QA: só o usuário pode rodar ou parar o QA (digitando o comando ou pelo botão QA).' }
     if (args === 'qa stop') return { text: await stopQa($) }
     if (args === 'qa') return { text: (await pressQa($)) ?? 'QA: a etapa atual roda em segundo plano (veja o botão QA).' }
     await openPanel($)

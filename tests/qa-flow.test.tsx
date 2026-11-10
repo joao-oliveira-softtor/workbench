@@ -604,6 +604,23 @@ describe('QA: fase Executar', () => {
     expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
   })
 
+  test('/workbench qa e qa stop só valem pelo usuário: de outra origem respondem que não e nada muda', async ($, on) => {
+    const { t, ui } = await toRun($, on)
+    const from = async (args: string, origin: { kind: 'sdk' } | { kind: 'unclassified' } | { kind: 'plugin'; name: string }) =>
+      (await $.command.run({ command: 'workbench', args, origin, presentation: { isFullscreen: false, columns: 120 } })).text
+    for (const origin of [{ kind: 'plugin', name: 'outro' }, { kind: 'sdk' }, { kind: 'unclassified' }] as const) expect(await from('qa', origin)).toContain('só o usuário')
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(await label(ui)).toBe('QA: Executar')
+    await click(t, ui)
+    const guards = t.log.guards.length
+    expect(await from('qa stop', { kind: 'sdk' })).toContain('só o usuário')
+    expect(t.log.guards).toHaveLength(guards)
+    expect(await label(ui)).toMatch(/^QA: c1/)
+    await command($, 'qa stop')
+    expect(await label(ui)).toBe('QA: Executar')
+  })
+
   test('fim da execução com a gravação de {} falhando: o arquivo da trava é apagado e o aviso sai', async ($, on) => {
     const fail = { isOn: false }
     const { t, ui } = await toRun($, on, { failWrite: (path, text) => fail.isOn && path.includes('/guard-') && text === '{}' }, { ...MATRIX, cells: [cellOf('c1', 'admin')] })
