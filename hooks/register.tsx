@@ -1175,7 +1175,11 @@ async function lostFix($: EngineInterface, env: QaEnv, err: unknown): Promise<vo
 async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void> {
   const c = job.current
   if (c === null) return nextDefect($, f, job.queue)
-  if (!(await isAppUp($, f, c.port))) return setFixCurrent($, f, await finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], []), c)
+  if (!(await isAppUp($, f, c.port))) {
+    // Num reteste a tentativa já passou nas conferências: o commit dela fica (como no navegador do reteste que não abre).
+    const reason = 'o app não subiu pela worktree'
+    return setFixCurrent($, f, c.role === 'fixer' ? await unverifiedFix($, f, c, reason) : await finishDefect($, f, c, 'não reverificado', [reason], []), c)
+  }
   const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
@@ -1260,6 +1264,16 @@ async function finishDefect($: EngineInterface, f: FixCtx, c: QaCurrent, status:
   return null
 }
 
+// O defeito acaba sem reverificar antes de qualquer conferência aprovada: depois da tentativa 1, os commits das anteriores foram
+// recusados, então nada da correção fica na branch (desfaz até o começo do defeito e refaz a linha de base).
+async function unverifiedFix($: EngineInterface, f: FixCtx, c: QaCurrent, reason: string): Promise<null> {
+  if (c.attempt > 1) {
+    await undoFix($, f.fixDir, c.sha)
+    await rebaseline($, f)
+  }
+  return finishDefect($, f, c, 'não reverificado', [reason], [])
+}
+
 // Reteste de uma célula (runner, depois observer) contra o app da worktree; tentativa 0 é a conferência antes de corrigir.
 async function startRetest($: EngineInterface, f: FixCtx, c: QaCurrent, cellId: string, attempt: number): Promise<QaCurrent | null> {
   const cell = f.matrix.cells.find(x => x.id === cellId)
@@ -1287,15 +1301,15 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const attemptSha = await headOf($, f.fixDir)
   await update($, qaFix, x => (x === null ? x : { ...x, attemptSha }))
   const cdpPort = (await resetFixOut($, outDir)) ? await prepareSession($, f.env, f.matrix, target.cell, session, app.baseUrl) : null
-  if (cdpPort === null) return finishDefect($, f, c, 'não reverificado', ['não deu para abrir o navegador do corretor'], [])
+  if (cdpPort === null) return unverifiedFix($, f, c, 'não deu para abrir o navegador do corretor')
   const now = await $.clock.now()
   const item: QaCurrent = { ...c, role: 'fixer', agentId: null, at: now, isEnded: false, cell: '', session, cdpPort }
   const ctx = fixCtxOf(f, item)
-  if (!(await guardWritten($, f.env, guardStateTextOf('fixer', null, ctx), { cell: c.item, session }))) return finishDefect($, f, item, 'não reverificado', ['não deu para gravar a trava'], [])
+  if (!(await guardWritten($, f.env, guardStateTextOf('fixer', null, ctx), { cell: c.item, session }))) return unverifiedFix($, f, item, 'não deu para gravar a trava')
   const fix: FixPart = { defect: target.defect, worktree: f.fixDir, testDir: f.matrix.testDir, attempt: c.attempt, reasons: detail === undefined ? c.reasons : [...c.reasons, detail] }
   const prompt = spawnPromptOf('fixer', spawnInputOf({ env: f.env, matrix: app, cell: target.cell, outDir, session, cdpPort, startedAt: isoOf(now), endedAt: '', fix }))
   const launched = await launchedOf($, f.env, id => guardStateTextOf('fixer', id, ctx), await spawnQa($, 'fixer', prompt, `QA corrige ${c.item}`), item)
-  if (launched === null) return finishDefect($, f, item, 'não reverificado', ['o corretor foi recusado'], [])
+  if (launched === null) return unverifiedFix($, f, item, 'o corretor foi recusado')
   // Sem id, o contexto aceitaria qualquer agente do papel: fica `{}` até a adoção gravá-lo com o id.
   if (launched.agentId === null) await teardownQa($, f.env, null)
   return launched
@@ -1375,12 +1389,7 @@ async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
     case 'refuse':
       return judged($, f, c, target, [], { accepted: false, reasons: [check.reason], detail: check.detail })
     case 'unverified':
-      // Depois da tentativa 1, os commits das anteriores foram recusados: nada da correção fica na branch.
-      if (c.attempt > 1) {
-        await undoFix($, f.fixDir, c.sha)
-        await rebaseline($, f)
-      }
-      return finishDefect($, f, c, 'não reverificado', [check.reason], [])
+      return unverifiedFix($, f, c, check.reason)
     case 'ok':
       await update($, qaFix, x => (x === null ? null : { ...x, regression: check.regression, pending: check.pending }))
       // Reinicia o app para carregar a mudança, na mesma porta.
@@ -1420,7 +1429,7 @@ async function closeFix($: EngineInterface, f: FixCtx): Promise<void> {
   await teardownQa($, f.env, null)
   void refresh($, true).catch(() => {})
   if (lost !== null) $.ui.toast(`QA: ${lost}`)
-  qaPending = fixDonePromptOf({ reportPath, fixDir: f.fixDir, branch: fixBranchOf(runIdIn(f.runDir)) })
+  qaPending = fixDonePromptOf({ reportPath, worktree: lost === null ? { fixDir: f.fixDir, branch: fixBranchOf(runIdIn(f.runDir)) } : null })
 }
 
 // Roda no timer de 3 s. O clique e o pedido pendente são tirados da fila antes de qualquer `await`; os envios à sessão

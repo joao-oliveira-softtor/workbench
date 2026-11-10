@@ -496,10 +496,13 @@ export function runDonePromptOf(o: { reportPath: string; counts: string }): stri
   ].join('\n')
 }
 
-export function fixDonePromptOf(o: { reportPath: string; fixDir: string; branch: string }): string {
+// `worktree` null: ela sumiu no fim da fila, e o resumo não aponta para a pasta nem para a branch.
+export function fixDonePromptOf(o: { reportPath: string; worktree: { fixDir: string; branch: string } | null }): string {
   return [
     `A correção do QA terminou. Leia o relatório em ${o.reportPath} e resuma para o usuário, em linguagem simples, o que foi corrigido e o que não foi (com o motivo).`,
-    `Diga onde está a worktree (${o.fixDir}) e qual é a branch (${o.branch}), e pergunte se ele quer abrir um PR. O mod nunca faz push.`,
+    o.worktree === null
+      ? 'Diga também que a worktree de correção sumiu antes do fim (os testes das células que passaram não foram copiados para ela).'
+      : `Diga onde está a worktree (${o.worktree.fixDir}) e qual é a branch (${o.worktree.branch}), e pergunte se ele quer abrir um PR. O mod nunca faz push.`,
   ].join('\n')
 }
 

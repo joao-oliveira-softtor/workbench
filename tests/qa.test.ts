@@ -739,8 +739,15 @@ describe('textos para a sessão principal', () => {
   })
 
   test('fim da correção: relatório, worktree, branch e a pergunta sobre PR sem push', () => {
-    const t = fixDonePromptOf({ reportPath: '/q/app/1/correcoes.md', fixDir: '/home/ana/app/.worktrees/qa-1', branch: 'qa/1' })
+    const t = fixDonePromptOf({ reportPath: '/q/app/1/correcoes.md', worktree: { fixDir: '/home/ana/app/.worktrees/qa-1', branch: 'qa/1' } })
     for (const v of ['/q/app/1/correcoes.md', '/home/ana/app/.worktrees/qa-1', 'qa/1', 'PR', 'push']) expect(t).toContain(v)
+  })
+
+  test('fim da correção com a worktree sumida: diz que ela sumiu, sem pasta, branch nem PR', () => {
+    const t = fixDonePromptOf({ reportPath: '/q/app/1/correcoes.md', worktree: null })
+    expect(t).toContain('/q/app/1/correcoes.md')
+    expect(t).toContain('worktree de correção sumiu')
+    for (const v of ['.worktrees', 'qa/1', 'PR']) expect(t).not.toContain(v)
   })
 
   test('aviso do primeiro clique em Corrigir traz os três comandos, a pasta e o prazo', () => {

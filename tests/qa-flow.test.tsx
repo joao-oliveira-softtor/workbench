@@ -173,7 +173,12 @@ async function boot($: Engine, on: On, over: Over = {}) {
     }
     if (args[0] === 'reset') wt.head = args[3] ?? wt.head
     if (args[0] === 'reset' || args[0] === 'clean') wt.status = ''
-    if (args[0] === 'log') return ok(wt.commits.map((_, i) => `f${i} corrige`).join('\n'))
+    // `<sha>..HEAD`: os commits entre os dois (`cN` é o N-ésimo; o reset volta o HEAD e o commit desfeito sai do log).
+    if (args[0] === 'log') {
+      const at = (sha: string) => (sha === 'abc123' ? 0 : Number(sha.slice(1)))
+      const from = at((args.at(-1) ?? '').split('..')[0] ?? '')
+      return ok(wt.commits.slice(from, at(wt.head)).map((_, i) => `f${from + i} corrige`).join('\n'))
+    }
     return ok()
   }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -1103,6 +1108,11 @@ describe('QA: fase Corrigir, worktree que sumiu', () => {
     expect(t.files.get(`${t.runDir()}/correcoes.md`)).toContain('não reverificado')
     expect(t.log.toasts.at(-1)).toContain(LOST)
     expect(await label(ui)).toBe('QA')
+    // O resumo para a sessão diz que a worktree sumiu, sem apontar para a pasta nem para a branch.
+    await tick(t)
+    expect(t.log.submits.at(-1)).toContain('worktree de correção sumiu')
+    expect(t.log.submits.at(-1)).not.toContain(wtOf(t))
+    expect(t.log.submits.at(-1)).not.toContain(`qa/${t.runDir().split('/').pop()}`)
   })
 
   test('reload com a worktree sumida: o app não sobe de novo nela e a fase para', async ($, on) => {
@@ -1221,7 +1231,50 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend', subject: 'Corrige a API' }))
     expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
     expect(t.wt.head).toBe('abc123')
-    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 2 })
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 2, commits: [] })
+  })
+
+  // A tentativa 1 é recusada depois do commit (`npm test` falha): a 2 que acaba antes de qualquer conferência leva esse commit embora.
+  const npmFails = (a: readonly string[]) => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined)
+  const opens = { n: 0 }
+  const app = { down: 0 }
+  const secondAttemptExits: [string, () => Over, string][] = [
+    ['navegador do corretor que não abre', () => ((opens.n = 0), { run: a => npmFails(a) ?? (a[0] === AB && a[3] === 'open' && ++opens.n === 2 ? { exitCode: 1, stdout: '' } : undefined) }), 'não deu para abrir o navegador do corretor'],
+    ['trava que não grava', () => ({ run: npmFails, failWrite: (p, text) => /\/guard-/.test(p) && text.includes('-f2"') }), 'não deu para gravar a trava'],
+    ['corretor recusado', () => ({ run: npmFails, spawns: [{}, { deny: 'x' }] }), 'o corretor foi recusado'],
+    ['app que não sobe com o corretor rodando', () => ((app.down = 0), { run: a => npmFails(a) ?? (a[0] === 'curl' && a.includes('http://localhost:4100') && app.down > 0 && app.down-- > 0 ? { exitCode: 7, stdout: '' } : undefined) }), 'o app não subiu pela worktree'],
+  ]
+  for (const [name, over, reason] of secondAttemptExits) {
+    test(`tentativa 2, ${name}: desfaz até o começo do defeito e o resultado não lista o commit desfeito`, async ($, on) => {
+      const { t } = await fixing($, on, over())
+      await fixerEnds($, t)
+      if (reason === 'o app não subiu pela worktree') {
+        await start($)
+        app.down = 30
+        await t.clock.advance(66_000)
+      }
+      expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+      expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 2, commits: [] })
+      expect(resultOf(t).reasons.at(-1)).toBe(reason)
+    })
+  }
+
+  test('tentativa 2 aprovada nas conferências e app que não sobe no reteste: nada é desfeito', async ($, on) => {
+    const npm = { n: 0 }
+    const down = { n: 0 }
+    const run = (a: readonly string[]) => {
+      if (a.join(' ') === 'npm test' && npm.n++ === 0) return { exitCode: 1, stdout: 'FALHOU' }
+      return a[0] === 'curl' && a.includes('http://localhost:4100') && down.n > 0 && down.n-- > 0 ? { exitCode: 7, stdout: '' } : undefined
+    }
+    const { t } = await fixing($, on, { run })
+    await fixerEnds($, t)
+    await fixerEnds($, t)
+    expect(types(t)).toEqual([QA_FIXER, QA_FIXER, QA_RUNNER])
+    await start($)
+    down.n = 30
+    await t.clock.advance(66_000)
+    expect(t.log.runs).not.toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 2, reasons: ['o comando npm test falhou (código 1)', 'o app não subiu pela worktree'], commits: ['f0 corrige', 'f1 corrige'] })
   })
 
   test('reload entre o commit e o fim das conferências: segue da etapa depois do commit, sem recusa nem tentativa a mais', async ($, on) => {
