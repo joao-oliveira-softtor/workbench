@@ -1278,3 +1278,82 @@ describe('sessão salva do navegador', () => {
     })
   })
 })
+
+// Bordas que o teste de mutação achou sem teste.
+describe('ub-mode: bordas da evidência', () => {
+  const errorOf = (patch: object): string => {
+    const r = parseMatrix(mdOf({ ...matrixOf(), ...patch }))
+    return r.ok ? '' : r.error
+  }
+
+  test('célula que é lista, texto ou null: o erro diz que precisa ser objeto', () => {
+    for (const cell of [[], 'x', null]) expect(errorOf({ cells: [cell] })).toBe('cells[0]: precisa ser um objeto')
+  })
+
+  test('limites que valem: status 599, nome de 253 caracteres, um passo, 12 células', () => {
+    const host = [`a${'a'.repeat(62)}`, 'b'.repeat(63), 'c'.repeat(63), 'd'.repeat(61)].join('.')
+    expect(host).toHaveLength(253)
+    expect(errorOf({ allowedDomains: [host] })).toBe('')
+    expect(errorOf({ cells: [cellOf({ expectedStatus: [{ url: '/a', status: 599 }] })] })).toBe('')
+    expect(errorOf({ cells: [cellOf({ steps: ['abrir'] })] })).toBe('')
+    expect(errorOf({ cells: Array.from({ length: 12 }, (_, i) => cellOf({ id: `c${i}` })) })).toBe('')
+  })
+
+  test('sem perfis, loginRoute vazio é recusado pelo loginRoute', () => {
+    expect(errorOf({ profiles: [], loginRoute: '' })).toContain('loginRoute')
+  })
+
+  test('reportOf: requisito sem célula, célula sem resultado e prova de cada critério', () => {
+    const m = matrixOf({
+      requirements: [{ id: 'r1', text: 'um', source: 's' }, { id: 'r2', text: 'nada', source: 's' }],
+      cells: [cellOf({ id: 'c1', criteria: [crit, crit] }), cellOf({ id: 'c2' }), cellOf({ id: 'c3' })],
+    })
+    const evidence = [{ criterion: 0, proof: 'prova A' }, { criterion: 1, proof: 'prova B' }]
+    const report = reportOf({ runId: 'r', matrix: m, outcomes: { c1: outcomeOf('PASS', verdictOf({ id: 'c1', evidence })), c3: outcomeOf('NÃO VERIFICADO') } })
+    expect(report).toContain('### r2 · nada\n- (nenhuma célula)')
+    expect(report).not.toContain('### r1 · um\n- (nenhuma célula)')
+    expect(report).toContain('- critério 0: prova A\n- critério 1: prova B')
+    // registro sem veredito ou sem prova (o mod não grava assim, mas o relatório não quebra)
+    const loose = reportOf({ runId: 'r', matrix: matrixOf(), outcomes: { c1: outcomeOf('PASS', null) } })
+    expect(loose).toContain('- critério 0: (sem prova)')
+    expect(reportOf({ runId: 'r', matrix: matrixOf(), outcomes: { c1: outcomeOf('PASS', verdictOf({ evidence: [] })) } })).toContain('- critério 0: (sem prova)')
+  })
+
+  test('fixQueueOf: id sem defeito ou com parte a mais sai', () => {
+    const outcomes = { c1: outcomeOf('FAIL-VISUAL', verdictOf({ verdict: 'FAIL-VISUAL', defects: [defectOf()] })) }
+    expect(fixQueueOf(['c1', 'c1.d1.x', 'c1.d1'], outcomes)).toEqual(['c1.d1'])
+  })
+
+  test('diffCheckOf: renomear dá só o motivo do caminho antigo, e a supressão cita o caminho sem o `+++ b/`', () => {
+    expect(diffCheckOf('R100\ttests/a.ts\tsrc/b.ts', '').reasons).toEqual(['teste ou configuração de teste alterado ou apagado: tests/a.ts'])
+    const patch = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n+// eslint-disable x\n'
+    expect(diffCheckOf('M\tsrc/a.ts', patch).reasons).toEqual(['supressão de regra (eslint-disable) em src/a.ts'])
+    // cabeçalho que o padrão não lê (`\r` no fim): o arquivo fica o anterior
+    const crlf = 'diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\r\n@@ -1 +1 @@\n+// eslint-disable x\n'
+    expect(diffCheckOf('M\tsrc/a.ts', crlf).reasons).toEqual(['supressão de regra (eslint-disable) em (arquivo desconhecido)'])
+  })
+
+  describe('acceptFixOf: célula sem registro de antes ou de depois', () => {
+    const target = defectOf({ id: 'd1', kind: 'funcional', source: 'criterio', rule: '0', where: 'form' })
+    const novo = defectOf({ id: 'd9', source: 'rede', kind: 'funcional', where: 'POST /x' })
+    const after = { c1: { result: null, verdict: verdictOf({ verdict: 'FAIL-APP', defects: [novo] }) } }
+
+    test('sem antes (ausente ou sem veredito): o defeito fail do reteste é novo', () => {
+      for (const before of [{}, { c1: { result: null, verdict: null } }]) {
+        const r = acceptFixOf({ target: { cell: 'c1', defect: target }, cells: [cellOf()], before, after })
+        expect(r.reasons).toContain('c1: defeito novo (rede||post /x)')
+      }
+    })
+
+    test('sem depois: a célula alvo de critério não tem evidência nem prova', () => {
+      const r = acceptFixOf({ target: { cell: 'c1', defect: target }, cells: [cellOf()], before: {}, after: {} })
+      expect(r.reasons).toContain('c1: sem evidência do reteste da célula alvo')
+      expect(r.reasons).toContain('c1: o critério 0 do defeito alvo continua sem prova')
+    })
+  })
+
+  test('fixReportOf: lista vazia vira "nenhum"', () => {
+    const r: FixResult = { defect: 'c1.d1', status: 'desistiu', attempts: 1, commits: [], reasons: [], retest: [], before: 'a.png', after: 'b.png', pending: [] }
+    expect(fixReportOf([r])).toContain('- commits: nenhum')
+  })
+})

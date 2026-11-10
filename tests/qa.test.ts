@@ -55,6 +55,7 @@ import {
   sessionOf,
   spawnPromptOf,
   statusSumOf,
+  storedFlowOf,
   toolsDirOf,
   wrapperOf,
 } from '../hooks/qa'
@@ -785,5 +786,36 @@ describe('handbackAgentOf', () => {
     expect(handbackAgentOf('oi <agent-message from="ag-42">')).toBeNull()
     expect(handbackAgentOf('')).toBeNull()
     expect(handbackAgentOf('<agent-message>sem id</agent-message>')).toBeNull()
+  })
+})
+
+// Bordas que o teste de mutação achou sem teste.
+describe('ub-mode: bordas de qa.ts', () => {
+  test('statusSumOf usa o FNV-1a de 32 bits de todo o texto', () => {
+    expect(statusSumOf('')).toBe('0:811c9dc5')
+    expect(statusSumOf('a')).toBe('1:e40c292c')
+  })
+
+  describe('storedFlowOf', () => {
+    const ROOT = '/home/u/.claude/workbench-qa/app-123456'
+    const RUN = `${ROOT}/20261109-1000`
+
+    test('volta a etapa com o fixDir vazio', () => {
+      expect(storedFlowOf({ step: 'fix', runDir: RUN, fixDir: '/x' }, ROOT)).toEqual({ step: 'fix', runDir: RUN, fixDir: '' })
+    })
+
+    test('recusa forma errada', () => {
+      for (const raw of [null, 'x', 5, {}, { step: 'outro', runDir: RUN, fixDir: '' }, { step: 'run', runDir: 7, fixDir: '' }, { step: 'run', runDir: RUN }]) {
+        expect(storedFlowOf(raw, ROOT)).toBeNull()
+      }
+    })
+
+    test('recusa pasta fora da raiz do QA, funda demais ou com outro nome', () => {
+      for (const runDir of [`/tmp/20261109-1000`, `${ROOT}x/20261109-1000`, `${ROOT}/a/20261109-1000`, `${ROOT}/2026-1109`, ROOT, `${ROOT}/`]) {
+        expect(storedFlowOf({ step: 'run', runDir, fixDir: '' }, ROOT)).toBeNull()
+      }
+      // mesmo tamanho da raiz, mas fora dela
+      expect(storedFlowOf({ step: 'run', runDir: `/${'x'.repeat(ROOT.length - 1)}/20261109-1000`, fixDir: '' }, ROOT)).toBeNull()
+    })
   })
 })

@@ -1333,3 +1333,110 @@ describe('guardDecisionOf: papel remover', () => {
     expect(guardDecisionOf('runner', inputOf('Bash', { command: LINES[2] }), ctx, SAME_FS).decision).toBe('deny')
   })
 })
+
+// Bordas que o teste de mutação achou sem teste: cada caso cai num lado diferente de uma comparação da trava.
+describe('ub-mode: bordas da trava', () => {
+  const UNSAFE = 'comando com encadeamento, expansão ou aspas que a trava não interpreta'
+  const OUTSIDE = 'comando fora da lista liberada pela trava de QA'
+  const reason = (role: QaRole, command: string, ctx: GuardCtx = CTX, cwd: string = CWD) => verdict(role, command, ctx, cwd).reason
+
+  test('til: só `~/` solto no começo de palavra e fora de aspas não conta como expansão', () => {
+    expect(reason('runner', 'cat ~/notas.txt')).toBe(OUTSIDE)
+    expect(reason('runner', '~/bin/x')).toBe(OUTSIDE)
+    for (const command of ["cat '~/notas.txt'", 'cat a~/x', 'cat ~x', 'cat a~2', 'cat HEAD~', 'cat x/~']) expect(reason('runner', command)).toBe(UNSAFE)
+    // `HEAD~<dígito>` é referência do git, não til
+    expect(reason('runner', 'cat HEAD~2')).toBe(OUTSIDE)
+  })
+
+  test('`~usuario` resolve ao lado da home: o checkout principal continua negado', () => {
+    expect(decision('runner', 'cat ~u/app/src/a.ts')).toBe('deny')
+  })
+
+  test('aspas no primeiro caractere, espaço no começo e espaço duplo não mudam as palavras', () => {
+    expect(decision('runner', "'curl' http://localhost:3000")).toBe('allow')
+    expect(decision('runner', ' curl http://localhost:3000')).toBe('allow')
+    expect(decision('runner', 'curl  http://localhost:3000')).toBe('allow')
+  })
+
+  test('glob nunca é liberado, mesmo num caminho que a trava libera', () => {
+    expect(decision('fixer', `ls ${RUN}/*`)).toBe('pass')
+    expect(reason('fixer', `ls ${RUN}/*`)).toBe(UNSAFE)
+  })
+
+  test('candidato depois do primeiro `=`, inclusive quando a palavra começa com `=`', () => {
+    expect(decision('runner', 'tool =/home/u/app/x')).toBe('deny')
+  })
+
+  test('git branch: só opção de apagar nega; `--`, `--list` e opção antes do subcomando não', () => {
+    for (const command of ['git branch --list', 'git branch --', 'git -D branch', `git -C ${FIX} log -d`]) expect(decision('fixer', command)).toBe('pass')
+    expect(decision('fixer', 'git branch --de x')).toBe('deny')
+  })
+
+  test('opção global do git: só a desconhecida sem `=` pode esconder o subcomando nas duas palavras seguintes', () => {
+    expect(decision('fixer', 'git -C push --version')).toBe('pass')
+    expect(decision('fixer', 'git --x=1 log push')).toBe('pass')
+    expect(decision('fixer', 'git --x a push')).toBe('deny')
+  })
+
+  test('docker logs: valor de opção com caminho fora de runDir, opção com `=` desconhecida e valor que falta', () => {
+    expect(decision('observer', 'docker logs --since /etc/x api')).toBe('pass')
+    expect(decision('observer', `docker logs --since ${RUN}/x=/etc api`)).toBe('pass')
+    expect(decision('observer', `docker logs --since ${RUN}/a=${RUN}/y api`)).toBe('allow')
+    expect(decision('observer', 'docker logs --since =http://evil.com/ api', CTX, RUN)).toBe('pass')
+    expect(decision('observer', 'docker logs --tail -5 api')).toBe('pass')
+    expect(decision('observer', 'docker logs api --tail')).toBe('pass')
+    expect(decision('observer', 'docker logs --foo=1 api')).toBe('pass')
+  })
+
+  test('agent-browser: select com dois valores, scroll sem direção e network com outro posicional', () => {
+    expect(decision('runner', `${AB_S} select sel a`)).toBe('allow')
+    expect(decision('runner', `${AB_S} scroll sideways`)).toBe('pass')
+    expect(decision('runner', `${AB_S} network clear`)).toBe('pass')
+    expect(decision('runner', `${AB_S} network requests x`)).toBe('pass')
+    expect(decision('runner', `${AB_S} scroll up x`)).toBe('pass')
+    expect(decision('runner', `${AB_S} screenshot ${RUN.slice(1)}/a.png`)).toBe('pass')
+  })
+
+  test('impeccable: só `detect`, e nunca sem porta no contexto', () => {
+    expect(decision('runner', `${IMP} scan --cdp 45655`)).toBe('pass')
+    expect(decision('runner', `${IMP} detect --cdp null`, { ...CTX, cdpPort: null })).toBe('pass')
+  })
+
+  test('curl: `@` em qualquer palavra e o write-out que grava arquivo', () => {
+    expect(decision('runner', 'curl http://localhost:3000 --data=@/etc/passwd')).toBe('pass')
+    expect(decision('runner', 'curl -w x http://localhost:3000')).toBe('allow')
+    expect(decision('runner', 'curl -w %output http://localhost:3000')).toBe('pass')
+    expect(decision('runner', 'curl -H %output http://localhost:3000')).toBe('allow')
+  })
+
+  test('git da worktree: caminho absoluto fora dela depois de `--`', () => {
+    expect(decision('fixer', `git -C ${FIX} diff -- /etc/passwd`)).toBe('pass')
+  })
+
+  test('busca: arquivo oculto, padrão sem caminho, o primeiro argumento e valor de opção que parece opção', () => {
+    expect(decision('fixer', `grep -n x ${FIX}/src/.oculto.ts`)).toBe('pass')
+    expect(decision('fixer', 'grep foo')).toBe('pass')
+    expect(decision('fixer', `grep foo ${FIX}/src/a.ts`)).toBe('allow')
+    expect(decision('fixer', `grep -A -1 x ${FIX}/src/a.ts`)).toBe('pass')
+    expect(decision('fixer', `find ${FIX}`)).toBe('allow')
+  })
+
+  describe('guardDecisionOf', () => {
+    const stateOf = (over: Record<string, unknown> = {}) => JSON.stringify({ role: 'fixer', agentId: null, ctx: CTX, ...over })
+    const inputOf = (over: Record<string, unknown> = {}) => ({ agent_id: 'a1', cwd: CWD, tool_name: 'Read', tool_input: { file_path: `${RUN}/a.png` }, ...over })
+    const guard = (role: string, input: unknown, text: string = stateOf()) => guardDecisionOf(role, input, text, SAME_FS)
+
+    test('o motivo diz o que falhou: papel, contexto e forma da entrada', () => {
+      expect(guard('fixer', inputOf()).decision).toBe('allow')
+      expect(guard('boss', inputOf()).reason).toBe('papel desconhecido: boss')
+      expect(guard('fixer', inputOf(), stateOf({ ctx: { ...CTX, origins: ['não é url'] } })).reason).toBe('contexto de QA ausente ou inválido')
+      const shape = 'entrada do hook com forma inesperada'
+      for (const over of [{ tool_name: 5 }, { tool_input: 'x' }, { cwd: 'rel' }, { cwd: undefined }]) expect(guard('fixer', inputOf(over)).reason).toBe(shape)
+    })
+
+    test('remover com uma linha só', () => {
+      const one = removerStateTextOf(['git -C /repo worktree prune'])
+      expect(guardDecisionOf('remover', { agent_id: 'r1', tool_name: 'Bash', tool_input: { command: 'git -C /repo worktree prune' } }, one, SAME_FS).decision).toBe('allow')
+    })
+  })
+})
