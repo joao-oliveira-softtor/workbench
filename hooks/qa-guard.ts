@@ -405,8 +405,8 @@ const SEARCH_SPECS = new Map<string, SearchSpec>([
 // Por isso só extensões de código, que nenhum `.env*` usa.
 // Sem json, yaml, txt, log e afins: costumam guardar segredo (`.creds.local.json`) ou saída.
 const CODE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'sass', 'less', 'html', 'vue', 'svelte', 'md', 'mdx', 'py', 'go', 'rs', 'java', 'php', 'rb', 'sql', 'graphql', 'prisma', 'svg']
-// tipos do rg cujos globs são só `*.<extensão>` (`sh` traz `.env`; `ruby`, `.irbrc`)
-const RG_TYPES = ['ts', 'js', 'css', 'html', 'md', 'py', 'go', 'rust', 'java', 'php', 'sql', 'vue', 'svelte', 'sass', 'less']
+// tipos do rg cujos globs são só `*.<extensão>` de código (`sh` traz `.env`; `ruby`, `.irbrc`; `java`, `*.properties`)
+const RG_TYPES = ['ts', 'js', 'css', 'html', 'md', 'py', 'go', 'rust', 'php', 'sql', 'vue', 'svelte', 'sass', 'less']
 // a forma `*.ext` (ou `**/*.ext`) já recusa glob cujo nome começa com ponto
 const isCodeGlob = (v: string): boolean => CODE_EXTS.includes(/^(\*\*\/)?\*\.([A-Za-z0-9]+)$/.exec(v)?.[2] ?? '')
 // o grep do Bash do Claude Code é o ugrep com `--hidden`: numa pasta ele lê os ocultos que o `.gitignore` de cima não cobre

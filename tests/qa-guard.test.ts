@@ -1159,7 +1159,7 @@ describe('rodada 5: busca sem extensão que guarda segredo ou saída', () => {
       expect(fx(`grep -n --include "*.${ext}" X ${FIX}/src/a.ts`)).toBe('pass')
       expect(fx(`grep -n X ${FIX}/src/a.${ext}`)).toBe('pass')
     }
-    for (const t of ['json', 'yaml', 'toml', 'txt']) expect(fx(`rg -n -t ${t} X ${FIX}`)).toBe('pass')
+    for (const t of ['json', 'yaml', 'toml', 'txt', 'java']) expect(fx(`rg -n -t ${t} X ${FIX}`)).toBe('pass')
     for (const g of ['.x.ts', '.*.ts', '**/.*.ts', '**/.x/*.ts']) expect(fx(`rg -n -g "${g}" X ${FIX}`)).toBe('pass')
     expect(fx(`rg -n -g "*.ts" X ${FIX}`)).toBe('allow')
   })
