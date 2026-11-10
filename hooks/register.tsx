@@ -1715,13 +1715,13 @@ export const register: Register = on => {
 
   // Nunca segura o prompt: sem chamada de modelo nem de armazenamento, só soma a instrução de delegar ao `context`.
   on('prompt.submit', async ($, e, next) => {
-    // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
-    const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
-    if (handback !== null && (await read($, qaGuarded)).includes(handback)) return { drop: 'workbench: o relatório do agente de QA é lido pelo mod' }
-    // Um comando do EGM que entrou avança a etapa do botão EGM (e guarda o doc no review). Nunca segura o prompt.
-    const flow = e.command === undefined ? null : planAfter(e.command)
-    if (flow !== null) void update($, planFlow, () => flow).catch(() => {})
     try {
+      // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
+      const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
+      if (handback !== null && (await read($, qaGuarded)).includes(handback)) return { drop: 'workbench: o relatório do agente de QA é lido pelo mod' }
+      // Um comando do EGM que entrou avança a etapa do botão EGM (e guarda o doc no review). Nunca segura o prompt.
+      const flow = e.command === undefined ? null : planAfter(e.command)
+      if (flow !== null) void update($, planFlow, () => flow).catch(() => {})
       const isOpen = shouldDelegate({
         isOn: isDelegateOn,
         length: e.text.length,
@@ -1731,7 +1731,7 @@ export const register: Register = on => {
       })
       if (isOpen) return next({ ...e, context: [...(e.context ?? []), DELEGATE_CONTEXT] })
     } catch {
-      // A delegação é só conselho: um erro aqui não pode impedir o prompt de entrar.
+      // Supressão do aviso e delegação são só conveniência: um erro aqui não pode impedir o prompt de entrar.
     }
     return next(e)
   })
@@ -1757,8 +1757,7 @@ export const register: Register = on => {
     const env = qaEnv
     if (env === null) return { deny: qaBlocked ?? QA_OFF }
     return authReplyOf($, env, (await read($, qaFlow)).runDir, call.profile, await $.clock.now())
-  })
-
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'qa_auth: a consulta falhou' }))
 
   // Só o loop principal conta (subagentes e a fork da compactação trazem agentId): a compactação espera a sessão parar.
   on('turn.start', async (_$, e, next) => {
