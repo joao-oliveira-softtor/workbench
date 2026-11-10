@@ -1108,12 +1108,16 @@ describe('QA: fase Corrigir, worktree que sumiu', () => {
   test('reload com a worktree sumida: o app não sobe de novo nela e a fase para', async ($, on) => {
     const { t, ui } = await fixing($, on)
     const apps = t.log.apps.length
+    const closes = () => t.log.runs.filter(a => a[0] === AB && a.includes('close')).length
+    const closed = closes()
     await start($)
     t.wt.lost = true
     await tick(t)
     expect(t.log.apps).toHaveLength(apps)
     expect(t.log.toasts.at(-1)).toContain(LOST)
     expect(t.log.guards.at(-1)).toBe('{}')
+    // O navegador logado do corretor fecha.
+    expect(closes()).toBe(closed + 1)
     expect(await label(ui)).toBe('QA: Corrigir')
   })
 })
