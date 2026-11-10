@@ -509,9 +509,16 @@ async function launchRemoval($: EngineInterface, job: { key: string }): Promise<
 async function clearRemoval($: EngineInterface): Promise<void> {
   await update($, removal, () => null)
   const env = qaEnv
-  if (env === null) return
-  const wrote = await settle(() => $.fs.write(env.removerFile, '{}'))
-  if (!wrote.ok) await settle(() => $.process.run(['rm', '-f', env.removerFile]))
+  if (env !== null) await zeroGuard($, env.removerFile)
+}
+
+// Zera um arquivo de trava: grava `{}` ou, se a gravação falha, apaga o arquivo (o hook nega quando ele não existe, então o
+// contexto antigo nunca fica valendo). Devolve o erro da gravação; null = gravou.
+async function zeroGuard($: EngineInterface, file: string): Promise<string | null> {
+  const wrote = await settle(() => $.fs.write(file, '{}'))
+  if (wrote.ok) return null
+  await settle(() => $.process.run(['rm', '-f', file]))
+  return wrote.error
 }
 
 // Idempotente: o turn.complete e o drainRemove podem chegar os dois.
@@ -1031,13 +1038,10 @@ async function launchObserver($: EngineInterface, env: QaEnv, ctx: GuardCtx, mat
 }
 
 // Desmonta o que um item deixou aberto: a trava nega todo agente e a sessão do navegador fecha.
-// A gravação de `{}` que falha não deixa o contexto antigo valendo: o arquivo é apagado (o hook nega quando ele não existe).
 async function teardownQa($: EngineInterface, env: QaEnv, current: QaCurrent | null | undefined): Promise<void> {
-  const wrote = await settle(() => $.fs.write(env.guardFile, '{}'))
+  const failed = await zeroGuard($, env.guardFile)
   if (current) await closeSession($, env, current.session)
-  if (wrote.ok) return
-  await settle(() => $.process.run(['rm', '-f', env.guardFile]))
-  $.ui.toast(`QA: não deu para zerar a trava (${wrote.error.slice(0, 80)}); o arquivo dela foi apagado.`)
+  if (failed !== null) $.ui.toast(`QA: não deu para zerar a trava (${failed.slice(0, 80)}); o arquivo dela foi apagado.`)
 }
 
 // Os agentes de QA vivos agora nunca serão adotados por um item novo (stop, ou item que acabou sem conhecer o seu agente).
@@ -1058,7 +1062,7 @@ async function closeRun($: EngineInterface, env: QaEnv, runDir: string, matrix: 
   const counts = await writeReport($, runDir, matrix)
   await setFlow($, f => ({ ...f, step: 'fix' as const }))
   await update($, qaJob, () => null)
-  await $.fs.write(env.guardFile, '{}')
+  await teardownQa($, env, null)
   qaPending = runDonePromptOf({ reportPath: reportPathOf(runDir), counts })
 }
 

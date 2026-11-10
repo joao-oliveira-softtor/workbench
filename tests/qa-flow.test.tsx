@@ -604,6 +604,24 @@ describe('QA: fase Executar', () => {
     expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
   })
 
+  test('fim da execução com a gravação de {} falhando: o arquivo da trava é apagado e o aviso sai', async ($, on) => {
+    const fail = { isOn: false }
+    const { t, ui } = await toRun($, on, { failWrite: (path, text) => fail.isOn && path.includes('/guard-') && text === '{}' }, { ...MATRIX, cells: [cellOf('c1', 'admin')] })
+    await click(t, ui)
+    await tick(t)
+    await ended($, 'a1')
+    await tick(t)
+    await tick(t)
+    t.files.set(`${t.runDir()}/celulas/c1/veredito.json`, verdictOf('c1', 'PASS'))
+    await ended($, 'a2')
+    await tick(t)
+    fail.isOn = true
+    await tick(t)
+    expect(await label(ui)).toBe('QA: Corrigir')
+    expect(t.log.runs).toContainEqual(['rm', '-f', guardPathOf(t)])
+    expect(t.log.toasts.at(-1)).toContain('não deu para zerar a trava')
+  })
+
   test('adoção: lançamento sem agentId adota o agente vivo do tipo, que entra na trava e em qaGuarded', async ($, on) => {
     const { t } = await running($, on, { spawns: [{ unlisted: true }] })
     expect(t.guard()).toMatchObject({ role: 'runner', agentId: null })
