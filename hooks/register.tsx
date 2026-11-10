@@ -1209,6 +1209,13 @@ async function isAppUp($: EngineInterface, f: FixCtx, port: number): Promise<boo
   return qaApp !== null
 }
 
+// Depois do commit do corretor: o app recarrega a mudança, na mesma porta.
+async function restartApp($: EngineInterface, f: FixCtx, port: number): Promise<boolean> {
+  await stopApp(qaApp)
+  qaApp = await startApp($, f.matrix, f.fixDir, port)
+  return qaApp !== null
+}
+
 // Item novo; trabalho parado no meio do passo: desmonta (e desfaz) o que o passo acabou de abrir. Sem item novo, desfaz pelo
 // item com que o passo começou (`from`): um commit que chegou depois do stop também volta.
 async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | null, from: QaCurrent | null = null): Promise<void> {
@@ -1378,7 +1385,8 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
 // As conferências do corretor, a partir do HEAD do começo da tentativa; depois delas a linha de base é o que deixaram.
 async function checkAttempt($: EngineInterface, f: FixCtx, c: QaCurrent): Promise<FixCheck> {
   const fix = await read($, qaFix)
-  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? statusSumOf(''), port: c.port })
+  const restart = () => restartApp($, f, c.port)
+  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? statusSumOf(''), port: c.port, restart })
   await rebaseline($, f)
   return check
 }
@@ -1392,10 +1400,6 @@ async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
       return unverifiedFix($, f, c, check.reason)
     case 'ok':
       await update($, qaFix, x => (x === null ? null : { ...x, regression: check.regression, pending: check.pending }))
-      // Reinicia o app para carregar a mudança, na mesma porta.
-      await stopApp(qaApp)
-      qaApp = await startApp($, f.matrix, f.fixDir, c.port)
-      if (qaApp === null) return finishDefect($, f, c, 'não reverificado', ['o app não subiu pela worktree'], [])
       return nextOfFix($, f, c, target, cells)
     default:
       throw new Error('Caso não tratado: ' + String(check satisfies never))

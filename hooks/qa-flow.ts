@@ -538,7 +538,8 @@ export async function resetFixOut($: EngineInterface, outDir: string): Promise<b
 // `detail`: o fim da saída do comando que falhou, só para o pedido da tentativa seguinte.
 export type FixCheck = { kind: 'refuse'; reason: string; detail?: string } | { kind: 'unverified'; reason: string } | { kind: 'ok'; regression: string | null; pending: string[] }
 // `sha`: o HEAD do começo da tentativa; a recusa no commit desfaz só até ele, e o diff conferido é o da tentativa.
-type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; baseline: string; port: number }
+// `restart`: para e sobe o app da worktree na mesma porta; false = não subiu.
+type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; baseline: string; port: number; restart: () => Promise<boolean> }
 
 const refuse = (reason: string, detail?: string): FixCheck => ({ kind: 'refuse', reason, ...(detail === undefined ? {} : { detail }) })
 const unverified = (fix: Fix): FixCheck => ({ kind: 'unverified', reason: fix.reason ?? 'o corretor marcou a correção como não retestável' })
@@ -563,6 +564,9 @@ async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixChe
   return null
 }
 
+// Uma variável por perfil com login, apontando para o arquivo de sessão.
+const authEnvsOf = (o: FixIn): Record<string, string> => Object.fromEntries(o.matrix.profiles.filter(p => p !== ANON_PROFILE).map(p => [authEnvOf(p), authFileOf(o.env.qaRoot, p)]))
+
 // Etapa g: o teste novo FALHA no app original e PASSA no da worktree.
 async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<FixCheck> {
   const file = fix.regressionTest
@@ -571,9 +575,8 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
   if (!(await isUp($, o.matrix.baseUrl))) {
     return { kind: 'ok', regression: file, pending: ['teste de regressão não rodado: app original fora do ar'] }
   }
-  const auth = Object.fromEntries(o.matrix.profiles.filter(p => p !== ANON_PROFILE).map(p => [authEnvOf(p), authFileOf(o.env.qaRoot, p)]))
   const argv = ['npx', 'playwright', 'test', file]
-  const runAt = (url: string): Promise<Ran> => runFull($, argv, { cwd: o.fixDir, env: { ...auth, QA_BASE_URL: url }, timeoutMs: TEN_MIN })
+  const runAt = (url: string): Promise<Ran> => runFull($, argv, { cwd: o.fixDir, env: { ...authEnvsOf(o), QA_BASE_URL: url }, timeoutMs: TEN_MIN })
   const original = await runAt(o.matrix.baseUrl)
   if (original.code === null || original.code === 0) return refuse(`o teste de regressão ${file} não falhou no app original`)
   const fixed = await runAt(baseUrlAt(o.matrix.baseUrl, o.port))
@@ -581,7 +584,7 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
   return { kind: 'ok', regression: file, pending: [] }
 }
 
-// Quando o corretor termina, nesta ordem (a primeira que falha decide): fix.json, commit, testes do projeto, regressão.
+// Quando o corretor termina, nesta ordem (a primeira que falha decide): fix.json, commit, app reiniciado, testes do projeto, regressão.
 export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> {
   await assertFixDir($, o.fixDir)
   const fix = parseFix((await readText($, `${fixOutDirOf(o.runDir, o.defectId)}/fix.json`)) ?? '')
@@ -594,11 +597,17 @@ export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> 
   const committed = (await headOf($, o.fixDir)) === o.sha ? await commitFix($, o, fix) : null
   if (committed !== null) return committed
   if (!fix.retestable) return unverified(fix)
-  if (o.matrix.testCommand !== '') {
-    const tested = await runFull($, argvOf(o.matrix.testCommand), { cwd: o.fixDir, timeoutMs: TEN_MIN })
-    if (tested.code !== 0) return refuse(`o comando ${o.matrix.testCommand} falhou (${exitOf(tested)})`, outputOf(o.matrix.testCommand, tested))
-  }
-  return regressionOf($, o, fix)
+  // O app subiu antes do corretor e não recarrega sozinho: os testes e a regressão têm que ver o código commitado.
+  if (!(await o.restart())) return { kind: 'unverified', reason: 'o app não subiu pela worktree' }
+  return (await projectTestsOf($, o)) ?? regressionOf($, o, fix)
+}
+
+// Etapa f: os testes do projeto, no app da worktree e com os logins (o mesmo ambiente da regressão). null = passaram.
+async function projectTestsOf($: EngineInterface, o: FixIn): Promise<FixCheck | null> {
+  if (o.matrix.testCommand === '') return null
+  const env = { ...authEnvsOf(o), QA_BASE_URL: baseUrlAt(o.matrix.baseUrl, o.port) }
+  const tested = await runFull($, argvOf(o.matrix.testCommand), { cwd: o.fixDir, env, timeoutMs: TEN_MIN })
+  return tested.code === 0 ? null : refuse(`o comando ${o.matrix.testCommand} falhou (${exitOf(tested)})`, outputOf(o.matrix.testCommand, tested))
 }
 
 export async function writeFixResult(

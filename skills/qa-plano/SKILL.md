@@ -53,7 +53,8 @@ por código: campo faltando ou com tipo errado torna a matriz inteira inválida.
      fora analytics, anúncio e o que não muda a tela;
    - `installCommand` (obrigatório): instala as dependências numa cópia nova do repositório (`npm ci`, `pnpm install --frozen-lockfile`);
    - `startCommand` (obrigatório): sobe o app lendo a porta da variável `QA_PORT`, ou com o texto `{QA_PORT}` no lugar da porta;
-   - `testCommand`: roda os testes do projeto; `""` se não há;
+   - `testCommand`: roda os testes do projeto; `""` se não há. Na fase Corrigir o mod o roda na worktree com `QA_BASE_URL` (o
+     app da worktree, já com a correção) e uma `QA_AUTH_<PERFIL>` por perfil com login (o arquivo de sessão);
    - `testDir`: pasta dos testes Playwright, relativa à raiz (`tests/e2e`); `""` se o projeto não usa Playwright;
    - `backend.containers`: nomes dos contêineres do backend (`docker-compose.yml`); `[]` se não há.
    Regras dos três comandos (o mod os roda sem shell; fora delas, a matriz inteira é recusada):

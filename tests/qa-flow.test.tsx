@@ -107,6 +107,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
     full: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
     apps: [] as { argv: string[]; cwd: string; env: Record<string, string> }[],
     appStops: 0,
+    // A ordem entre comandos, subida e parada do app e lançamento de agentes (o comando leva o QA_BASE_URL que recebeu).
+    events: [] as string[],
   }
   // A worktree da fase Corrigir: o `git status` dela (o teste o muda como faria o corretor), os commits feitos pelo mod, o HEAD
   // (anda a cada commit, volta no reset) e `lost` (a pasta perdeu o `.git`: o `rev-parse --show-toplevel` falha).
@@ -191,6 +193,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (over.hold?.(argv.join(' ')) === true) await clock.sleep(HOLD_MS)
     if (over.stall?.(argv.join(' ')) === true) await clock.sleep(1e12)
     log.runs.push(argv)
+    log.events.push(`${argv.join(' ')}${e.init?.env?.QA_BASE_URL === undefined ? '' : ` @${e.init.env.QA_BASE_URL}`}`)
     log.full.push({ argv: [...e.argv], cwd: e.init?.cwd ?? '', env: { ...e.init?.env } })
     const r = over.run?.(argv, e.init?.cwd, e.init?.env) ?? answer(argv, e.init?.env)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -202,9 +205,11 @@ async function boot($: Engine, on: On, over: Over = {}) {
   // O app da worktree: vive até o mod chamar return() no iterador (o sinal do hook aborta).
   on('process.spawn', async function* (_$, e, next) {
     log.apps.push({ argv: [...e.argv], cwd: e.cwd ?? '', env: { ...e.env } })
+    log.events.push(`app ${e.argv.join(' ')}`)
     yield { stream: 'stdout' as const, text: 'pronto' }
     await new Promise<void>(r => next.signal.addEventListener('abort', () => r()))
     log.appStops += 1
+    log.events.push('stop')
     return { value: { code: null, signal: 'SIGTERM' } }
   })
   on('fs.read', (_$, e, next) => {
@@ -232,6 +237,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     // O harness entrega o pedido na forma da ferramenta Agent (`subagent_type`), não no `subagentType` do tipo.
     const type = e.subagentType ?? String(Reflect.get(e, 'subagent_type'))
     log.spawns.push({ type, prompt: e.prompt })
+    log.events.push(`agent ${type}`)
     n += 1
     const r = over.spawns?.shift() ?? {}
     if (r.deny !== undefined) return { deny: r.deny }
@@ -839,7 +845,18 @@ describe('QA: fase Corrigir', () => {
     expect(t.log.spawns[0]?.prompt).toContain(`Worktree (W): ${wt}`)
     await fixerEnds($, t)
     expect(t.wt.commits[0]).toEqual(['commit', '-q', '-m', 'Salvar volta a confirmar', '-m', 'Por quê: x', '-m', 'O que mudou: y'])
-    expect(t.log.full).toContainEqual(expect.objectContaining({ argv: ['npm', 'test'], cwd: wt }))
+    expect(t.log.full).toContainEqual({ argv: ['npm', 'test'], cwd: wt, env: { QA_AUTH_ADMIN: AUTH, QA_BASE_URL: 'http://localhost:4100' } })
+    // O app reinicia depois do commit e antes dos testes: o npm test e a regressão na worktree veem o código novo.
+    const after = t.log.events.slice(t.log.events.findIndex(x => x.includes(' commit -q ')))
+    expect(after.map(x => (x.includes(' commit -q ') ? 'commit' : x)).filter(x => /^(commit|stop|app |npm test|npx |agent )/.test(x))).toEqual([
+      'commit',
+      'stop',
+      'app npm run dev -- --port 4100',
+      'npm test @http://localhost:4100',
+      'npx playwright test e2e/qa-c1.d1.spec.ts @http://localhost:3000',
+      'npx playwright test e2e/qa-c1.d1.spec.ts @http://localhost:4100',
+      `agent ${QA_RUNNER}`,
+    ])
     const pw = t.log.full.filter(r => r.argv[0] === 'npx')
     expect(pw.map(r => r.env['QA_BASE_URL'])).toEqual(['http://localhost:3000', 'http://localhost:4100'])
     expect(pw[0]?.env['QA_AUTH_ADMIN']).toBe(AUTH)
@@ -929,6 +946,21 @@ describe('QA: fase Corrigir', () => {
     await fixerEnds($, t, JSON.stringify({ retestable: false, reason: 'backend em contêiner', subject: 'Corrige a API' }))
     expect(t.wt.commits).toHaveLength(1)
     expect(resultOf(t)).toMatchObject({ status: 'não reverificado', reasons: ['backend em contêiner'], commits: ['f0 corrige'] })
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(t.log.apps).toHaveLength(1)
+  })
+
+  test('app que não sobe depois do commit: não reverificado, sem rodar os testes nem a regressão', async ($, on) => {
+    const app = { down: 0 }
+    const { t } = await fixing($, on, { run: a => (a[0] === 'curl' && a.includes('http://localhost:4100') && app.down > 0 && app.down-- > 0 ? { exitCode: 7, stdout: '' } : undefined) })
+    t.wt.status = ' M src/salvar.ts'
+    t.files.set(`${outOf(t)}/fix.json`, FIX_OK)
+    await tick(t)
+    await ended($, lastId(t))
+    app.down = 30
+    await t.clock.advance(66_000)
+    expect(t.log.runs.some(a => a.join(' ') === 'npm test' || a[0] === 'npx')).toBe(false)
+    expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 1, reasons: ['o app não subiu pela worktree'], commits: ['f0 corrige'] })
     expect(types(t)).toEqual([QA_FIXER])
   })
 
