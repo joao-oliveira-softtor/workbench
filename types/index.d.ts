@@ -101,6 +101,33 @@ declare module 'claude-code' {
       planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string }
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.
       refining: boolean
+      // QA: etapa do botão e as pastas; não zera no session.start.
+      qaFlow: { step: 'plan' | 'login' | 'run' | 'fix'; runDir: string; fixDir: string }
+      // QA: o trabalho em curso (fila e item); não zera no session.start, é o que permite retomar.
+      // O contrato não importa nada: a forma repete a de `QaJob`/`QaCurrent` do hooks/qa.ts (o tsc confere as duas).
+      qaJob: {
+        phase: 'run' | 'fix'
+        queue: string[]
+        total: number
+        current: {
+          item: string
+          role: 'runner' | 'observer' | 'fixer'
+          attempt: number
+          agentId: string | null
+          at: number
+          isEnded: boolean
+          cell: string
+          sha: string
+          port: number
+          session: string
+          cdpPort: number | null
+          reasons: string[]
+        } | null
+      } | null
+      // QA: todo agentId de QA já lançado; nunca diminui (o relatório deles é suprimido e nenhum é adotado de novo).
+      qaGuarded: string[]
+      // QA: HEAD e estado da árvore do app no começo do Executar.
+      qaRunBase: { head: string; isDirty: boolean } | null
     }
   }
 }
