@@ -783,6 +783,14 @@ describe('guardDecisionOf', () => {
     expect(guard('fixer', bash('curl -sS http://localhost:3000/x'), text).decision).toBe('allow')
   })
 
+  test('Bash só com command, description e timeout: qualquer outro campo nega, até com valor falso', () => {
+    const cmd = 'curl -sS http://localhost:3000/x'
+    expect(guard('fixer', inputOf('Bash', { command: cmd, description: 'x', timeout: 1000 })).decision).toBe('allow')
+    for (const extra of [{ run_in_background: true }, { run_in_background: false }, { dangerouslyDisableSandbox: true }, { outro: 1 }]) {
+      expect(guard('fixer', inputOf('Bash', { command: cmd, ...extra })).decision).toBe('deny')
+    }
+  })
+
   test('nega agente de outro papel', () => {
     expect(guard('runner', bash('curl -sS http://localhost:3000/x'), stateOf()).decision).toBe('deny')
     expect(guard('fixer', bash('curl -sS http://localhost:3000/x'), stateOf({ role: 'runner' })).decision).toBe('deny')
@@ -1137,18 +1145,31 @@ describe('rodada 5: pastas do contexto', () => {
   const input = { agent_id: 'a1', cwd: CWD, tool_name: 'Bash', tool_input: { command: 'curl http://localhost:3000' } }
   const with_ = (ctx: Record<string, unknown>) => guardDecisionOf('fixer', input, stateOf(ctx), SAME_FS).decision
 
-  test('runDir tem que ficar dentro de <home>/.claude/workbench-qa/', () => {
-    for (const v of ['/home/u/other/run', '/home/u/.claude/workbench-qa', '/home/u/.claude/workbench-qa-x/1', '/home/u/.claude/1', '/srv/q/1']) {
+  test('runDir pelo menos dois níveis abaixo de <home>/.claude/workbench-qa/ (<projeto>/<execução> ou mais fundo)', () => {
+    for (const v of ['/home/u/other/run', '/home/u/.claude/workbench-qa', '/home/u/.claude/workbench-qa/app', '/home/u/.claude/workbench-qa-x/1/2', '/home/u/.claude/1', '/srv/q/1']) {
       expect(with_({ runDir: v })).toBe('deny')
     }
     expect(with_({ runDir: '/home/u/.claude/workbench-qa/app/2' })).toBe('allow')
   })
 
-  test('readDirs dentro de runDir, de <home>/.claude/workbench-qa/ ou de <home>/.claude/skills/', () => {
-    for (const v of ['/home/u/.claude/x', '/home/u/.claude/skills', '/home/u/.claude/workbench-qa', '/home/u/docs', '/srv/ref', '/home/u/.claude/skillsx/a']) {
+  test('readDirs dentro de runDir, de <projeto>/<algo> em <home>/.claude/workbench-qa/ ou de <home>/.claude/skills/, nunca uma pasta auth', () => {
+    const bad = ['/home/u/.claude/x', '/home/u/.claude/skills', '/home/u/.claude/workbench-qa', '/home/u/.claude/workbench-qa/app', '/home/u/docs', '/srv/ref', '/home/u/.claude/skillsx/a']
+    for (const v of [...bad, '/home/u/.claude/workbench-qa/app/auth', '/home/u/.claude/workbench-qa/app/auth/x', `${RUN}/auth`, '/home/u/.claude/skills/auth']) {
       expect(with_({ readDirs: [REF, v] })).toBe('deny')
     }
-    for (const v of [`${RUN}/sub`, '/home/u/.claude/workbench-qa/app', '/home/u/.claude/skills/impeccable']) expect(with_({ readDirs: [REF, v] })).toBe('allow')
+    for (const v of [`${RUN}/sub`, '/home/u/.claude/workbench-qa/app/outra', '/home/u/.claude/skills/impeccable']) expect(with_({ readDirs: [REF, v] })).toBe('allow')
+  })
+
+  test('os valores que o mod grava passam: Executar e Corrigir', () => {
+    const skills = '/home/u/.claude/skills/impeccable'
+    expect(with_({ runDir: RUN, readDirs: [skills] })).toBe('allow')
+    expect(with_({ runDir: `${RUN}/correcoes/c1.d1`, readDirs: [skills, RUN] })).toBe('allow')
+  })
+
+  test('home com um segmento auth não derruba o contexto', () => {
+    const home = '/srv/auth'
+    const run = `${home}/.claude/workbench-qa/app/1`
+    expect(with_({ home, runDir: run, readDirs: [`${home}/.claude/skills/impeccable`, run], agentBrowser: `${home}/.claude/workbench-qa/bin/ab`, impeccable: `${home}/.claude/workbench-qa/bin/imp` })).toBe('allow')
   })
 
   test('fixDir sem segmento .git', () => {
@@ -1248,6 +1269,13 @@ describe('guardDecisionOf: papel remover', () => {
     expect(remover(inputOf('Bash', { command: "git -C '/repo' worktree remove '/repo/.worktrees/b'" }))).toBe('deny')
     expect(remover(inputOf('Bash', { command: 7 }))).toBe('deny')
     expect(remover(inputOf('Bash', null))).toBe('deny')
+  })
+
+  test('Bash só com command, description e timeout: com outro campo, nem a linha aprovada passa', () => {
+    expect(remover(inputOf('Bash', { command: LINES[2], description: 'x', timeout: 1000 }))).toBe('allow')
+    for (const extra of [{ run_in_background: false }, { dangerouslyDisableSandbox: true }, { outro: 1 }]) {
+      expect(remover(inputOf('Bash', { command: LINES[2], ...extra }))).toBe('deny')
+    }
   })
 
   test('nega qualquer outra ferramenta, mesmo com a linha aprovada', () => {

@@ -360,8 +360,11 @@ function gitPathOk(w: string, ctx: GuardCtx): boolean {
   return /^[A-Za-z0-9._/-]+$/.test(w) && !isSecretPath(w) && (!(w.includes('/') || w.startsWith('.')) || inFix)
 }
 
-// Referência (antes de `--`): só o HEAD da worktree, um hash ou um intervalo entre eles. Nome nenhum (`stash`, `refs/stash`, branch,
-// `FETCH_HEAD`): o stash é de todas as worktrees e guarda os arquivos não versionados e os segredos do checkout do usuário.
+// Referência (antes de `--`): só o HEAD da worktree, um hash ou um intervalo entre eles. Nomes como `stash`, `refs/stash`, branch e
+// `FETCH_HEAD` ficam de fora: o stash é de todas as worktrees e guarda os arquivos não versionados e os segredos do checkout do usuário.
+// shortcut: um nome de referência todo hexadecimal com 7 a 40 caracteres (uma branch `cafe123`) passa como hash, porque exigir letra e
+// dígito recusaria hashes legítimos; se isso importar, o hook recusa o valor quando `git -C <fixDir> show-ref` acha uma referência
+// com esse nome.
 const REV = '(HEAD(~\\d+|\\^)?|[0-9a-f]{7,40})'
 const GIT_REV = new RegExp(`^${REV}(\\.\\.\\.?${REV})?$`)
 
@@ -577,16 +580,27 @@ const isOrigin = (o: string): boolean => {
 
 const within = (p: string, dir: string): boolean => p !== dir && isInside(p, dir)
 
+// Pelo menos dois níveis abaixo de `dir`: em `<home>/.claude/workbench-qa/`, `<projeto>/<execução>` ou mais fundo (a pasta do
+// projeto guarda `auth/` e os arquivos de contexto da trava).
+const deepWithin = (p: string, dir: string): boolean => within(p, dir) && p.slice(dir.length + 1).includes('/')
+
+// Uma pasta de leitura extra. O `runDir` já fica dois níveis abaixo de `qaHome`: o que está dentro dele passa pela mesma regra. Toda
+// pasta de leitura fica abaixo da home: o segmento `auth` só conta dali para baixo.
+function readDirOk(c: GuardCtx, qaHome: string, d: string): boolean {
+  const root = deepWithin(d, qaHome) || within(d, `${c.home}/.claude/skills`)
+  return isDeepPath(d) && root && !hasSegment(d.slice(c.home.length), 'auth') && !isInside(c.repoRoot, d)
+}
+
 // Valores do contexto: caminhos absolutos normalizados com 2+ segmentos; `fixDir` vazio ou dentro de `repoRoot` (sem ser ele) e sem
-// segmento `.git`; `runDir` dentro de `<home>/.claude/workbench-qa/`, nem dentro nem contendo `repoRoot`; cada `readDirs` dentro de
-// `runDir`, de `<home>/.claude/workbench-qa/` ou de `<home>/.claude/skills/`, sem conter `repoRoot`; origens http(s), porta e sessão.
+// segmento `.git`; `runDir` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/`, nem dentro nem contendo `repoRoot`; cada
+// `readDirs` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/` (o `runDir` incluído) ou dentro de `<home>/.claude/skills/`,
+// sem segmento `auth` abaixo da home e sem conter `repoRoot`; origens http(s), porta e sessão.
 function ctxValuesOk(c: GuardCtx): boolean {
   const qaHome = `${c.home}/.claude/workbench-qa`
   const paths = [c.home, c.repoRoot, c.runDir, c.agentBrowser, c.impeccable].every(isDeepPath)
   const fix = c.fixDir === '' || (isDeepPath(c.fixDir) && within(c.fixDir, c.repoRoot) && !hasSegment(c.fixDir, '.git'))
-  const run = within(c.runDir, qaHome) && !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
-  const readRoots = [c.runDir, qaHome, `${c.home}/.claude/skills`]
-  const reads = c.readDirs.every(d => isDeepPath(d) && readRoots.some(r => within(d, r)) && !isInside(c.repoRoot, d))
+  const run = deepWithin(c.runDir, qaHome) && !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
+  const reads = c.readDirs.every(d => readDirOk(c, qaHome, d))
   const port = c.cdpPort === null || (Number.isInteger(c.cdpPort) && c.cdpPort >= 1 && c.cdpPort <= 65535)
   return paths && fix && run && reads && port && c.origins.every(isOrigin) && /^[A-Za-z0-9_-]*$/.test(c.session)
 }
@@ -640,6 +654,8 @@ const deny = (reason: string): Decision => ({ decision: 'deny', reason })
 export type FsView = { realOf: (absPath: string) => string | null; isFile: (absPath: string) => boolean }
 
 // O pedido e o caminho real têm que passar os dois: um link em fixDir apontando para o checkout cai fora da pasta liberada.
+// shortcut: um hardlink dentro da worktree de correção é lido como arquivo comum (não tem caminho real diferente); se o corretor
+// passar a ter como criar hardlink, a leitura confere o número de links do arquivo (`stat.nlink > 1`) no hook.
 function realOk(check: (p: string) => 'allow' | 'deny', path: string, ctx: GuardCtx, cwd: string, fs: FsView): boolean {
   if (check(path) === 'deny') return false
   const real = fs.realOf(resolveIn(path, cwd, ctx.home))
@@ -653,12 +669,21 @@ function bashDecision(role: QaRole, command: string, ctx: GuardCtx, cwd: string,
   return folder === undefined ? { decision: 'allow', reason: v.reason } : deny(`grep só lê arquivo regular: ${folder}`)
 }
 
-function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unknown>, ctx: GuardCtx, cwd: string, fs: FsView): Decision {
+// Bash só com estes campos: `dangerouslyDisableSandbox` tira a caixa de areia, `run_in_background` deixa o comando vivo depois do
+// agente, e um campo novo do Bash fica negado até ser conferido. O comando em texto, ou null.
+const BASH_FIELDS = ['command', 'description', 'timeout']
+function plainCommandOf(toolInput: unknown): string | null {
+  if (!isRecord(toolInput) || !Object.keys(toolInput).every(k => BASH_FIELDS.includes(k))) return null
   const command = toolInput['command']
+  return typeof command === 'string' ? command : null
+}
+
+function toolDecision(role: QaRole, tool: string, toolInput: Record<string, unknown>, ctx: GuardCtx, cwd: string, fs: FsView): Decision {
+  const command = plainCommandOf(toolInput)
   const path = toolInput['file_path']
   switch (tool) {
     case 'Bash':
-      return typeof command === 'string' ? bashDecision(role, command, ctx, cwd, fs) : deny('Bash sem comando em texto')
+      return command === null ? deny('Bash sem comando em texto ou com campo além de command, description e timeout') : bashDecision(role, command, ctx, cwd, fs)
     case 'Write':
     case 'Edit':
       if (typeof path !== 'string') return deny(`${tool} sem file_path em texto`)
@@ -683,15 +708,16 @@ function removerStateOf(text: string | null): { agentId: string | null; lines: s
   return agentId === null || typeof agentId === 'string' ? { agentId, lines: raw['lines'] } : null
 }
 
-// Bash com o comando igual (depois do `trim`) a uma das linhas, e o id do contexto quando ele tem um; o resto é negado.
+// Bash só com command, description e timeout, o comando igual (depois do `trim`) a uma das linhas, e o id do contexto quando
+// ele tem um; o resto é negado.
 function removerDecisionOf(input: unknown, stateText: string | null): Decision {
   const state = removerStateOf(stateText)
   if (state === null) return deny('lista de remoção ausente ou inválida')
   if (!isRecord(input)) return deny('entrada do hook com forma inesperada')
   const { tool_name: tool, tool_input: toolInput, agent_id: agentId } = input
   if (state.agentId !== null && state.agentId !== agentId) return deny('agente aposentado: o id não é o do contexto')
-  const command = tool === 'Bash' && isRecord(toolInput) ? toolInput['command'] : null
-  if (typeof command !== 'string' || !state.lines.includes(command.trim())) return deny('fora da lista de remoção aprovada no painel')
+  const command = tool === 'Bash' ? plainCommandOf(toolInput) : null
+  if (command === null || !state.lines.includes(command.trim())) return deny('fora da lista de remoção aprovada no painel')
   return { decision: 'allow', reason: 'linha aprovada no painel do workbench' }
 }
 
