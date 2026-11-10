@@ -1175,6 +1175,12 @@ describe('rodada 5: pastas do contexto', () => {
     expect(with_({ runDir: '/home/u/.claude/workbench-qa/app/2' })).toBe('allow')
   })
 
+  test('runDir com um segmento auth abaixo da home nega (a pasta das sessões salvas nunca é gravável)', () => {
+    for (const v of ['/home/u/.claude/workbench-qa/app/auth', '/home/u/.claude/workbench-qa/app/auth/x', `${RUN}/auth`, `${RUN}/AUTH/x`]) expect(with_({ runDir: v })).toBe('deny')
+    const home = '/srv/auth'
+    expect(with_({ home, runDir: `${home}/.claude/workbench-qa/app/1`, readDirs: [], agentBrowser: `${home}/.claude/workbench-qa/bin/ab`, impeccable: `${home}/.claude/workbench-qa/bin/imp` })).toBe('allow')
+  })
+
   test('readDirs dentro de runDir, de <projeto>/<algo> em <home>/.claude/workbench-qa/ ou de <home>/.claude/skills/, nunca uma pasta auth', () => {
     const bad = ['/home/u/.claude/x', '/home/u/.claude/skills', '/home/u/.claude/workbench-qa', '/home/u/.claude/workbench-qa/app', '/home/u/docs', '/srv/ref', '/home/u/.claude/skillsx/a']
     for (const v of [...bad, '/home/u/.claude/workbench-qa/app/auth', '/home/u/.claude/workbench-qa/app/auth/x', `${RUN}/auth`, '/home/u/.claude/skills/auth']) {

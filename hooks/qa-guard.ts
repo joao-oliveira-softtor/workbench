@@ -611,14 +611,15 @@ function readDirOk(c: GuardCtx, qaHome: string, d: string): boolean {
 }
 
 // Valores do contexto: caminhos absolutos normalizados com 2+ segmentos; `fixDir` vazio ou dentro de `repoRoot` (sem ser ele) e sem
-// segmento `.git`; `runDir` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/`, nem dentro nem contendo `repoRoot`; cada
-// `readDirs` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/` (o `runDir` incluído) ou dentro de `<home>/.claude/skills/`,
-// sem segmento `auth` abaixo da home e sem conter `repoRoot`; origens http(s), porta e sessão.
+// segmento `.git`; `runDir` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/`, sem segmento `auth` abaixo da home, nem
+// dentro nem contendo `repoRoot`; cada `readDirs` dois níveis ou mais abaixo de `<home>/.claude/workbench-qa/` (o `runDir`
+// incluído) ou dentro de `<home>/.claude/skills/`, sem segmento `auth` abaixo da home e sem conter `repoRoot`; origens http(s),
+// porta e sessão.
 function ctxValuesOk(c: GuardCtx): boolean {
   const qaHome = `${c.home}/.claude/workbench-qa`
   const paths = [c.home, c.repoRoot, c.runDir, c.agentBrowser, c.impeccable].every(isDeepPath)
   const fix = c.fixDir === '' || (isDeepPath(c.fixDir) && within(c.fixDir, c.repoRoot) && !hasSegment(c.fixDir, '.git'))
-  const run = deepWithin(c.runDir, qaHome) && !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
+  const run = deepWithin(c.runDir, qaHome) && !hasSegment(c.runDir.slice(c.home.length), 'auth') && !isInside(c.runDir, c.repoRoot) && !isInside(c.repoRoot, c.runDir)
   const reads = c.readDirs.every(d => readDirOk(c, qaHome, d))
   const port = c.cdpPort === null || (Number.isInteger(c.cdpPort) && c.cdpPort >= 1 && c.cdpPort <= 65535)
   return paths && fix && run && reads && port && c.origins.every(isOrigin) && /^[A-Za-z0-9_-]*$/.test(c.session)
