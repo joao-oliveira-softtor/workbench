@@ -9,14 +9,17 @@ import {
   SUMMARY_CAP,
   RESUME_RULES,
   dayFileOf,
+  expiredOf,
   hhmmOf,
   historyBlockOf,
   isAutomaticHead,
+  isOkOn,
   labelOf,
   parseSessionSummary,
   projectOf,
   resumeMessageOf,
   scrub,
+  shiftDay,
   sliceOf,
   sliceTextOf,
   tallyOf,
@@ -85,6 +88,19 @@ describe('workDayOf', () => {
   })
   test('meia-noite com corte 0 não volta o dia', () => {
     expect(workDayOf(at(0, 0), 0)).toBe('2026-11-10')
+  })
+})
+
+describe('shiftDay e expiredOf', () => {
+  test('anda no calendário local, virando mês e ano', () => {
+    expect(shiftDay('2026-11-12', -1)).toBe('2026-11-11')
+    expect(shiftDay('2026-12-31', 1)).toBe('2027-01-01')
+    expect(shiftDay('2026-03-01', -1)).toBe('2026-02-28')
+  })
+
+  test('só sai o arquivo do dia com mais de 14 dias antes de hoje; nome fora do formato fica', () => {
+    const names = ['2026-10-28.md', '2026-10-29.md', '2026-11-11.md', 'notas.md', '2026-10-01.md.bak']
+    expect(expiredOf(names, '2026-11-12')).toEqual(['2026-10-28.md'])
   })
 })
 
@@ -328,6 +344,56 @@ describe('sliceOf', () => {
   })
 })
 
+describe('sliceOf: linhas fora do formato e onde a sessão parou', () => {
+  const assistant = (content: unknown, h: number) => JSON.stringify({ type: 'assistant', message: { content }, timestamp: iso(h), ...base })
+
+  test('linha que não é objeto e bloco estranho são pulados sem lançar', () => {
+    const s = ok(lines('null', '[1]', '42', human('oi', 9), assistant([null, { type: 'text', text: 42 }, { type: 'tool_use', text: 'escondido' }], 10)))
+    expect(s.lastReplies).toEqual([])
+    expect(s.firstPrompts).toEqual(['oi'])
+  })
+
+  test('só linhas que não são objeto: ilegível', () => {
+    expect(sliceOf(lines('null', '42', '"texto"'), false).kind).toBe('broken')
+    expect(sliceOf('[1]', false).kind).toBe('broken')
+  })
+
+  test('a resposta que termina em texto depois da ferramenta não parou no meio; a que só chama ferramenta parou', () => {
+    expect(ok(lines(human('oi', 9), assistant([{ type: 'tool_use' }, { type: 'text', text: 'pronto' }], 10))).isMidway).toBe(false)
+    expect(ok(lines(human('oi', 9), toolUse(10))).isMidway).toBe(true)
+    const callsAfter = assistant([{ type: 'thinking', thinking: 'x' }, { type: 'text', text: 'vou rodar' }, { type: 'tool_use' }], 10)
+    expect(ok(lines(human('oi', 9), callsAfter)).isMidway).toBe(true)
+  })
+
+  test('resposta em texto puro não parou no meio; resposta vazia não muda nada e nenhuma lança', () => {
+    const s = ok(lines(human('oi', 9), assistant('pronto', 10)))
+    expect(s.lastReplies).toEqual(['pronto'])
+    expect(s.isMidway).toBe(false)
+    expect(ok(lines(human('oi', 9), assistant('', 10))).isMidway).toBe(true)
+  })
+
+  test('mensagem de usuário que não é pedido nem resultado de ferramenta não marca o meio', () => {
+    const image = JSON.stringify({ type: 'user', message: { content: [{ type: 'image' }] }, timestamp: iso(11), ...base })
+    expect(ok(lines(human('oi', 9), reply('pronto', 10), image)).isMidway).toBe(false)
+  })
+
+  test('linha de sistema de outro tipo não vira recado', () => {
+    const other = JSON.stringify({ type: 'system', subtype: 'informational', content: 'aviso do sistema', timestamp: iso(11), ...base })
+    expect(ok(lines(human('oi', 9), other)).awaySummary).toBe('')
+  })
+})
+
+describe('isOkOn', () => {
+  const read = (slice: Slice | null): Read => ({ project: '-home-dev-loja-api', at: at(9), slice })
+  test('só a ok cujo último pedido é do dia (o dia vira às 05:00)', () => {
+    const madrugada = okSlice({ lastHumanAt: at(4, 30, 11) })
+    expect(isOkOn(read(madrugada), '2026-11-10')).toBe(true)
+    expect(isOkOn(read(madrugada), '2026-11-11')).toBe(false)
+    expect(isOkOn(read(null), '2026-11-10')).toBe(false)
+    expect(isOkOn(read({ kind: 'automatic' }), '2026-11-10')).toBe(false)
+  })
+})
+
 describe('sliceTextOf', () => {
   const full: Ok = {
     kind: 'ok',
@@ -381,6 +447,14 @@ describe('sliceTextOf', () => {
     expect(text).toBe(
       ['Projeto: loja-api', 'Horários: 14:02 a 18:47', 'Primeiros pedidos:', '- implementar o cálculo de frete por CEP'].join('\n'),
     )
+  })
+
+  test('com exatamente SLICE_CAP caracteres, nada é cortado', () => {
+    const size = sliceTextOf(full).length
+    const exact: Ok = { ...full, lastReplies: [...full.lastReplies.slice(0, -1), `${full.lastReplies.at(-1) ?? ''}${'x'.repeat(SLICE_CAP - size)}`] }
+    const text = sliceTextOf(exact)
+    expect(text.length).toBe(SLICE_CAP)
+    expect(text).toContain('xxxx')
   })
 
   test('acima do SLICE_CAP corta primeiro as respostas', () => {
@@ -814,6 +888,14 @@ describe('dayFileOf', () => {
     })
     expect(text).toContain(`· ${'y'.repeat(LABEL_CAP)}\n`)
     expect(text).not.toContain('y'.repeat(LABEL_CAP + 1))
+  })
+})
+
+describe('dayFileOf: linha de ignoradas', () => {
+  const ignored = (counts: DayInput['counts']) => dayFileOf({ day: '2026-11-10', sessions: [], failed: [], leftOut: [], counts })
+  test('aparece com qualquer soma diferente de zero', () => {
+    expect(ignored({ automatic: 0, empty: 1, broken: 1, idle: 0 })).toContain('- Ignoradas: 0 sem terminal, 1 sem pedido seu, 0 sem atividade sua no dia, 1 ilegíveis')
+    expect(ignored({ automatic: 0, empty: 1, broken: 0, idle: 1 })).toContain('- Ignoradas: 0 sem terminal, 1 sem pedido seu, 1 sem atividade sua no dia, 0 ilegíveis')
   })
 })
 
