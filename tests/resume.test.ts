@@ -461,6 +461,8 @@ describe('scrub', () => {
     ['Authorization com Basic', 'Authorization: Basic dXNlcjpmYWtl', `Authorization: Basic ${REMOVED}`],
     ['Authorization com outro esquema', 'authorization: Token abc', `authorization: Token ${REMOVED}`],
     ['Authorization sem esquema', 'Authorization: abcdef', `Authorization: ${REMOVED}`],
+    ['Authorization sem esquema e com texto depois', 'Authorization: tok3n123 depois', `Authorization: ${REMOVED}`],
+    ['Authorization com palavra que não é esquema', 'Authorization: abcdef ghijkl', `Authorization: ${REMOVED}`],
     ['x-api-key', 'X-Api-Key: abcd1234', `X-Api-Key: ${REMOVED}`],
   ]
   for (const [name, input, output] of cases) {
@@ -513,6 +515,7 @@ describe('scrub', () => {
       'o header authorization vai no pedido',
       'passwordless: true',
       'my-api-key-rotation',
+      'o header x-api-key vai no pedido',
     ]
     for (const text of keep) expect(scrub(text)).toBe(text)
   })
@@ -525,6 +528,12 @@ describe('scrub', () => {
     expect(scrub('senha=1234')).toBe(`senha=${REMOVED}`)
     expect(scrub('API_KEY=abcd')).toBe(`API_KEY=${REMOVED}`)
     expect(scrub('postgres://app:x@db')).toBe(`postgres://app:${REMOVED}@db`)
+  })
+
+  test('texto longo sem espaço é limpo em tempo linear', () => {
+    const started = Date.now()
+    for (const text of ['a'.repeat(300_000), 'x://'.repeat(75_000), 'ab1-'.repeat(75_000), 'a:'.repeat(150_000)]) scrub(text)
+    expect(Date.now() - started).toBeLessThan(2_000)
   })
 
   test('rodar duas vezes dá o mesmo resultado', () => {

@@ -1011,6 +1011,10 @@ async function transcriptsOf($: EngineInterface, root: string, currentId: string
   return lists.flat().sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
+// Sem dia achado, o teto batido muda a leitura do aviso: pode haver sessão sua entre os arquivos não lidos.
+const uncappedOf = (unread: number): string =>
+  unread === 0 ? '' : ` (${unread} arquivos ficaram sem leitura: teto de ${MAX_HEADS} leituras curtas e ${MAX_TAILS} longas).`
+
 // Leituras do clique: um objeto por clique, passado a todas as leituras dele.
 type Budget = { heads: number; tails: number; unread: number }
 
@@ -1136,7 +1140,7 @@ async function runResume($: EngineInterface): Promise<void> {
   const pick = await pickDay($, root, await transcriptsOf($, root, await $.session.id()), today, budget)
   switch (pick.kind) {
     case 'none':
-      $.ui.toast(`Nenhuma sessão sua nos últimos ${DAY_LOOKBACK} dias`)
+      $.ui.toast(`Nenhuma sessão sua nos últimos ${DAY_LOOKBACK} dias${uncappedOf(budget.unread)}`)
       return
     case 'reuse': {
       const path = dayPathOf(root, pick.day)

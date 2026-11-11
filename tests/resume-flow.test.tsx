@@ -491,6 +491,13 @@ describe('botão Retomada (Resumo do dia)', () => {
     expect(fileOf(t, '2026-11-10')).toContain('400 leituras curtas e 60 longas por clique): 2 arquivos')
   })
 
+  test('teto batido antes de achar sessão sua: o aviso de "nenhuma sessão" diz quantos ficaram sem leitura', async ($, on) => {
+    const many = Array.from({ length: 401 }, (_, i) => [`${PROJECTS}/-home-dev-loja-api/a${i}.jsonl`, { ...automatic('x', 10, 19)[1], mtimeMs: at(10, 19) + i }] as [string, File])
+    const t = await boot($, on, Object.fromEntries([...many, session('loja-api', 's1', 10, 8)]))
+    await click(t)
+    expect(t.log.toasts).toContain('Nenhuma sessão sua nos últimos 7 dias (2 arquivos ficaram sem leitura: teto de 400 leituras curtas e 60 longas).')
+  })
+
   test('mensagem do botão só no começo do arquivo (fora do fim lido): o recado da sessão não vai ao modelo', async ($, on) => {
     const bot = { type: 'user', message: { content: `${RESUME_MESSAGE_HEAD} tudo` }, timestamp: new Date(at(10, 9)).toISOString(), entrypoint: 'cli' }
     const awayLine = { type: 'system', subtype: 'away_summary', content: 'recado-de-todos-os-projetos', timestamp: new Date(at(10, 10)).toISOString() }

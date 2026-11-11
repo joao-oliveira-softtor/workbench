@@ -274,11 +274,13 @@ export function sliceTextOf(slice: Ok): string {
 // aspas, vírgula ou fim de linha.
 const NOT_ALNUM_BEFORE = '(?<![A-Za-z0-9])'
 const VALUE = `[^\\s"',]{4,}`
+const AUTH_SCHEME = '(?:Basic|Bearer|Token|Digest|Negotiate|NTLM|ApiKey|Key|DPoP|OAuth|Hawk|AWS4-HMAC-SHA256)'
 const SCRUBS: [RegExp, string][] = [
   // Sem a linha de fim (texto cortado ou colado pela metade), apaga até o fim do texto.
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, REMOVED],
   // Usuário (pode ser vazio) e senha: a senha vai até o ÚLTIMO `@` do endereço, porque pode ter `@` ou `/` sem codificar.
-  [/([a-z][\w+.-]*:\/\/[^\s:/@]*:)[^\s"'<>]*(?=@)/gi, `$1${REMOVED}`],
+  // O esquema só começa fora de palavra e cada parte tem teto: sem isso, uma linha longa sem espaço custa tempo quadrático.
+  [/(?<![\w+.-])([a-z][\w+.-]{0,30}:\/\/[^\s:/@]{0,256}:)[^\s"'<>]{0,256}(?=@)/gi, `$1${REMOVED}`],
   [/\b(Bearer )[A-Za-z0-9._~+/=-]{16,}/gi, `$1${REMOVED}`],
   [/(?=[\w.-]{30})eyJ[\w-]*\.[\w-]+\.[\w-]+/g, REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}sk-[A-Za-z0-9_-]{20,}`, 'g'), REMOVED],
@@ -292,8 +294,10 @@ const SCRUBS: [RegExp, string][] = [
   // Em JSON o valor vai até a aspa de fechamento (pode ter espaço e aspa escapada).
   [/("(?:password|token|secret|api_key)"\s*:\s*")(?:[^"\\]|\\.)+(?=")/gi, `$1${REMOVED}`],
   [/\b((?:password|senha)\s*:\s*["']?)[^\s"',]+/gi, `$1${REMOVED}`],
-  // Cabeçalho: qualquer esquema (Basic, Token…) ou nenhum, e o valor depois dele.
-  [/\b(authorization"?\s*:\s*"?(?:[A-Za-z][\w-]*[ \t]+)?)[^\s"',]+/gi, `$1${REMOVED}`],
+  // Cabeçalho com esquema conhecido: o esquema fica e o valor sai. Sem esquema conhecido não dá para saber onde está o
+  // valor, então sai o resto da linha.
+  [new RegExp(`\\b(authorization"?[ \\t]*:[ \\t]*"?${AUTH_SCHEME}[ \\t]+)[^\\s"',]+`, 'gi'), `$1${REMOVED}`],
+  [new RegExp(`\\b(authorization"?[ \\t]*:)(?![ \\t]*"?(?:${AUTH_SCHEME}[ \\t]|\\[removido\\]))([ \\t]*"?)[^\\n"']+`, 'gi'), `$1$2${REMOVED}`],
   [/\b(x-api-key"?\s*:\s*"?)[^\s"',]+/gi, `$1${REMOVED}`],
   [new RegExp(`\\b(password|senha|token|api_?key)=${VALUE}`, 'gi'), `$1=${REMOVED}`],
   [new RegExp(`\\b([A-Z0-9_]*(?:_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*=["']?)${VALUE}`, 'g'), `$1${REMOVED}`],
