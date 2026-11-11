@@ -460,12 +460,12 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
   // O commit da correção faz `git add -A`: a fase só começa com a árvore limpa antes e depois da instalação.
-  const before = await run($, wtGit(real, 'status', '--porcelain'))
+  const before = await porcelainOf($, real)
   if (before === null) return { error: 'não deu para ler o git status da worktree' }
   if (before.trim() !== '') return { error: `a worktree ${real} tem mudanças que nenhum commit levou: ${changedPathsOf(before)}. Commite ou descarte e clique de novo.` }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
   if (installed.code !== 0) return { error: `o comando ${matrix.installCommand} falhou (${exitOf(installed)})` }
-  const after = await run($, wtGit(real, 'status', '--porcelain'))
+  const after = await porcelainOf($, real)
   if (after === null) return { error: 'não deu para ler o git status da worktree' }
   if (after.trim() !== '') return { error: `o comando de instalação mudou arquivos do repositório: ${changedPathsOf(after)}. Ajuste o installCommand da matriz (por exemplo npm ci) e clique de novo.` }
   return { fixDir: real, baseline: statusSumOf(after) }
@@ -551,8 +551,13 @@ export async function freshDir($: EngineInterface, dir: string): Promise<boolean
 
 // O resumo do `git status` (é o que a linha de base guarda no estado); null = o git falhou.
 export async function statusOf($: EngineInterface, fixDir: string): Promise<string | null> {
-  const status = await run($, wtGit(fixDir, 'status', '--porcelain'))
+  const status = await porcelainOf($, fixDir)
   return status === null ? null : statusSumOf(status)
+}
+
+// O `git status --porcelain` da worktree, por extenso (os avisos mostram os caminhos); null = o git falhou.
+export async function porcelainOf($: EngineInterface, fixDir: string): Promise<string | null> {
+  return run($, wtGit(fixDir, 'status', '--porcelain'))
 }
 
 // Antes de cada corretor: a pasta de saída existe e o fix.json da tentativa anterior some.

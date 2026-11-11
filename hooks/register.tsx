@@ -39,6 +39,7 @@ import {
   afterJudgeOf,
   agentStepOf,
   cellDirOf,
+  changedPathsOf,
   fixBranchOf,
   fixConfirmTextOf,
   fixDirOf,
@@ -85,6 +86,7 @@ import {
   isReproduced,
   judgeOf,
   outcomesOf,
+  porcelainOf,
   resetFixOut,
   rootSnapOf,
   setupWorktree,
@@ -1240,12 +1242,13 @@ async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | nu
   if (next === null) await teardownQa($, f.env, null)
 }
 
-// Mudança que o mod não deixou (um corretor cortado no meio): o próximo commit a levaria junto. Para a fase e avisa, sem
-// commitar nem desfazer: o usuário decide.
+// Mudança que o mod não deixou (um corretor cortado no meio ou um arquivo que o app criou ao rodar): o próximo commit a
+// levaria junto. Para a fase e avisa, sem commitar nem desfazer: o usuário decide.
 async function isLeftover($: EngineInterface, f: FixCtx): Promise<boolean> {
-  if ((await statusOf($, f.fixDir)) === (await read($, qaFix))?.baseline) return false
+  const status = await porcelainOf($, f.fixDir)
+  if ((status === null ? null : statusSumOf(status)) === (await read($, qaFix))?.baseline) return false
   await update($, qaJob, () => null)
-  $.ui.toast(`QA: a worktree ${f.fixDir} tem mudanças que nenhum commit levou (de um corretor cortado no meio?); a fase parou sem commitar nem desfazer. Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
+  $.ui.toast(`QA: há mudanças na pasta de correção que nenhum commit levou: ${changedPathsOf(status ?? '')}; podem ser de um corretor interrompido ou arquivos criados pelo app ao rodar. A fase parou sem commitar nem desfazer (${f.fixDir}). Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
   return true
 }
 
