@@ -16,6 +16,8 @@ export const LIST_CAP = 10
 export const TOOL_TEXT_CAP = 200
 export const ANALYZE_MAX_TOKENS = 2_500
 export const ANALYZE_TIMEOUT_MS = 90_000
+// Prazo da compactação do botão (a única medida no disco levou 77 s). A API não cancela: o prazo só avisa.
+export const COMPACT_TIMEOUT_MS = 300_000
 // Folga para a linha "[… N mensagens omitidas …]".
 export const MARKER_ROOM = 60
 

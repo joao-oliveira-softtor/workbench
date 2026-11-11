@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { COMPACT_CRITERIA, RESUME_HEAD, resumeFailureOf, resumePromptOf } from '../hooks/compact'
+import { COMPACT_CRITERIA, COMPACT_TIMEOUT_MS, RESUME_HEAD, resumeFailureOf, resumePromptOf } from '../hooks/compact'
 
 // Fluxo inteiro pelo engine: o `$` real do plugin, o painel montado, o botão apertado, o relógio e o armazenamento
 // simulados, e hooks do teste no lugar do engine (conversa, modelo, compactação, prompt, toast, turnos). As variáveis do
@@ -419,5 +419,81 @@ describe('retomada do botão', () => {
     await tick(t)
     expect(t.log.toasts).toContain('Compactado, mas há texto no campo de prompt: não retomou sozinho.')
     expect(t.log.logs).toContain('workbench: aviso não gravado (outro mod barrou)')
+  })
+})
+
+// Tarefa 4: a compactação do botão tem prazo (só avisa: a API não cancela) e a recarga no meio não deixa outra começar por cima.
+describe('prazo e recarga da compactação do botão', () => {
+  // A compactação fica presa até o teste soltar.
+  const held = () => {
+    const gate: { open?: () => void } = {}
+    const wait = new Promise<void>(resolve => {
+      gate.open = resolve
+    })
+    return { gate, compact: async () => {
+      await wait
+      return 'ok' as const
+    } }
+  }
+
+  test('prazo estourado: grava o aviso, mantém a trava e, quando termina, não retoma', async ($, on) => {
+    const h = held()
+    const t = await boot($, on, { compact: h.compact })
+    await press(t)
+    await tick(t)
+    expect(t.log.compacts.length).toBe(1)
+    await t.clock.advance(COMPACT_TIMEOUT_MS)
+    expect(t.log.notices).toContain('A compactação passou de 5 min sem terminar; o mod não vai retomar sozinho.')
+    await press(t)
+    expect(t.log.toasts).toContain('Compactação em andamento.')
+    h.gate.open?.()
+    await tick(t)
+    expect(t.log.submits).toEqual([])
+    expect(await label(t)).toBe('Compactar e continuar')
+  })
+
+  test('compactação que termina no prazo não grava o aviso de prazo', async ($, on) => {
+    const t = await boot($, on)
+    await press(t)
+    await tick(t)
+    await t.clock.advance(COMPACT_TIMEOUT_MS)
+    expect(t.log.notices.some(text => text.includes('5 min'))).toBe(false)
+    expect(t.log.submits.length).toBe(1)
+  })
+
+  test('um prompt entrou durante a compactação: o aviso fica gravado', async ($, on) => {
+    const t = await boot($, on, {
+      compact: async () => {
+        await startTurn($, 't6')
+        return 'ok'
+      },
+    })
+    await press(t)
+    await tick(t)
+    expect(t.log.notices).toContain('Compactado, mas um prompt entrou antes: não retomou sozinho.')
+    await endTurn($, 't6')
+  })
+
+  test('recarga durante a compactação: grava o aviso, e o botão recusa até um turno começar', async ($, on) => {
+    const h = held()
+    const t = await boot($, on, { compact: h.compact })
+    await press(t)
+    await tick(t)
+    await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+    expect(t.log.notices).toContain('O mod recarregou durante a compactação: confira a conversa e clique de novo se precisar.')
+    await press(t)
+    expect(t.log.toasts).toContain('Compactação em andamento (começou antes de o mod recarregar).')
+    expect(await label(t)).toBe('Compactar e continuar')
+    await startTurn($, 't7')
+    await endTurn($, 't7')
+    await press(t)
+    expect(await label(t)).toBe('Na fila…')
+    h.gate.open?.()
+  })
+
+  test('recarga sem compactação em curso: nenhum aviso', async ($, on) => {
+    const t = await boot($, on)
+    await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+    expect(t.log.notices.some(text => text.includes('recarregou'))).toBe(false)
   })
 })

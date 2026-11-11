@@ -4,16 +4,17 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import type { Row, Snapshot, StaleReport } from '../types'
 import { askAnalysis, askHaiku, askRefine, askRoute, collect, measureSizes, repoRoot, unsizedPaths } from './collect'
 import {
+  COMPACT_TIMEOUT_MS,
+  RESUME_HEAD,
+  TRANSCRIPT_CAP,
   buttonLabel,
   clickAction,
   hasTurnIntervened,
   instructionsOf,
   parseAnalysis,
+  resumeFailureOf,
   resumePromptOf,
   shouldStart,
-  RESUME_HEAD,
-  TRANSCRIPT_CAP,
-  resumeFailureOf,
   tokensLabel,
   transcriptOf,
 } from './compact'
@@ -173,6 +174,7 @@ const suggesting = atom({ plugin: 'workbench', key: 'suggesting' } as const, fal
 const armed = atom({ plugin: 'workbench', key: 'armed' } as const, null)
 const removal = atom({ plugin: 'workbench', key: 'removal' } as const, null)
 const compacting = atom({ plugin: 'workbench', key: 'compacting' } as const, null)
+const compactingAt = atom({ plugin: 'workbench', key: 'compactingAt' } as const, null)
 // Etapa do botão EGM e o doc revisado. Não zera no session.start: ele roda também a cada recarga do mod.
 const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_START)
 const refining = atom({ plugin: 'workbench', key: 'refining' } as const, false)
@@ -648,11 +650,18 @@ async function pressCompact($: EngineInterface): Promise<void> {
       await setStep($, null)
       $.ui.toast('Fila cancelada: nada foi compactado.')
       return
-    case 'queue':
+    case 'queue': {
+      // Recarga no meio de uma compactação do botão: a trava zerou, mas a compactação pode seguir rodando.
+      const at = await read($, compactingAt)
+      if (at !== null && (await $.clock.now()) - at < COMPACT_TIMEOUT_MS) {
+        $.ui.toast('Compactação em andamento (começou antes de o mod recarregar).')
+        return
+      }
       compactPhase = 'queued'
       await setStep($, 'queued')
       if (isMainTurn) $.ui.toast('Compactação na fila: roda quando o turno acabar.')
       return
+    }
     default:
       throw new Error('Caso não tratado: ' + String(click satisfies never))
   }
@@ -688,10 +697,35 @@ async function sendResume($: EngineInterface, text: string): Promise<void> {
   await notice($, `Retomada falhou: o prompt não entrou (${drop}).`)
 }
 
+// A compactação corre contra o prazo. Passou dele: avisa e segue esperando (a API não cancela, e soltar a trava antes
+// deixaria um segundo clique compactar por cima); quando ela termina, devolve 'late' e o botão só solta a trava.
+async function compactWithin($: EngineInterface, instructions: string) {
+  const startedAt = await $.clock.now()
+  await update($, compactingAt, () => startedAt)
+  const stop = new AbortController()
+  let isLate = false
+  const deadline = $.clock.sleep(COMPACT_TIMEOUT_MS, { signal: stop.signal }).then(
+    () => {
+      isLate = true
+      return notice($, 'A compactação passou de 5 min sem terminar; o mod não vai retomar sozinho.')
+    },
+    () => {},
+  )
+  try {
+    const done = await settle(() => $.session.compact({ instructions }))
+    return isLate ? ('late' as const) : done
+  } finally {
+    stop.abort()
+    await deadline
+    await settle(() => update($, compactingAt, () => null))
+  }
+}
+
 // Compacta e retoma. `seen` é o contador de turnos de quando a análise começou: se mudou, o usuário voltou a trabalhar.
 async function runCompact($: EngineInterface, analysis: Analysis | null, seen: number): Promise<void> {
   const agents = await runningAgentsOf($)
-  const done = await settle(() => $.session.compact({ instructions: instructionsOf(analysis, agents) }))
+  const done = await compactWithin($, instructionsOf(analysis, agents))
+  if (done === 'late') return
   const intervened = hasTurnIntervened({ isMainTurn, mainTurns, seen })
   if (!done.ok) {
     // Rejeitou porque um turno começou: espera a vez. Qualquer outro motivo (API, nada a compactar) NÃO repete a análise.
@@ -705,7 +739,7 @@ async function runCompact($: EngineInterface, analysis: Analysis | null, seen: n
   }
   $.ui.toast(`Compactado ${tokensLabel(done.value.tokensBefore, done.value.tokensAfter)}`.trim())
   if (intervened) {
-    $.ui.toast('Compactado, mas um prompt entrou antes: não retomou sozinho.')
+    await notice($, 'Compactado, mas um prompt entrou antes: não retomou sozinho.')
     return
   }
   if ((await $.prompt.read()).text !== '') {
@@ -1671,6 +1705,8 @@ export const register: Register = on => {
     resumeWatch = null
     planQueued = null
     refinePhase = 'idle'
+    // Antes de zerar o rótulo: se ele dizia "compactando", a recarga caiu no meio (`compactingAt` NÃO zera aqui).
+    if ((await read($, compacting)) === 'compacting') await notice($, 'O mod recarregou durante a compactação: confira a conversa e clique de novo se precisar.')
     await update($, compacting, () => null)
     await update($, refining, () => false)
     qaQueued = null
@@ -1842,10 +1878,12 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // Só o loop principal conta (subagentes e a fork da compactação trazem agentId): a compactação espera a sessão parar.
-  on('turn.start', async (_$, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       isMainTurn = true
       mainTurns += 1
+      // Um turno só começa com a compactação terminada (ela não roda durante um turno).
+      await settle(() => update($, compactingAt, () => null))
       // O texto-base com `includes`: vale mesmo que o engine ponha uma moldura em volta do pedido do mod.
       if (resumeWatch !== null && 'text' in resumeWatch) resumeWatch = e.text.includes(RESUME_HEAD) ? { turnId: e.turnId } : null
     }
