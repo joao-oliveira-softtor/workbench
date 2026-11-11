@@ -261,7 +261,7 @@ describe('botão Retomada (Resumo do dia)', () => {
     })
     await click(t)
     expect(t.log.models).toEqual([])
-    expect(t.log.tails).toEqual([])
+    expect(t.log.tails).toEqual([`${PROJECTS}/-home-dev-site/hoje.jsonl`])
     expect(t.log.writes).toEqual([])
     expect(t.log.submits[0]).toContain('conteúdo-guardado')
     expect(t.log.toasts).toContain(`Resumo do dia: o resumo de 2026-11-10 já existe (${OUT}/2026-11-10.md). Apague-o para refazer.`)
@@ -453,14 +453,27 @@ describe('botão Retomada (Resumo do dia)', () => {
     expect(t.log.submits[0]).toContain('guardado-ontem')
   })
 
-  test('o dia mais recente já tem o resumo: reaproveita sem nenhuma leitura, nem curta', async ($, on) => {
+  test('arquivo de ontem tocado hoje e <anteontem>.md gravado: resume ontem, não reaproveita anteontem', async ($, on) => {
+    const touched: [string, File] = [`${PROJECTS}/-home-dev-loja-api/ontem.jsonl`, { text: jsonl(human('pedido de ontem', at(10, 18))), mtimeMs: at(11, 8) }]
+    const t = await boot($, on, {
+      ...Object.fromEntries([touched, session('site', 's9', 9, 15)]),
+      [`${OUT}/2026-11-09.md`]: { text: 'guardado-anteontem', mtimeMs: at(9, 20) },
+    })
+    await click(t)
+    expect(t.log.writes).toEqual([`${OUT}/2026-11-10.md`])
+    expect(t.log.submits[0]).not.toContain('guardado-anteontem')
+  })
+
+  test('o dia mais recente já tem o resumo: reaproveita lendo só os de hoje, sem modelo', async ($, on) => {
     const t = await boot($, on, {
       ...Object.fromEntries([session('loja-api', 's1', 10, 18), session('site', 'hoje', 11, 8)]),
       [`${OUT}/2026-11-10.md`]: { text: 'guardado', mtimeMs: at(10, 20) },
     })
     await click(t)
-    expect(t.log.heads).toEqual([])
-    expect(t.log.tails).toEqual([])
+    expect(t.log.heads).toEqual([`${PROJECTS}/-home-dev-site/hoje.jsonl`])
+    expect(t.log.tails).toEqual([`${PROJECTS}/-home-dev-site/hoje.jsonl`])
+    expect(t.log.models).toEqual([])
+    expect(t.log.submits[0]).toContain('guardado')
   })
 
   test('rodada sem terminal sai pela leitura curta: sem leitura longa, e conta como "sem terminal"', async ($, on) => {

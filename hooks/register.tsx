@@ -1048,16 +1048,14 @@ async function readAll($: EngineInterface, files: readonly Transcript[], budget:
 const lastDaysOf = (reads: readonly Read[]): string[] =>
   reads.flatMap(r => (r.slice?.kind === 'ok' ? [workDayOf(r.slice.lastHumanAt, DAY_CUTOFF_HOUR)] : []))
 
-// Ordem: se o dia mais recente antes de hoje (pela data de modificação) já tem <dia>.md, reaproveita e para, sem ler nada
-// (C7) → senão lê os de hoje, e os dias do último pedido seu neles entram nos candidatos (um `--resume` hoje não tira
-// ontem da lista) → do dia mais novo para o mais velho (até DAY_LOOKBACK): <dia>.md existente é reaproveitado; senão lê
-// os do dia e para no primeiro com sessão sua. Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
+// Ordem: lê os de hoje primeiro (contam nos tetos, sem modelo) → candidatos = dias de modificação + dia do último pedido
+// seu nos de hoje (um `--resume` hoje não tira ontem da lista) → do mais novo para o mais velho (até DAY_LOOKBACK): o
+// <dia>.md do dia escolhido é reaproveitado (C7) e para; senão lê os do dia e para no primeiro com sessão sua. O
+// reaproveitamento só se decide depois de escolher o dia. Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
 async function pickDay($: EngineInterface, root: string, files: readonly Transcript[], today: string, budget: Budget): Promise<DayPick> {
   const oldest = shiftDay(today, -DAY_LOOKBACK)
   const isCandidate = (d: string): boolean => d < today && d >= oldest
-  const byMtime = [...new Set(files.map(fileDayOf))].filter(isCandidate).sort().reverse()
-  const latest = byMtime[0]
-  if (latest !== undefined && (await $.fs.exists(dayPathOf(root, latest)))) return { kind: 'reuse', day: latest }
+  const byMtime = [...new Set(files.map(fileDayOf))].filter(isCandidate)
   const ofToday = await readAll($, files.filter(f => fileDayOf(f) === today), budget)
   const days = [...new Set([...byMtime, ...lastDaysOf(ofToday).filter(isCandidate)])].sort().reverse()
   for (const day of days) {
@@ -1158,9 +1156,9 @@ async function runResume($: EngineInterface): Promise<void> {
 }
 
 // Roda no timer de 3 s, só com o pedido na fila (o dispatch de um botão pode ser abandonado). Trava solta no finally.
-// Ordem: sessão limpa → pastas → listar arquivos com data → <dia>.md do dia mais recente reaproveitado sem ler nada → ler
-// os de hoje → escolher o dia (reaproveita o <dia>.md dele, se houver) → ler os do dia → descartes → teto de MAX_CALLS
-// chamadas ao modelo → grava → envia.
+// Ordem: sessão limpa → pastas → listar arquivos com data → ler os de hoje (curta e, nos interativos, longa; sem modelo)
+// → escolher o dia (datas de modificação + último pedido seu nos de hoje) → <dia>.md desse dia existe: reaproveita e para
+// → senão lê os do dia → descartes → teto de MAX_CALLS chamadas ao modelo → grava → envia.
 async function drainResume($: EngineInterface): Promise<void> {
   if (resumePhase !== 'queued') return
   resumePhase = 'running'
