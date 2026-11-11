@@ -59,7 +59,7 @@ O botão **Retomada** resume o seu último dia de trabalho, de todos os projetos
 ### Limites e privacidade
 
 - O resumo junta projetos de clientes diferentes e entra na conversa onde você clicou. Abra a Retomada numa sessão na sua pasta pessoal, fora de qualquer projeto.
-- A limpeza de segredos cobre os formatos que ela conhece: chaves privadas (`-----BEGIN … PRIVATE KEY-----`, mesmo sem a linha de fim), senha em endereço (`postgres://usuario:senha@host`), `Bearer`, `Authorization` e `x-api-key`, tokens com prefixo conhecido (`sk-`, `sk_live_`, `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`, `glpat-`, `xox…-`, `AKIA…`, `AIza…`, JWT) e `senha=`/`password=`/`token=`/`api_key=`, `password: …` e `"password"`/`"token"`/`"secret"`/`"api_key"` em JSON. Um segredo em formato desconhecido pode passar, tanto para o modelo quanto para o arquivo do dia, e o modelo pode repeti-lo no resumo.
+- A limpeza de segredos cobre formatos conhecidos (chaves de API comuns, tokens, senhas em endereço, em JSON e na linha de comando, chaves privadas) e pode deixar passar um segredo em formato fora da lista, tanto para o modelo quanto para o arquivo do dia; o modelo pode repeti-lo no resumo.
 - Arquivos de sessão muito grandes (mais de 3 MB) são lidos só pelo final: o começo da sessão pode faltar.
 - O conteúdo das sessões vai para o modelo barato (Haiku), pela conta que o Claude Code estiver usando.
 - Não há tarefa agendada: o mod não captura nada sozinho, só lê o que existe no disco quando você clica.

@@ -277,13 +277,13 @@ const VALUE = `[^\\s"',]{4,}`
 const AUTH_SCHEME = '(?:Basic|Bearer|Token|Digest|Negotiate|NTLM|ApiKey|Key|DPoP|OAuth|Hawk|AWS4-HMAC-SHA256)'
 const SCRUBS: [RegExp, string][] = [
   // Sem a linha de fim (texto cortado ou colado pela metade), apaga até o fim do texto.
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, REMOVED],
-  // Usuário (pode ser vazio) e senha: a senha vai até o ÚLTIMO `@` do endereço, porque pode ter `@` ou `/` sem codificar.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REMOVED],
+  // Usuário (pode ser vazio) e senha: a senha vai até o ÚLTIMO `@` antes do primeiro `/`, `?`, `#` ou espaço.
   // O esquema só começa fora de palavra e cada parte tem teto: sem isso, uma linha longa sem espaço custa tempo quadrático.
-  [/(?<![\w+.-])([a-z][\w+.-]{0,30}:\/\/[^\s:/@]{0,256}:)[^\s"'<>]{0,256}(?=@)/gi, `$1${REMOVED}`],
+  [/(?<![\w+.-])([a-z][\w+.-]{0,30}:\/\/[^\s:/?#@]{0,256}:)[^\s/?#"'<>]{0,256}(?=@)/gi, `$1${REMOVED}`],
   [/\b(Bearer )[A-Za-z0-9._~+/=-]{16,}/gi, `$1${REMOVED}`],
-  [/(?=[\w.-]{30})eyJ[\w-]*\.[\w-]+\.[\w-]+/g, REMOVED],
-  [new RegExp(`${NOT_ALNUM_BEFORE}sk-[A-Za-z0-9_-]{20,}`, 'g'), REMOVED],
+  // Só começa fora de palavra: sem isso, `eyJeyJeyJ…` sem ponto custa tempo quadrático.
+  [/(?<![\w-])(?=[\w.-]{30})eyJ[\w-]*\.[\w-]+\.[\w-]+/g, REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}sk_(?:live|test)_[A-Za-z0-9]{10,}`, 'g'), REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}github_pat_[A-Za-z0-9_]{22,}`, 'g'), REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}gh[pousr]_[A-Za-z0-9]{30,}`, 'g'), REMOVED],
@@ -292,19 +292,27 @@ const SCRUBS: [RegExp, string][] = [
   [new RegExp(`${NOT_ALNUM_BEFORE}xox[abp]-[A-Za-z0-9-]{10,}`, 'g'), REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}AKIA[A-Z0-9]{16}(?![A-Z0-9])`, 'g'), REMOVED],
   // Em JSON o valor vai até a aspa de fechamento (pode ter espaço e aspa escapada).
-  [/("(?:password|token|secret|api_key)"\s*:\s*")(?:[^"\\]|\\.)+(?=")/gi, `$1${REMOVED}`],
+  [/("(?:password|passwd|token|access_token|refresh_token|secret|client_secret|api_?key)"\s*:\s*")(?:[^"\\]|\\.)+(?=")/gi, `$1${REMOVED}`],
+  [/(--password[= \t]+)[^\s"']+/g, `$1${REMOVED}`],
+  // Senha colada no `-p` só quando a linha é o comando do banco, para não pegar `docker run -p8080`.
+  [/^([ \t]*(?:mysql|mysqldump|psql)\b[^\n]*?[ \t]-p)[^\s"']+/gm, `$1${REMOVED}`],
   [/\b((?:password|senha)\s*:\s*["']?)[^\s"',]+/gi, `$1${REMOVED}`],
   // Cabeçalho com esquema conhecido: o esquema fica e o valor sai. Sem esquema conhecido não dá para saber onde está o
   // valor, então sai o resto da linha.
   [new RegExp(`\\b(authorization"?[ \\t]*:[ \\t]*"?${AUTH_SCHEME}[ \\t]+)[^\\s"',]+`, 'gi'), `$1${REMOVED}`],
   [new RegExp(`\\b(authorization"?[ \\t]*:)(?![ \\t]*"?(?:${AUTH_SCHEME}[ \\t]|\\[removido\\]))([ \\t]*"?)[^\\n"']+`, 'gi'), `$1$2${REMOVED}`],
   [/\b(x-api-key"?\s*:\s*"?)[^\s"',]+/gi, `$1${REMOVED}`],
-  [new RegExp(`\\b(password|senha|token|api_?key)=${VALUE}`, 'gi'), `$1=${REMOVED}`],
+  [new RegExp(`\\b(password|passwd|pwd|senha|token|api_?key)=${VALUE}`, 'gi'), `$1=${REMOVED}`],
   [new RegExp(`\\b([A-Z0-9_]*(?:_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*=["']?)${VALUE}`, 'g'), `$1${REMOVED}`],
 ]
 
+// `sk-` só com cara de chave (prefixo conhecido, ou dígito e maiúscula): `sk-learn-…` é nome de pacote. A conferência
+// fica fora da regex porque um lookahead por dígito e maiúscula custa tempo quadrático em `sk-sk-sk-…`.
+const SK_KEY = new RegExp(`${NOT_ALNUM_BEFORE}sk-[A-Za-z0-9_-]{20,}`, 'g')
+const isSkKey = (m: string): boolean => /^sk-(?:ant|proj)-/.test(m) || (/[0-9]/.test(m) && /[A-Z]/.test(m))
+
 export function scrub(text: string): string {
-  return SCRUBS.reduce((t, [re, to]) => t.replace(re, to), text)
+  return SCRUBS.reduce((t, [re, to]) => t.replace(re, to), text).replace(SK_KEY, m => (isSkKey(m) ? REMOVED : m))
 }
 
 export type SessionRef = { project: string; at: number }
@@ -320,14 +328,15 @@ export type DayInput = {
   unread?: number
 }
 
-// Marcador do bloco de histórico no pedido ao modelo e na mensagem do botão. Qualquer variante dele dentro do conteúdo
-// (caixa, espaço, acento) vira texto comum, para o conteúdo não fechar o bloco antes da hora.
+// Marcador do bloco de histórico no pedido ao modelo e na mensagem do botão. Dentro do conteúdo todo `<` e `>` vira
+// `‹` e `›` (é texto para ler, não para colar), então nenhuma variante do marcador fecha o bloco; os caracteres
+// invisíveis (\p{Cf}) saem antes.
 const HISTORY_OPEN = '<historico>'
 const HISTORY_CLOSE = '</historico>'
-const HISTORY_MARK = /<\s*\/?\s*hist[oó]rico\s*>/gi
 
 export function historyBlockOf(text: string): string {
-  return [HISTORY_OPEN, text.replace(HISTORY_MARK, '[historico]'), HISTORY_CLOSE].join('\n')
+  const inert = text.replace(/\p{Cf}/gu, '').replaceAll('<', '‹').replaceAll('>', '›')
+  return [HISTORY_OPEN, inert, HISTORY_CLOSE].join('\n')
 }
 
 export const RESUME_RULES = [
