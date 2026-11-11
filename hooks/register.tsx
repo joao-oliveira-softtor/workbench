@@ -11,11 +11,13 @@ import {
   parseAnalysis,
   resumePromptOf,
   shouldStart,
+  RESUME_HEAD,
   TRANSCRIPT_CAP,
+  resumeFailureOf,
   tokensLabel,
   transcriptOf,
 } from './compact'
-import type { Analysis, Phase, Step } from './compact'
+import type { Analysis, Phase, RunningAgent, Step } from './compact'
 import {
   EGM_COMMANDS,
   PLAN_LABELS,
@@ -126,6 +128,7 @@ import { DELEGATE_CONTEXT, formatRoute, isUserOrigin, parseRoute, shouldDelegate
 import {
   ABORT_BACKOFF_MS,
   ARM_MS,
+  ENDED,
   MAX_REMOVAL_LINES,
   REMOVER_AGENT,
   REMOVER_PROMPT,
@@ -199,6 +202,9 @@ let abortedUntil = 0
 let compactPhase: Phase = 'idle'
 let isMainTurn = false
 let mainTurns = 0
+// Vigia do turno da retomada: `{ text }` depois do envio; o próximo turn.start do loop principal a troca por `{ turnId }`
+// (era o da retomada) ou `null` (não era). Limite: uma retomada que ficou na fila atrás de outro turno não é vigiada.
+let resumeWatch: { text: string } | { turnId: string } | null = null
 // EGM: o clique só enfileira a etapa (o dispatch de um botão pode ser abandonado); o drainPlan faz o trabalho no timer.
 let planQueued: PlanStep | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
@@ -423,7 +429,13 @@ async function drainSizes($: EngineInterface): Promise<void> {
 
 async function agentsOf($: EngineInterface): Promise<Listed[] | null> {
   const listed = await settle(() => $.agent.list())
-  return listed.ok ? listed.value.map(a => ({ id: a.id, type: a.type, status: a.status })) : null
+  return listed.ok ? listed.value.map(a => ({ id: a.id, type: a.type, status: a.status, description: a.description })) : null
+}
+
+// Os agentes que ainda rodam, para a compactação e a retomada. A listagem que falha vira lista vazia: retoma sem a linha.
+async function runningAgentsOf($: EngineInterface): Promise<RunningAgent[]> {
+  const listed = (await agentsOf($)) ?? []
+  return listed.filter(a => !ENDED.has(a.status)).map(a => ({ id: a.id, type: a.type, description: a.description ?? '' }))
 }
 
 // O agente é o remover? Fora da lista (ou com a consulta falhando) não é: o turn.complete não encerra nada por um agente
@@ -657,9 +669,29 @@ async function analyzeSession($: EngineInterface): Promise<Analysis | null> {
   return analysis
 }
 
+// Aviso gravado: o toast some, a linha `system` fica no transcrito (o modelo não a lê). Nunca derruba o fluxo.
+async function notice($: EngineInterface, text: string): Promise<void> {
+  $.ui.toast(text)
+  const wrote = await settle(() => $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }))
+  const reason = wrote.ok ? wrote.value.deny : wrote.error
+  if (reason !== undefined) $.ui.log(`workbench: aviso não gravado (${reason})`)
+}
+
+// Manda a retomada no molde do sendQaStep. A vigia é armada ANTES: o submit só resolve depois que o turno começou, então
+// o turn.start da retomada chega durante a espera. No sucesso não mexe nela (o turn.start decide).
+async function sendResume($: EngineInterface, text: string): Promise<void> {
+  resumeWatch = { text }
+  const sent = await settle(() => $.prompt.submit({ text }))
+  const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  if (drop === undefined) return
+  resumeWatch = null
+  await notice($, `Retomada falhou: o prompt não entrou (${drop}).`)
+}
+
 // Compacta e retoma. `seen` é o contador de turnos de quando a análise começou: se mudou, o usuário voltou a trabalhar.
 async function runCompact($: EngineInterface, analysis: Analysis | null, seen: number): Promise<void> {
-  const done = await settle(() => $.session.compact({ instructions: instructionsOf(analysis) }))
+  const agents = await runningAgentsOf($)
+  const done = await settle(() => $.session.compact({ instructions: instructionsOf(analysis, agents) }))
   const intervened = hasTurnIntervened({ isMainTurn, mainTurns, seen })
   if (!done.ok) {
     // Rejeitou porque um turno começou: espera a vez. Qualquer outro motivo (API, nada a compactar) NÃO repete a análise.
@@ -676,7 +708,11 @@ async function runCompact($: EngineInterface, analysis: Analysis | null, seen: n
     $.ui.toast('Compactado, mas um prompt entrou antes: não retomou sozinho.')
     return
   }
-  await $.prompt.submit({ text: resumePromptOf(analysis) })
+  if ((await $.prompt.read()).text !== '') {
+    await notice($, 'Compactado, mas há texto no campo de prompt: não retomou sozinho.')
+    return
+  }
+  await sendResume($, resumePromptOf(analysis, await runningAgentsOf($)))
 }
 
 // Roda no timer de 3 s. Só começa com o pedido na fila e a sessão parada; um turno que aparece durante a análise devolve
@@ -1632,6 +1668,7 @@ export const register: Register = on => {
     compactPhase = 'idle'
     isMainTurn = false
     mainTurns = 0
+    resumeWatch = null
     planQueued = null
     refinePhase = 'idle'
     await update($, compacting, () => null)
@@ -1809,6 +1846,8 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       isMainTurn = true
       mainTurns += 1
+      // O texto-base com `includes`: vale mesmo que o engine ponha uma moldura em volta do pedido do mod.
+      if (resumeWatch !== null && 'text' in resumeWatch) resumeWatch = e.text.includes(RESUME_HEAD) ? { turnId: e.turnId } : null
     }
     return next(e)
   })
@@ -1816,6 +1855,11 @@ export const register: Register = on => {
   // Fim do turno do remover: limpa a trava e refaz o snapshot. Aqui um agente que não se consegue identificar NÃO encerra nada.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) isMainTurn = false
+    const watch = resumeWatch
+    if (e.agentId === undefined && watch !== null && 'turnId' in watch && watch.turnId === e.turnId) {
+      resumeWatch = null
+      if (e.reason !== 'answer') await notice($, resumeFailureOf(e.reason))
+    }
     // Só marca o fim do agente do item de QA em curso: quem avança é o timer.
     const agentId = e.agentId
     if (agentId !== undefined && (await read($, qaJob))?.current?.agentId === agentId) {

@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { COMPACT_CRITERIA, resumePromptOf } from '../hooks/compact'
+import { COMPACT_CRITERIA, RESUME_HEAD, resumeFailureOf, resumePromptOf } from '../hooks/compact'
 
 // Fluxo inteiro pelo engine: o `$` real do plugin, o painel montado, o botão apertado, o relógio e o armazenamento
 // simulados, e hooks do teste no lugar do engine (conversa, modelo, compactação, prompt, toast, turnos). As variáveis do
@@ -26,12 +26,20 @@ type Over = {
   onModel?: (n: number) => Promise<void>
   // Roda dentro do session.compact: decide o que a compactação devolve.
   compact?: (n: number) => Promise<Outcome>
+  // O que `$.agent.list()` devolve; 'fail' = nenhum hook responde e a listagem rejeita.
+  agents?: readonly { id: string; type: string; status: 'running' | 'completed' | 'idle'; description: string }[] | 'fail'
+  // O texto do campo de prompt (`$.prompt.read()`).
+  typed?: string
+  // Roda dentro do prompt.submit, antes de o pedido entrar; devolver { drop } recusa o pedido.
+  onSubmit?: (text: string) => Promise<{ drop: string } | undefined>
+  // O session.append recusa com este motivo.
+  appendDeny?: string
 }
 
 async function boot($: Engine, on: On, over: Over = {}) {
   const clock = mock.clock(on)
   mock.store(on)
-  const log = { models: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[], notices: [] as string[] }
+  const log = { models: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[], notices: [] as string[], logs: [] as string[] }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('agent.register', (_$, e) => ({ value: { agent: e.name } }))
@@ -50,16 +58,25 @@ async function boot($: Engine, on: On, over: Over = {}) {
     // Uma compactação deixa ao menos o resumo; o engine recusa lista vazia.
     return { messages: [{ role: 'user' as const, text: 'resumo da conversa', toolUses: [] }], tokensBefore: 120_000, tokensAfter: 18_000 }
   })
-  on('prompt.submit', (_$, e) => {
+  on('prompt.submit', async (_$, e) => {
+    const refused = await over.onSubmit?.(e.text)
+    if (refused !== undefined) return refused
     log.submits.push(e.text)
     return { text: e.text }
   })
+  const agents = over.agents ?? []
+  if (agents !== 'fail') on('agent.list', () => ({ value: agents.map(a => ({ ...a })) }))
+  on('prompt.read', () => ({ value: { text: over.typed ?? '', cursor: 0 } }))
   on('ui.toast', (_$, e) => {
     log.toasts.push(e.text)
     return { value: undefined }
   })
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$, e) => {
+    log.logs.push(e.text)
+    return { value: undefined }
+  })
   on('session.append', (_$, e, next) => {
+    if (over.appendDeny !== undefined) return { deny: over.appendDeny }
     const text = e.message.content[0]?.text
     if (typeof text === 'string') log.notices.push(text)
     return next(e)
@@ -289,5 +306,118 @@ describe('registro de toda compactação', () => {
       'workbench: compactação trigger=plugin, agente=não, parada=sim, resultado=compactou',
     ])
     expect(t.log.submits.length).toBe(1)
+  })
+})
+
+// Tarefa 3: a retomada do botão confere o envio, vigia o turno dela e grava o aviso quando ele morre.
+describe('retomada do botão', () => {
+  const failed = (t: Rig) => t.log.notices.filter(text => text.startsWith('Retomada falhou'))
+  const resumeText = (t: Rig) => t.log.submits.find(text => text.includes(RESUME_HEAD))
+  const endWith = ($: Engine, id: string, reason: 'answer' | 'aborted' | 'refusal' | 'error') => {
+    const fields = { answer: '', durationMs: 1, isAborted: reason === 'aborted', turnId: id }
+    return reason === 'refusal'
+      ? $.turn.complete({ ...fields, reason, refusal: { category: null, explanation: null } })
+      : $.turn.complete({ ...fields, reason })
+  }
+
+  test('agentes rodando entram nas instruções e na retomada; os acabados não', async ($, on) => {
+    const t = await boot($, on, {
+      agents: [
+        { id: 'ag-1', type: 'executor', status: 'running', description: 'roda os testes' },
+        { id: 'ag-2', type: 'scout', status: 'completed', description: 'já voltou' },
+      ],
+    })
+    await press(t)
+    await tick(t)
+    const line = 'Agentes ainda rodando: ag-1 (executor): roda os testes'
+    expect(t.log.compacts[0]).toContain(line)
+    expect(resumeText(t)).toContain(line)
+    expect(resumeText(t)).not.toContain('ag-2')
+  })
+
+  test('a listagem de agentes falha: compacta e retoma sem a linha de agentes', async ($, on) => {
+    const t = await boot($, on, { agents: 'fail' })
+    await press(t)
+    await tick(t)
+    expect(t.log.submits.length).toBe(1)
+    expect(t.log.submits[0]).not.toContain('Agentes ainda rodando')
+  })
+
+  test('campo de prompt com texto: compacta, não retoma e grava o aviso', async ($, on) => {
+    const t = await boot($, on, { typed: 'rascunho meu' })
+    await press(t)
+    await tick(t)
+    expect(t.log.compacts.length).toBe(1)
+    expect(t.log.submits).toEqual([])
+    expect(t.log.notices).toContain('Compactado, mas há texto no campo de prompt: não retomou sozinho.')
+  })
+
+  test('pedido recusado ({ drop }): grava o aviso com o motivo', async ($, on) => {
+    const t = await boot($, on, { onSubmit: async () => ({ drop: 'limite de uso' }) })
+    await press(t)
+    await tick(t)
+    expect(failed(t)).toEqual(['Retomada falhou: o prompt não entrou (limite de uso).'])
+  })
+
+  test('turno da retomada com erro, na ordem real (o turno começa antes de o envio resolver): grava o aviso', async ($, on) => {
+    const t = await boot($, on, {
+      onSubmit: async text => {
+        if (text.includes(RESUME_HEAD)) await $.turn.start({ text, turnId: 'r1' })
+        return undefined
+      },
+    })
+    await press(t)
+    await tick(t)
+    expect(failed(t)).toEqual([])
+    await endWith($, 'r1', 'error')
+    expect(failed(t)).toEqual([resumeFailureOf('error')])
+  })
+
+  test('mesma coisa na ordem inversa (o envio resolve e o turno começa depois): o aviso sai igual', async ($, on) => {
+    const t = await boot($, on)
+    await press(t)
+    await tick(t)
+    const text = resumeText(t) ?? ''
+    await $.turn.start({ text: `moldura\n${text}`, turnId: 'r2' })
+    await endWith($, 'r2', 'refusal')
+    expect(failed(t)).toEqual([resumeFailureOf('refusal')])
+  })
+
+  test('turno da retomada que responde: nenhum aviso', async ($, on) => {
+    const t = await boot($, on)
+    await press(t)
+    await tick(t)
+    await $.turn.start({ text: resumeText(t) ?? '', turnId: 'r3' })
+    await endWith($, 'r3', 'answer')
+    expect(failed(t)).toEqual([])
+  })
+
+  test('outro turno começa antes do da retomada: a vigia sai e o erro dele não vira aviso', async ($, on) => {
+    const t = await boot($, on)
+    await press(t)
+    await tick(t)
+    await $.turn.start({ text: 'outro pedido', turnId: 'o1' })
+    await endWith($, 'o1', 'error')
+    await $.turn.start({ text: resumeText(t) ?? '', turnId: 'r4' })
+    await endWith($, 'r4', 'error')
+    expect(failed(t)).toEqual([])
+  })
+
+  test('recarga do mod zera a vigia: o turno da retomada depois dela não gera aviso', async ($, on) => {
+    const t = await boot($, on)
+    await press(t)
+    await tick(t)
+    await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+    await $.turn.start({ text: resumeText(t) ?? '', turnId: 'r5' })
+    await endWith($, 'r5', 'error')
+    expect(failed(t)).toEqual([])
+  })
+
+  test('aviso recusado pelo session.append: fica o toast e uma linha no log', async ($, on) => {
+    const t = await boot($, on, { typed: 'rascunho', appendDeny: 'outro mod barrou' })
+    await press(t)
+    await tick(t)
+    expect(t.log.toasts).toContain('Compactado, mas há texto no campo de prompt: não retomou sozinho.')
+    expect(t.log.logs).toContain('workbench: aviso não gravado (outro mod barrou)')
   })
 })
