@@ -587,6 +587,39 @@ describe('QA: fase Executar', () => {
     expect(t.log.submits.at(-1)).toContain(`${runDir}/relatorio.md`)
   })
 
+  // A pasta gravável da tentativa 1 contém a r2/: o que a tentativa 1 deixar lá não vale como repetição.
+  test('r2/veredito.json plantado na tentativa 1: a célula que passou continua PASS e a que falhou repete numa r2 vazia', async ($, on) => {
+    const { t, ui } = await toRun($, on, {}, { ...MATRIX, cells: [cellOf('c1', 'admin'), cellOf('c2', 'admin')] })
+    await click(t, ui)
+    const runDir = t.runDir()
+    const finish = async (id: string, files: [string, string][] = []) => {
+      await tick(t)
+      for (const [k, v] of files) t.files.set(k, v)
+      await ended($, id)
+      await tick(t)
+    }
+    const planted: [string, string] = [`${runDir}/celulas/c1/r2/veredito.json`, verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT])]
+    await finish('a1', [planted])
+    await finish('a2', [[`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'PASS')]])
+    expect(t.files.has(planted[0])).toBe(false)
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER])
+    await tick(t)
+    expect(t.guard().ctx.session).toContain('c2')
+    const plantedC2: [string, string] = [`${runDir}/celulas/c2/r2/veredito.json`, verdictOf('c2', 'PASS')]
+    await finish('a3', [plantedC2])
+    await finish('a4', [[`${runDir}/celulas/c2/veredito.json`, verdictOf('c2', 'FAIL-APP', [FAIL_DEFECT])]])
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER, QA_RUNNER, QA_OBSERVER, QA_RUNNER])
+    expect(t.files.has(plantedC2[0])).toBe(false)
+    expect(t.guard().ctx.runDir).toBe(`${runDir}/celulas/c2/r2`)
+    await finish('a5')
+    await finish('a6', [[`${runDir}/celulas/c2/r2/veredito.json`, verdictOf('c2', 'FAIL-APP', [FAIL_DEFECT])]])
+    await tick(t)
+    const report = t.files.get(`${runDir}/relatorio.md`) ?? ''
+    expect(report).toContain('- c1 · cadastro · admin · 1280px · risco alto · PASS\n')
+    expect(report).toContain('- c2 · cadastro · admin · 1280px · risco alto · FAIL-APP\n')
+    expect(report).toContain('- INSTÁVEL: 0\n')
+  })
+
   test('runner e observer gravam só na pasta da célula: a matriz e o veredito de outra célula, nunca (a execução só é lida)', async ($, on) => {
     const { t } = await running($, on)
     const runDir = t.runDir()

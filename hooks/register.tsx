@@ -1019,6 +1019,8 @@ async function advanceCell($: EngineInterface, env: QaEnv, runDir: string, matri
     case 'runner':
       return launchObserver($, env, runCtxOf(env, matrix, runDir, c), matrix, cell, cellDirOf(runDir, c.cell, c.attempt), c)
     case 'observer': {
+      // A r2/ fica dentro da pasta gravável da tentativa 1: o que ela deixou lá não vale como repetição.
+      if (c.attempt === 1) await freshDir($, cellDirOf(runDir, c.cell, 2))
       await closeSession($, env, c.session)
       const final = finalVerdictOf(cell, await cellVerdictOf($, runDir, c.cell, c.attempt))
       return nextRunOf(c, final) === 'repeat' ? startCell($, env, runDir, matrix, c.cell, 2) : null
