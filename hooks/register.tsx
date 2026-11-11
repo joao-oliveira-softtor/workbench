@@ -11,6 +11,7 @@ import {
   parseAnalysis,
   resumePromptOf,
   shouldStart,
+  TRANSCRIPT_CAP,
   tokensLabel,
   transcriptOf,
 } from './compact'
@@ -648,7 +649,7 @@ async function pressCompact($: EngineInterface): Promise<void> {
 // O Sonnet lê o fim da conversa e devolve a análise; qualquer falha vira null e a compactação segue só com os critérios.
 async function analyzeSession($: EngineInterface): Promise<Analysis | null> {
   const read = await settle(() => $.session.messages())
-  const transcript = read.ok ? transcriptOf(read.value) : ''
+  const transcript = read.ok ? transcriptOf(read.value, TRANSCRIPT_CAP, true) : ''
   const asked = transcript === '' ? null : await askAnalysis($, transcript)
   const analysis = asked?.ok ? parseAnalysis(asked.text) : null
   if (analysis === null) $.ui.toast('Análise falhou: compactando só com os critérios.')

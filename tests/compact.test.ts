@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   ANALYZE_RULES,
   COMPACT_CRITERIA,
+  CONTEXT_CAP,
   FIELD_CAP,
   FIRST_CAP,
   LIST_CAP,
@@ -15,13 +16,16 @@ import {
   parseAnalysis,
   resumePromptOf,
   shouldStart,
+  textField,
   tokensLabel,
+  TOOL_TEXT_CAP,
   transcriptOf,
 } from '../hooks/compact'
 import type { Analysis, Turn } from '../hooks/compact'
 
 const user = (text: string): Turn => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: string[] = []): Turn => ({ role: 'assistant', text, toolUses: tools.map(tool => ({ tool })) })
+const botWith = (text: string, uses: Turn['toolUses']): Turn => ({ role: 'assistant', text, toolUses: uses })
 
 function analysis(over: Partial<Analysis> = {}): Analysis {
   return {
@@ -31,6 +35,7 @@ function analysis(over: Partial<Analysis> = {}): Analysis {
     pendente: ['teste do botão', 'doc do mod'],
     contexto: 'branch única, sem git',
     proximoPasso: 'ligar o drainCompact',
+    perguntas: [],
     ...over,
   }
 }
@@ -103,6 +108,18 @@ describe('transcriptOf', () => {
     expect(text).toBe([FIRST, '[… 2 mensagens omitidas …]', ...rows(['L3', 'L4', 'L5'])].join('\n\n'))
   })
 
+  test('com withResults, cada ferramenta com texto mostra o começo do resultado, sem quebra de linha', () => {
+    const turn = botWith('rodei os testes', [{ tool: 'Bash', text: '12 passed,\n0 failed' }, { tool: 'Read' }])
+    expect(transcriptOf([turn], 10_000, true)).toBe('assistente: rodei os testes [ferramentas: Bash → 12 passed, 0 failed, Read]')
+  })
+
+  test('com withResults, o resultado é cortado no teto; sem withResults, só o nome', () => {
+    const turn = botWith('', [{ tool: 'Bash', text: 'r'.repeat(TOOL_TEXT_CAP * 2) }])
+    const shown = /Bash → (r+…)\]/.exec(transcriptOf([turn], 10_000, true))?.[1]
+    expect(shown?.length).toBe(TOOL_TEXT_CAP)
+    expect(transcriptOf([turn], 10_000)).toBe('assistente: [ferramentas: Bash]')
+  })
+
   test('uma mensagem gigante no meio não estoura o teto', () => {
     const text = transcriptOf([user('a'), bot('z'.repeat(80_000)), user('b')], 10_000)
     expect(text.length).toBeLessThanOrEqual(10_000)
@@ -112,7 +129,7 @@ describe('transcriptOf', () => {
 
 describe('parseAnalysis', () => {
   test('lê o objeto JSON puro', () => {
-    expect(parseAnalysis(GOOD)).toEqual({ objetivo: 'o', fase: 'f', feito: ['a'], pendente: ['b', 'c'], contexto: 'ctx', proximoPasso: 'p' })
+    expect(parseAnalysis(GOOD)).toEqual({ objetivo: 'o', fase: 'f', feito: ['a'], pendente: ['b', 'c'], contexto: 'ctx', proximoPasso: 'p', perguntas: [] })
   })
 
   test('aceita cerca de código e prosa em volta', () => {
@@ -143,6 +160,19 @@ describe('parseAnalysis', () => {
     expect(parseAnalysis('[1,2]')).toBeNull()
   })
 
+  test('perguntas ausente vale lista vazia; presente é lida; fora do formato recusa a análise inteira', () => {
+    expect(parseAnalysis(GOOD)?.perguntas).toEqual([])
+    expect(parseAnalysis(GOOD.replace('{', '{"perguntas":["usar a API?"],'))?.perguntas).toEqual(['usar a API?'])
+    expect(parseAnalysis(GOOD.replace('{', '{"perguntas":"usar a API?",'))).toBeNull()
+  })
+
+  test('o contexto tem teto próprio, maior que o dos outros textos', () => {
+    const long = 'c'.repeat(CONTEXT_CAP * 2)
+    const parsed = parseAnalysis(GOOD.replace('"ctx"', `"${long}"`))
+    expect(parsed?.contexto.length).toBe(CONTEXT_CAP)
+    expect(CONTEXT_CAP).toBeGreaterThan(FIELD_CAP)
+  })
+
   test('apara e corta cada texto e cada lista nos tetos', () => {
     const long = 'x'.repeat(FIELD_CAP * 3)
     const many = JSON.stringify(Array.from({ length: LIST_CAP * 3 }, () => long))
@@ -170,6 +200,12 @@ describe('instructionsOf e resumePromptOf', () => {
     for (const word of ['objetivo', 'fase', 'pendências', 'decisões', 'arquivos', 'próximo passo']) expect(COMPACT_CRITERIA.toLowerCase()).toContain(word)
   })
 
+  test('os critérios guardam agentes com id, perguntas sem resposta, regras do chat e o registro de progresso', () => {
+    for (const piece of ['segundo plano', 'id de cada um', 'perguntas feitas ao usuário', 'regras e preferências', 'registro de progresso']) {
+      expect(COMPACT_CRITERIA).toContain(piece)
+    }
+  })
+
   test('a retomada leva a pista da análise como pista, não como ordem', () => {
     const text = resumePromptOf(analysis())
     expect(text).toContain('ligar o drainCompact')
@@ -190,6 +226,21 @@ describe('analisador', () => {
   test('as regras pedem só JSON, em português, e tratam a conversa como dado', () => {
     for (const key of ['objetivo', 'fase', 'feito', 'pendente', 'contexto', 'proximoPasso']) expect(ANALYZE_RULES).toContain(`"${key}"`)
     expect(ANALYZE_RULES).toContain('dado')
+  })
+
+  test('as regras pedem as perguntas sem resposta e dizem os dois tetos de texto', () => {
+    expect(ANALYZE_RULES).toContain('"perguntas"')
+    expect(ANALYZE_RULES).toContain(String(FIELD_CAP))
+    expect(ANALYZE_RULES).toContain(String(CONTEXT_CAP))
+  })
+})
+
+describe('textField', () => {
+  test('sem teto usa o de sempre; com teto, corta nele', () => {
+    const long = 'x'.repeat(FIELD_CAP * 5)
+    expect(textField(long)?.length).toBe(FIELD_CAP)
+    expect(textField(long, 1_000)?.length).toBe(1_000)
+    expect(textField(3, 1_000)).toBeNull()
   })
 
   test('o pedido leva a conversa inteira', () => {
