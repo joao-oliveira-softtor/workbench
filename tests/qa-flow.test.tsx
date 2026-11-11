@@ -665,8 +665,9 @@ describe('QA: fase Executar', () => {
     for (const origin of others) expect(await from('qa stop', origin)).toContain('só o usuário')
     expect(t.log.guards).toHaveLength(guards)
     expect(await label(ui)).toMatch(/^QA: c1/)
-    expect(await from('qa stop', { kind: 'sdk' })).not.toContain('só o usuário')
+    expect(await from('qa stop', { kind: 'sdk' })).toBe('QA parado. Clique em QA para retomar.')
     expect(await label(ui)).toBe('QA: Executar')
+    expect(await from('qa stop', { kind: 'sdk' })).toBe('QA: nenhum trabalho em curso.')
   })
 
   test('fim da execução com a gravação de {} falhando: o arquivo da trava é apagado e o aviso sai', async ($, on) => {
@@ -1013,6 +1014,16 @@ describe('QA: clique Corrigir', () => {
     await click(t, ui)
     expect(t.log.toasts.at(-1)).toContain('celulas/<id>/teste.spec.ts')
     expect(await label(ui)).toBe('QA')
+  })
+
+  // O timer de 3 s e o prazo de 15 s caem juntos: o segundo clique é tratado exatamente no fim do prazo, que ainda vale.
+  test('segundo clique exatamente no fim do prazo: ainda confirma e cria a worktree', async ($, on) => {
+    const { t, ui } = await toFix($, on)
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('Aperte de novo')
+    await t.clock.advance(ARM_MS - 3_100)
+    await click(t, ui)
+    expect(t.log.runs.some(a => a.includes('worktree') && a.includes('add'))).toBe(true)
   })
 
   test('o primeiro clique só mostra os comandos, o segundo fora do prazo arma de novo; instalação que falha não avança', async ($, on) => {
@@ -1733,5 +1744,16 @@ describe('remoção pelo botão: a trava do remover', () => {
     expect(writes.some(w => w.text !== '{}')).toBe(true)
     expect(t.log.spawns).toEqual([])
     expect(t.log.toasts.at(-1)).toContain('trava do remover')
+  })
+
+  test('pasta do QA que não dá para criar: o contexto não é gravado, o remover não é lançado e o aviso sai', async ($, on) => {
+    const t = await boot($, on, { run: a => (a.join(' ') === `mkdir -p ${QA_ROOT}` ? { exitCode: 1, stdout: '' } : collectRun(a)) })
+    await tick(t)
+    const ui = await $.ui.mount(PANEL)
+    await ui.press({ key: 'accept' })
+    await ui.press({ key: 'accept' })
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain('Não deu para gravar a trava do remover')
   })
 })
