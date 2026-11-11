@@ -912,6 +912,8 @@ const runIdIn = (runDir: string): string => runDir.split('/').pop() ?? ''
 // Dois tempos: o primeiro clique mostra os comandos e arma; o segundo em até ARM_MS prepara a worktree e monta a fila.
 async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matrix): Promise<void> {
   const { all, left } = await fixQueueAt($, flow.runDir, await outcomesOf($, flow.runDir, matrix))
+  // Parado (ou fechado) entre o último defeito resolvido e o fim da fila: o clique faz o fechamento que faltou.
+  if (all.length > 0 && left.length === 0) return closeFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix }, all)
   if (left.length === 0) {
     await setFlow($, f => ({ ...f, step: 'plan' as const }))
     $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${flow.runDir}/celulas/<id>/teste.spec.ts.`)
@@ -1215,7 +1217,7 @@ async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void>
 // Sem item em curso: o próximo defeito da fila, ou o fim da fila.
 async function nextDefect($: EngineInterface, f: FixCtx, queue: readonly string[]): Promise<void> {
   const [next, ...rest] = queue
-  if (next === undefined) return closeFix($, f)
+  if (next === undefined) return closeFix($, f, (await read($, qaFix))?.defects ?? [])
   await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
   return setFixCurrent($, f, await startDefect($, f, next))
 }
@@ -1436,9 +1438,9 @@ async function warnRootMoved($: EngineInterface, env: QaEnv): Promise<void> {
 
 // Fim da fila: correcoes.md, testes das células PASS na worktree, etapa de volta ao começo e o resumo para a sessão. Worktree
 // sumida: os testes ficam de fora, com aviso, e a fase volta ao começo do mesmo jeito (o relatório já saiu).
-async function closeFix($: EngineInterface, f: FixCtx): Promise<void> {
+async function closeFix($: EngineInterface, f: FixCtx, defects: readonly string[]): Promise<void> {
   const outcomes = await outcomesOf($, baseDirOf(f.runDir), f.matrix)
-  const reportPath = await writeFixReport($, f.runDir, (await read($, qaFix))?.defects ?? [])
+  const reportPath = await writeFixReport($, f.runDir, defects)
   const lost = await commitPassTests($, f.runDir, f.matrix, outcomes, f.fixDir).then(
     () => null,
     (err: unknown) => {

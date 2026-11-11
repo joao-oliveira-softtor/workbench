@@ -1305,6 +1305,22 @@ describe('QA: fase Corrigir', () => {
     expect(types(t)).toEqual([QA_FIXER, QA_RUNNER, QA_OBSERVER])
   })
 
+  // Fechado entre o último defeito resolvido e o fechamento da fila: o clique faz o fechamento, não diz "nenhum defeito marcado".
+  test('reabrir com todos os defeitos já resolvidos: o clique grava o correcoes.md e volta ao começo', async ($, on) => {
+    const { t, ui } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
+    for (let i = 0; i < 3; i++) await fixerEnds($, t)
+    expect(resultOf(t)).toMatchObject({ status: 'desistiu' })
+    expect(t.files.has(`${t.runDir()}/correcoes.md`)).toBe(false)
+    await reopen($, t)
+    expect(await label(ui)).toBe('QA: Corrigir')
+    await click(t, ui)
+    expect(t.log.toasts.join('\n')).not.toContain('nenhum defeito marcado')
+    expect(t.files.get(`${t.runDir()}/correcoes.md`)).toContain(D1)
+    expect(await label(ui)).toBe('QA')
+    await tick(t)
+    expect(t.log.submits.at(-1)).toContain(`${t.runDir()}/correcoes.md`)
+  })
+
   test('stop no meio das conferências do corretor: o commit que chega depois do stop também é desfeito', async ($, on) => {
     const { t } = await fixing($, on, { hold: holdOnce(k => k.includes(' commit -q -m Corrige a API')).hold })
     t.wt.status = ' M a.ts'
