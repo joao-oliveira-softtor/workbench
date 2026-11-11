@@ -86,6 +86,8 @@ type Over = {
   spawns?: { unlisted?: boolean; deny?: string }[]
   hold?: (key: string) => boolean
   failWrite?: (path: string, text: string) => boolean
+  // `failRegister`: o registro daquele tipo de agente falha (vai ao hook de baixo do engine, como o `failWrite`).
+  failRegister?: (name: string) => boolean
   // `stall`: a resposta àquele comando nunca chega (o passo some, como num reload do mod no meio dele).
   stall?: (key: string) => boolean
   // O que o `$.store` e os arquivos já têm antes do session.start (uma sessão anterior do Claude Code).
@@ -252,7 +254,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
     return { value: undefined }
   })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  on('agent.register', (_$, e) => {
+  on('agent.register', (_$, e, next) => {
+    if (over.failRegister?.(e.name) === true) return next(e)
     log.agents.push({ name: e.name, command: JSON.stringify(e.hooks ?? null) })
     return { value: { agent: e.name } }
   })
@@ -365,6 +368,14 @@ describe('QA: registro', () => {
     }
     expect(qa[0]?.command).toBe('null')
     expect(t.log.tools).toEqual(['qa_auth'])
+  })
+
+  test('registro de um tipo que falha: o QA fica desligado com o motivo e o clique não lança nada', async ($, on) => {
+    const t = await boot($, on, { failRegister: name => name === 'qa-fixer' })
+    const ui = await mount($)
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('QA: falha ao registrar os agentes')
+    expect(t.log.spawns).toEqual([])
   })
 
   test('runner, observer e fixer ficam escondidos do modelo; o planner não', async ($, on) => {
