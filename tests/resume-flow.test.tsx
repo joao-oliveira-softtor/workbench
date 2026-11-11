@@ -242,6 +242,12 @@ describe('botão Retomada (Resumo do dia)', () => {
     expect(t.log.writes).toEqual(['/cfg/workbench-resume/2026-11-10.md'])
   })
 
+  test('CLAUDE_CONFIG_DIR vazio vale como ausente: a pasta vem de HOME', async ($, on) => {
+    const t = await boot($, on, { [`${HOME}/.claude/projects/-home-dev-site/s1.jsonl`]: session('site', 's1', 10, 11)[1] }, { env: { CLAUDE_CONFIG_DIR: '', HOME } })
+    await click(t)
+    expect(t.log.writes).toEqual([`${HOME}/.claude/workbench-resume/2026-11-10.md`])
+  })
+
   test('sem HOME, a pasta vem de USERPROFILE', async ($, on) => {
     const t = await boot($, on, { '/u/.claude/projects/-home-dev-site/s1.jsonl': session('site', 's1', 10, 11)[1] }, { env: { USERPROFILE: '/u' } })
     await click(t)
@@ -294,6 +300,26 @@ describe('botão Retomada (Resumo do dia)', () => {
     expect(t.log.models).toHaveLength(1)
     expect(fileOf(t, '2026-11-10')).not.toContain('## site')
     expect(fileOf(t, '2026-11-10')).toContain('1 sem atividade sua no dia')
+  })
+
+  test('a única chamada ao modelo falha: o aviso traz o motivo dela', async ($, on) => {
+    const t = await boot($, on, Object.fromEntries([session('loja-api', 's1', 10, 18)]), { model: () => null })
+    await click(t)
+    expect(t.log.notices).toEqual(['Resumo do dia falhou: aborted'])
+  })
+
+  test('arquivo de hoje ilegível não impede o resumo do dia anterior', async ($, on) => {
+    const t = await boot($, on, Object.fromEntries([session('loja-api', 's1', 10, 18), session('site', 'hoje', 11, 8)]), {
+      unreadable: p => p.endsWith('/hoje.jsonl'),
+    })
+    await click(t)
+    expect(t.log.writes).toEqual([`${HOME}/.claude/workbench-resume/2026-11-10.md`])
+  })
+
+  test('o dia exatamente DAY_LOOKBACK dias antes de hoje ainda é candidato', async ($, on) => {
+    const t = await boot($, on, Object.fromEntries([session('loja-api', 's1', 4, 18)]))
+    await click(t)
+    expect(t.log.writes).toEqual([`${HOME}/.claude/workbench-resume/2026-11-04.md`])
   })
 
   test('todas as chamadas ao modelo falham: nada gravado, aviso gravado e nada mandado', async ($, on) => {

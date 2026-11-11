@@ -47,13 +47,19 @@ type Over = {
 async function boot($: Engine, on: On, over: Over = {}) {
   const clock = mock.clock(on)
   mock.store(on)
-  const log = { models: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[], notices: [] as string[], logs: [] as string[] }
+  const log = { models: [] as string[], prompts: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[], notices: [] as string[], logs: [] as string[] }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('agent.register', (_$, e) => ({ value: { agent: e.name } }))
-  on('session.messages', () => ({ value: [{ role: 'user' as const, text: 'quero o botão de compactação', toolUses: [] }] }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user' as const, text: 'quero o botão de compactação', toolUses: [] },
+      { role: 'assistant' as const, text: 'rodei os testes', toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: {}, text: '3 testes passaram' }] },
+    ],
+  }))
   on('model.complete', async (_$, e) => {
     log.models.push(e.model)
+    log.prompts.push(e.prompt)
     await over.onModel?.(log.models.length)
     if (over.isAnswered === false) return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: USAGE } }
     return { value: { isAnswered: true as const, text: over.answer ?? GOOD, usage: USAGE } }
@@ -118,6 +124,7 @@ describe('botão Compactar e continuar', () => {
     expect(await label(t)).toBe('Na fila…')
     await tick(t)
     expect(t.log.models).toEqual(['sonnet'])
+    expect(t.log.prompts[0]).toContain('Bash → 3 testes passaram')
     expect(t.log.compacts.length).toBe(1)
     expect(t.log.compacts[0]).toContain(COMPACT_CRITERIA)
     expect(t.log.compacts[0]).toContain('objetivo-x')
@@ -499,6 +506,18 @@ describe('prazo e recarga da compactação do botão', () => {
     await endTurn($, 't7')
     await press(t)
     expect(await label(t)).toBe('Na fila…')
+    h.gate.open?.()
+  })
+
+  test('recarga durante a compactação com o relógio longe do zero: o botão recusa do mesmo jeito', async ($, on) => {
+    const h = held()
+    const t = await boot($, on, { compact: h.compact })
+    await t.clock.advance(10 * COMPACT_TIMEOUT_MS)
+    await press(t)
+    await tick(t)
+    await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+    await press(t)
+    expect(t.log.toasts).toContain('Compactação em andamento (começou antes de o mod recarregar).')
     h.gate.open?.()
   })
 
