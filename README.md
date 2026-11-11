@@ -84,7 +84,7 @@ Leia antes de usar em um projeto com dados que importam.
 10. Duas sessões abertas no mesmo repositório dividem a etapa guardada do botão e a pasta da execução: use uma por vez.
 11. Só os `.env*` da raiz do repositório são copiados para a worktree; os de subpastas não.
 12. Os valores de localStorage da sessão salva (o armazenamento do navegador) passam como argumento de processo e aparecem por um instante na lista de processos do computador.
-13. Se o corretor for cortado no meio, o mod avisa que sobrou mudança na worktree e para. Um novo clique em "QA: Corrigir" leva essa sobra junto no commit do próximo defeito: commite ou descarte antes, se não a quiser.
+13. Se o corretor for cortado no meio, o mod avisa que sobrou mudança na worktree e para. Um novo clique em "QA: Corrigir" só começa com a worktree limpa: commite ou descarte a sobra antes. O mesmo vale depois da instalação: se o comando de instalar mudar arquivos do repositório (um `npm install` que reescreve o `package-lock.json`, por exemplo), a fase não começa e o aviso pede outro comando (`npm ci`).
 14. Pasta pessoal ou pasta do mod com `"`, `$`, crase ou `\` no caminho desligam o QA e as remoções (o comando da trava quebraria).
 15. A regra "só você dispara o QA" depende de o Claude Code dizer de onde veio o comando (a origem que ele carimba em cada pedido). Se ele carimbar errado, o mod não tem como saber.
 16. O verificador da trava foi provado com o Node 24; o Node 22 (o mínimo, 22.6) não foi testado.

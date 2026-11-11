@@ -189,6 +189,12 @@ export function projectSlugOf(root: string): string {
 // O `git status` da worktree no estado é só tamanho e hash: o texto inteiro pode ter milhares de linhas.
 export const statusSumOf = (status: string): string => `${status.length}:${hashOf(status)}`
 
+// Até 5 caminhos de um `git status --porcelain` (linhas "XY caminho"), para os avisos.
+export function changedPathsOf(status: string): string {
+  const paths = status.split('\n').filter(l => l.trim() !== '').map(l => l.slice(3))
+  return [...paths.slice(0, 5), ...(paths.length > 5 ? ['…'] : [])].join(', ')
+}
+
 export const qaRootOf = (home: string, root: string): string => `${qaHomeOf(home)}/${projectSlugOf(root)}`
 
 // Chave do `$.store` por repositório: a etapa do botão sobrevive a fechar o Claude Code (o código do arquivo da trava não: é um

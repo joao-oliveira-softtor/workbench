@@ -1375,14 +1375,32 @@ describe('QA: fase Corrigir, bordas', () => {
     expect(resultOf(r.t)).toMatchObject({ status: 'não reproduzido na worktree' })
   })
 
-  test('linha de base relida antes de cada corretor: a worktree suja depois da instalação não engana o "não mudou nada"', async ($, on) => {
-    const { t, ui } = await toFix($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
-    t.wt.status = ' M package-lock.json'
+  // O commit da correção faz `git add -A`: o que a instalação mudou iria junto no commit do primeiro defeito.
+  test('instalação que muda arquivos do repositório: a fase não começa e o aviso diz os caminhos e o que ajustar', async ($, on) => {
+    const box: { t?: T } = {}
+    const { t, ui } = await toFix($, on, {
+      run: a => {
+        if (a.join(' ') === 'npm ci' && box.t !== undefined) box.t.wt.status = ' M package-lock.json\n?? .cache/x\n'
+        return undefined
+      },
+    })
+    box.t = t
     await click(t, ui)
     await click(t, ui)
-    await fixerEnds($, t)
-    await fixerEnds($, t, FIX_OK, '')
-    expect(t.log.spawns[2]?.prompt).toContain('o corretor não mudou nada')
+    expect(t.log.toasts.at(-1)).toBe('QA: o comando de instalação mudou arquivos do repositório: package-lock.json, .cache/x. Ajuste o installCommand da matriz (por exemplo npm ci) e clique de novo.')
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(await label(ui)).toBe('QA: Corrigir')
+  })
+
+  test('worktree reaproveitada com mudanças de antes da instalação: o aviso não culpa a instalação', async ($, on) => {
+    const { t, ui } = await toFix($, on)
+    t.wt.status = ' M src/meio.ts\n'
+    await click(t, ui)
+    await click(t, ui)
+    expect(t.log.toasts.at(-1)).toContain('tem mudanças que nenhum commit levou: src/meio.ts')
+    expect(t.log.runs.some(a => a.join(' ') === 'npm ci')).toBe(false)
+    expect(t.log.spawns).toEqual([])
   })
 
   test('clique durante a preparação da worktree espera ela acabar', async ($, on) => {

@@ -41,6 +41,7 @@ import {
   authFileOf,
   binOf,
   cellDirOf,
+  changedPathsOf,
   configFileOf,
   fixOutDirOf,
   guardFileOf,
@@ -458,10 +459,16 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (refusal !== null) return { error: `a trava recusaria o corretor na worktree ${real} (${refusal})` }
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
+  // O commit da correção faz `git add -A`: a fase só começa com a árvore limpa antes e depois da instalação.
+  const before = await run($, wtGit(real, 'status', '--porcelain'))
+  if (before === null) return { error: 'não deu para ler o git status da worktree' }
+  if (before.trim() !== '') return { error: `a worktree ${real} tem mudanças que nenhum commit levou: ${changedPathsOf(before)}. Commite ou descarte e clique de novo.` }
   const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
   if (installed.code !== 0) return { error: `o comando ${matrix.installCommand} falhou (${exitOf(installed)})` }
-  const baseline = await statusOf($, real)
-  return baseline === null ? { error: 'não deu para ler o git status da worktree' } : { fixDir: real, baseline }
+  const after = await run($, wtGit(real, 'status', '--porcelain'))
+  if (after === null) return { error: 'não deu para ler o git status da worktree' }
+  if (after.trim() !== '') return { error: `o comando de instalação mudou arquivos do repositório: ${changedPathsOf(after)}. Ajuste o installCommand da matriz (por exemplo npm ci) e clique de novo.` }
+  return { fixDir: real, baseline: statusSumOf(after) }
 }
 
 export async function freePortOf($: EngineInterface): Promise<number | null> {
