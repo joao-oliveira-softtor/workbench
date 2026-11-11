@@ -631,6 +631,35 @@ describe('QA: fase Executar', () => {
     expect(report).toContain('- INSTÁVEL: 0\n')
   })
 
+  // Parado no meio da repetição: a célula que falhou não conta como pronta; a r2/ começa vazia e a tentativa 2 recomeça.
+  test('stop no meio da r2 e novo Executar: a repetição recomeça numa r2 vazia e o resultado sai INSTÁVEL', async ($, on) => {
+    const { t, ui } = await toRun($, on, {}, { ...MATRIX, cells: [cellOf('c1', 'admin')] })
+    await click(t, ui)
+    const runDir = t.runDir()
+    const r2 = `${runDir}/celulas/c1/r2`
+    const finish = async (id: string, files: [string, string][] = []) => {
+      await tick(t)
+      for (const [k, v] of files) t.files.set(k, v)
+      await ended($, id)
+      await tick(t)
+    }
+    await finish('a1')
+    await finish('a2', [[`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', [FAIL_DEFECT])]])
+    await tick(t)
+    t.files.set(`${r2}/notas.txt`, 'meio da repetição')
+    await command($, 'qa stop')
+    expect(await label(ui)).toBe('QA: Executar')
+    await click(t, ui)
+    expect(types(t)).toEqual([QA_RUNNER, QA_OBSERVER, QA_RUNNER, QA_RUNNER])
+    expect(t.files.has(`${r2}/notas.txt`)).toBe(false)
+    expect(t.guard().ctx.runDir).toBe(r2)
+    expect(t.guard().ctx.session).toContain('r2')
+    await finish('a4')
+    await finish('a5', [[`${r2}/veredito.json`, verdictOf('c1', 'PASS')]])
+    await tick(t)
+    expect(t.files.get(`${runDir}/relatorio.md`)).toContain('INSTÁVEL: 1')
+  })
+
   test('runner e observer gravam só na pasta da célula: a matriz e o veredito de outra célula, nunca (a execução só é lida)', async ($, on) => {
     const { t } = await running($, on)
     const runDir = t.runDir()
@@ -913,6 +942,7 @@ async function toFix($: Engine, on: On, over: Over = {}, matrix: Matrix = FIX_MA
   const r = await toRun($, on, over, matrix)
   const runDir = r.t.runDir()
   r.t.files.set(`${runDir}/celulas/c1/veredito.json`, verdictOf('c1', 'FAIL-APP', defects))
+  r.t.files.set(`${runDir}/celulas/c1/r2/veredito.json`, verdictOf('c1', 'FAIL-APP', defects))
   r.t.files.set(`${runDir}/celulas/c2/veredito.json`, verdictOf('c2', 'PASS'))
   r.t.files.set(`${runDir}/celulas/c2/teste.spec.ts`, 'test()')
   r.t.files.set(`${REPO}/.env`, 'SEGREDO=1')

@@ -48,6 +48,7 @@ import {
   hookCommandOf,
   impWrapperTextOf,
   isNodeOk,
+  nextRunOf,
   outcomeOf,
   policyFileOf,
   policyTextOf,
@@ -188,9 +189,18 @@ export async function runBaseOf($: EngineInterface, root: string): Promise<{ hea
   return head === null || status === null ? null : { head: head.trim(), isDirty: status.trim() !== '' }
 }
 
+// A tentativa que falta à célula: 1 sem veredito; 2 quando a primeira falhou e a repetição (parada no meio) não deixou
+// veredito; null = pronta.
+export async function attemptLeftOf($: EngineInterface, runDir: string, cell: Cell): Promise<1 | 2 | null> {
+  if (!(await exists($, verdictPathOf(runDir, cell.id, 1)))) return 1
+  if (await exists($, verdictPathOf(runDir, cell.id, 2))) return null
+  const first = finalVerdictOf(cell, await cellVerdictOf($, runDir, cell.id, 1))
+  return nextRunOf({ role: 'observer', attempt: 1 }, first) === 'repeat' ? 2 : null
+}
+
 export async function pendingCellsOf($: EngineInterface, runDir: string, matrix: Matrix): Promise<string[]> {
-  const done = await Promise.all(matrix.cells.map(c => exists($, verdictPathOf(runDir, c.id, 1))))
-  return matrix.cells.filter((_, i) => !done[i]).map(c => c.id)
+  const left = await Promise.all(matrix.cells.map(c => attemptLeftOf($, runDir, c)))
+  return matrix.cells.filter((_, i) => left[i] !== null).map(c => c.id)
 }
 
 const ab = (env: QaEnv, session: string, ...args: string[]): string[] => [wrapperOf(env.qaRoot, 'ab'), '--session', session, ...args]

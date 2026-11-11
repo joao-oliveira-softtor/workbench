@@ -95,6 +95,7 @@ import {
   undoFix,
   writeFixReport,
   writeFixResult,
+  attemptLeftOf,
   cellVerdictOf,
   closeSession,
   exists,
@@ -1099,7 +1100,11 @@ async function stepRun($: EngineInterface, env: QaEnv, runDir: string, matrix: M
     const [next, ...rest] = job.queue
     if (next === undefined) return closeRun($, env, runDir, matrix)
     await update($, qaJob, cur => (cur === null ? null : { ...cur, queue: rest }))
-    return setCurrent($, env, await startCell($, env, runDir, matrix, next, 1))
+    // Retomada no meio da repetição: a primeira rodada falhou e a r2/ não tem veredito; ela começa vazia, como no advanceCell.
+    const cell = matrix.cells.find(x => x.id === next)
+    const attempt = cell === undefined ? 1 : ((await attemptLeftOf($, runDir, cell)) ?? 1)
+    if (attempt === 2) await freshDir($, cellDirOf(runDir, next, 2))
+    return setCurrent($, env, await startCell($, env, runDir, matrix, next, attempt))
   }
   return stepCurrent($, env, runDir, matrix, c)
 }
