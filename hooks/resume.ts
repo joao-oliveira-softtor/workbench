@@ -54,7 +54,15 @@ const two = (n: number): string => String(n).padStart(2, '0')
 export function workDayOf(at: number, cutoffHour: number): string {
   const d = new Date(at)
   if (d.getHours() < cutoffHour) d.setDate(d.getDate() - 1)
-  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`
+  return dateOf(d)
+}
+
+const dateOf = (d: Date): string => `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`
+
+// O dia `n` dias depois de `day` (antes, com `n` negativo), no calendário local.
+export function shiftDay(day: string, n: number): string {
+  const [y = 0, m = 1, d = 1] = day.split('-').map(Number)
+  return dateOf(new Date(y, m - 1, d + n))
 }
 
 export function hhmmOf(at: number): string {
@@ -324,4 +332,50 @@ export function resumeMessageOf(dayText: string, path: string): string {
     '',
     `Apresente este resumo de forma curta, por projeto, e pergunte por onde quero seguir. Não rode comandos, não abra arquivos e não chame agentes até eu responder. Arquivo completo: ${path}.`,
   ].join('\n')
+}
+
+// Um transcrito lido: `project` e `at` vêm da pasta em projects/ e do mtimeMs (é o que aparece se ele não deu para ler).
+export type Read = { project: string; at: number; slice: Slice | null }
+
+export const isOkOn = (read: Read, day: string): boolean =>
+  read.slice?.kind === 'ok' && workDayOf(read.slice.lastHumanAt, DAY_CUTOFF_HOUR) === day
+
+export const refOf = (slice: Ok): SessionRef => ({ project: projectOf(slice.cwd), at: slice.lastHumanAt })
+
+export type Tally = { ok: Ok[]; failed: SessionRef[]; counts: DayInput['counts'] }
+
+// Separa as lidas do dia escolhido e de hoje: `ok` cujo último pedido seu é de `day` ou de hoje, da mais nova para a mais
+// velha; o resto vira contagem, e o arquivo ilegível vai para "Falharam".
+export function tallyOf(reads: readonly Read[], day: string, today: string): Tally {
+  const tally: Tally = { ok: [], failed: [], counts: { automatic: 0, empty: 0, broken: 0, idle: 0 } }
+  for (const read of reads) {
+    const s = read.slice
+    if (s === null) {
+      tally.failed.push({ project: read.project, at: read.at })
+      continue
+    }
+    switch (s.kind) {
+      case 'ok': {
+        const last = workDayOf(s.lastHumanAt, DAY_CUTOFF_HOUR)
+        if (last === day || last === today) tally.ok.push(s)
+        else tally.counts.idle += 1
+        break
+      }
+      case 'automatic':
+      case 'empty':
+      case 'broken':
+        tally.counts[s.kind] += 1
+        break
+      default:
+        throw new Error('Caso não tratado: ' + String(s satisfies never))
+    }
+  }
+  tally.ok.sort((a, b) => b.lastHumanAt - a.lastHumanAt)
+  return tally
+}
+
+// Arquivos do dia com mais de KEEP_DAYS dias antes de hoje, pela data do NOME; nome fora de AAAA-MM-DD.md não é tocado.
+export function expiredOf(names: readonly string[], today: string): string[] {
+  const limit = shiftDay(today, -KEEP_DAYS)
+  return names.filter(name => /^\d{4}-\d{2}-\d{2}\.md$/.test(name) && name.slice(0, 10) < limit)
 }

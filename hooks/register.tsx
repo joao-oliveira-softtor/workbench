@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Row, Snapshot, StaleReport } from '../types'
-import { askAnalysis, askHaiku, askRefine, askRoute, collect, measureSizes, repoRoot, unsizedPaths } from './collect'
+import { askAnalysis, askHaiku, askRefine, askRoute, askSessionSummary, collect, measureSizes, readTranscript, repoRoot, unsizedPaths } from './collect'
 import {
   COMPACT_TIMEOUT_MS,
   RESUME_HEAD,
@@ -126,6 +126,7 @@ import {
   writeScripts,
 } from './qa-flow'
 import type { FixCheck, QaApp, QaEnv } from './qa-flow'
+import type { Settled } from './model'
 import { bandOf, fetchAgeLabel, freedKb, handoffTable, idleDays, isFetchStale, lineOf, pushLabel, settle, sizeLabel, sortRows, summaryOf } from './model'
 import { DELEGATE_CONTEXT, formatRoute, isUserOrigin, parseRoute, shouldDelegate, tierOf } from './route'
 import {
@@ -158,6 +159,25 @@ import {
   splitCandidates,
 } from './stale'
 import type { Failure, Judged, Known, Listed, Stored } from './stale'
+import {
+  DAY_CUTOFF_HOUR,
+  DAY_LOOKBACK,
+  MAX_CALLS,
+  dayFileOf,
+  expiredOf,
+  isOkOn,
+  labelOf as lineLabelOf,
+  parseSessionSummary,
+  refOf,
+  resumeMessageOf,
+  scrub,
+  shiftDay,
+  sliceOf,
+  sliceTextOf,
+  tallyOf,
+  workDayOf,
+} from './resume'
+import type { Read, Slice, Summarized } from './resume'
 
 const PANE = 'workbench'
 const REFRESH_MS = 5 * 60 * 1000
@@ -180,6 +200,7 @@ const compactingAt = atom({ plugin: 'workbench', key: 'compactingAt' } as const,
 // Etapa do botão EGM e o doc revisado. Não zera no session.start: ele roda também a cada recarga do mod.
 const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_START)
 const refining = atom({ plugin: 'workbench', key: 'refining' } as const, false)
+const resuming = atom({ plugin: 'workbench', key: 'resuming' } as const, null)
 // QA: nenhum destes zera no session.start (é o que permite retomar e o que mantém suprimidos os agentes já lançados).
 const qaFlow = atom({ plugin: 'workbench', key: 'qaFlow' } as const, QA_START)
 const qaJob = atom({ plugin: 'workbench', key: 'qaJob' } as const, null)
@@ -219,6 +240,8 @@ let hasSeenMainTurn = false
 let planQueued: PlanStep | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
 let refinePhase: Phase = 'idle'
+// Resumo do dia (botão "Retomada"): a trava é `resumePhase`, como o `refinePhase`; `resuming` em $.state é só o rótulo.
+let resumePhase: Phase = 'idle'
 
 // Delegação de modelo (/route auto on): lida do `$.store` no session.start e mantida aqui, porque o hook do prompt nunca
 // espera o armazenamento. Desligada por padrão.
@@ -907,6 +930,188 @@ async function drainRefine($: EngineInterface): Promise<void> {
   } finally {
     refinePhase = 'idle'
     await settle(() => update($, refining, () => false))
+  }
+}
+
+// ---- Resumo do dia (botão "Retomada"): o clique só enfileira; o trabalho roda no timer (drainResume) ----
+
+const CLEAN_ONLY = 'Resumo do dia só numa sessão limpa: abra uma sessão nova e clique de novo.'
+const RESUMING_LABELS = { reading: 'Lendo sessões…', summarizing: 'Resumindo…' } satisfies Record<'reading' | 'summarizing', string>
+type Transcript = { path: string; project: string; size: number; mtimeMs: number }
+type DayPick = { kind: 'none' } | { kind: 'reuse'; day: string } | { kind: 'fresh'; day: string; reads: Read[] }
+
+const resumeLabelOf = (r: 'reading' | 'summarizing' | null): string => (r === null ? 'Retomada' : RESUMING_LABELS[r])
+
+async function pressResume($: EngineInterface): Promise<void> {
+  if (resumePhase !== 'idle') return
+  resumePhase = 'queued'
+  await update($, resuming, () => 'reading')
+}
+
+async function isCleanSession($: EngineInterface): Promise<boolean> {
+  return !isMainTurn && (await $.session.turns()) === 0
+}
+
+// A pasta do Claude: CLAUDE_CONFIG_DIR; senão <HOME>/.claude; senão <USERPROFILE>/.claude (lidos direto do $.env).
+// O engine exige o nome literal em cada `$.env.get`.
+async function claudeDirOf($: EngineInterface): Promise<string | null> {
+  const set = (got: Settled<string | undefined>): string | undefined => (got.ok && got.value !== '' ? got.value : undefined)
+  const config = set(await settle(() => $.env.get('CLAUDE_CONFIG_DIR')))
+  if (config !== undefined) return config
+  const home = set(await settle(() => $.env.get('HOME'))) ?? set(await settle(() => $.env.get('USERPROFILE')))
+  return home === undefined ? null : `${home}/.claude`
+}
+
+const dayPathOf = (root: string, day: string): string => `${root}/workbench-resume/${day}.md`
+const fileDayOf = (file: Transcript): string => workDayOf(file.mtimeMs, DAY_CUTOFF_HOUR)
+
+// Lista sem ler: só os .jsonl do primeiro nível de cada pasta em projects/ (os de subagente ficam em <id>/subagents/), sem
+// a sessão atual, do modificado mais recentemente para o mais antigo.
+async function transcriptsOf($: EngineInterface, root: string, currentId: string): Promise<Transcript[]> {
+  const folders = await settle(() => $.fs.list(`${root}/projects`))
+  if (!folders.ok) return []
+  const lists = await Promise.all(
+    folders.value
+      .filter(folder => folder.kind === 'dir')
+      .map(async folder => {
+        const dir = `${root}/projects/${folder.name}`
+        const entries = await settle(() => $.fs.list(dir))
+        if (!entries.ok) return []
+        return entries.value
+          .filter(f => f.kind === 'file' && f.name.endsWith('.jsonl') && f.name !== `${currentId}.jsonl`)
+          .map(f => ({ path: `${dir}/${f.name}`, project: lineLabelOf(folder.name), size: f.size, mtimeMs: f.mtimeMs }))
+      }),
+  )
+  return lists.flat().sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+// Uma leitura de cada vez, na ordem recebida (a mais recente primeiro).
+async function readAll($: EngineInterface, files: readonly Transcript[]): Promise<Read[]> {
+  const reads: Read[] = []
+  for (const file of files) {
+    const got = await readTranscript($, file.path, file.size)
+    const slice: Slice | null = got === null ? null : sliceOf(got.text, got.isTail)
+    reads.push({ project: file.project, at: file.mtimeMs, slice })
+  }
+  return reads
+}
+
+// Do dia mais novo para o mais velho (até DAY_LOOKBACK): arquivo do dia já gravado é reaproveitado (C7) antes de ler
+// qualquer transcrito; senão lê o dia e para no primeiro com sessão sua. Hoje é lido uma vez só, na primeira vez que
+// precisa e antes do dia (é mais recente): uma sessão tocada hoje com o último pedido seu no dia D conta como sessão de D.
+// Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
+async function pickDay($: EngineInterface, root: string, files: readonly Transcript[], today: string): Promise<DayPick> {
+  let todayReads: Read[] | null = null
+  const readToday = async (): Promise<Read[]> => (todayReads ??= await readAll($, files.filter(f => fileDayOf(f) === today)))
+  const oldest = shiftDay(today, -DAY_LOOKBACK)
+  const days = [...new Set(files.map(fileDayOf))].filter(d => d < today && d >= oldest).sort().reverse()
+  for (const day of days) {
+    if (await $.fs.exists(dayPathOf(root, day))) return { kind: 'reuse', day }
+    const ofToday = await readToday()
+    const reads = [...(await readAll($, files.filter(f => fileDayOf(f) === day))), ...ofToday]
+    if (reads.some(r => isOkOn(r, day))) return { kind: 'fresh', day, reads }
+  }
+  const ofToday = await readToday()
+  if (!ofToday.some(r => isOkOn(r, today))) return { kind: 'none' }
+  if (await $.fs.exists(dayPathOf(root, today))) return { kind: 'reuse', day: today }
+  return { kind: 'fresh', day: today, reads: ofToday }
+}
+
+type SliceAsked = { kind: 'ok'; done: Summarized } | { kind: 'failed'; slice: Summarized['slice']; reason: string }
+
+async function summaryOfSlice($: EngineInterface, slice: Summarized['slice']): Promise<SliceAsked> {
+  const asked = await askSessionSummary($, scrub(sliceTextOf(slice)))
+  if (!asked.ok) return { kind: 'failed', slice, reason: asked.reason }
+  const summary = parseSessionSummary(asked.text)
+  return summary === null ? { kind: 'failed', slice, reason: 'resposta fora do formato' } : { kind: 'ok', done: { slice, summary } }
+}
+
+// Apaga os arquivos do dia com mais de KEEP_DAYS dias (pela data do nome). A pasta só tem arquivos do mod.
+async function pruneDays($: EngineInterface, root: string, today: string): Promise<void> {
+  const dir = `${root}/workbench-resume`
+  const names = (await $.fs.list(dir)).filter(e => e.kind === 'file').map(e => e.name)
+  for (const name of expiredOf(names, today)) await settle(() => $.process.run(['rm', '-f', '--', `${dir}/${name}`]))
+}
+
+// Teto de MAX_CALLS chamadas ao Haiku, em paralelo, com o recorte já sem segredos. Zero resumidas: não grava e deixa o aviso
+// gravado. Devolve o texto gravado, o caminho e o toast de conclusão.
+async function summarizeDay($: EngineInterface, root: string, day: string, today: string, reads: readonly Read[]) {
+  const tally = tallyOf(reads, day, today)
+  await update($, resuming, () => 'summarizing')
+  const results = await Promise.all(tally.ok.slice(0, MAX_CALLS).map(slice => summaryOfSlice($, slice)))
+  const sessions = results.flatMap(r => (r.kind === 'ok' ? [r.done] : []))
+  const failures = results.flatMap(r => (r.kind === 'failed' ? [r] : []))
+  if (sessions.length === 0) {
+    await notice($, `Resumo do dia falhou: ${failures[0]?.reason ?? 'nenhuma sessão resumida'}`)
+    return null
+  }
+  const failed = [...tally.failed, ...failures.map(f => refOf(f.slice))]
+  const leftOut = tally.ok.slice(MAX_CALLS).map(refOf)
+  const path = dayPathOf(root, day)
+  const text = scrub(dayFileOf({ day, sessions, failed, leftOut, counts: tally.counts }))
+  await $.fs.write(path, text)
+  await settle(() => pruneDays($, root, today))
+  const done = `Resumo do dia: ${sessions.length} sessões resumidas, ${failed.length} falharam, ${leftOut.length} ficaram de fora. Arquivo: ${path}.`
+  return { text, path, done }
+}
+
+// Manda só com a sessão ainda limpa e o campo de prompt vazio; senão o arquivo fica gravado e o toast diz onde.
+async function sendDay($: EngineInterface, dayText: string, path: string, done: string): Promise<void> {
+  if (!(await isCleanSession($))) {
+    $.ui.toast(`Resumo pronto em ${path}: não mandei na conversa porque a sessão já começou.`)
+    return
+  }
+  if ((await $.prompt.read()).text !== '') {
+    $.ui.toast(`Resumo pronto em ${path}: não mandei na conversa porque há texto no campo de prompt.`)
+    return
+  }
+  const sent = await settle(() => $.prompt.submit({ text: resumeMessageOf(dayText, path) }))
+  const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  $.ui.toast(drop === undefined ? done : `Resumo do dia falhou: o pedido não entrou (${drop}).`)
+}
+
+async function runResume($: EngineInterface): Promise<void> {
+  if (!(await isCleanSession($))) {
+    $.ui.toast(CLEAN_ONLY)
+    return
+  }
+  const root = await claudeDirOf($)
+  if (root === null) {
+    $.ui.toast('Resumo do dia falhou: sem CLAUDE_CONFIG_DIR, HOME nem USERPROFILE.')
+    return
+  }
+  const today = workDayOf(await $.clock.now(), DAY_CUTOFF_HOUR)
+  const pick = await pickDay($, root, await transcriptsOf($, root, await $.session.id()), today)
+  switch (pick.kind) {
+    case 'none':
+      $.ui.toast(`Nenhuma sessão sua nos últimos ${DAY_LOOKBACK} dias`)
+      return
+    case 'reuse': {
+      const path = dayPathOf(root, pick.day)
+      await sendDay($, await $.fs.read(path), path, `Resumo do dia: o resumo de ${pick.day} já existe (${path}). Apague-o para refazer.`)
+      return
+    }
+    case 'fresh': {
+      const made = await summarizeDay($, root, pick.day, today, pick.reads)
+      if (made !== null) await sendDay($, made.text, made.path, made.done)
+      return
+    }
+    default:
+      throw new Error('Caso não tratado: ' + String(pick satisfies never))
+  }
+}
+
+// Roda no timer de 3 s, só com o pedido na fila (o dispatch de um botão pode ser abandonado). Trava solta no finally.
+async function drainResume($: EngineInterface): Promise<void> {
+  if (resumePhase !== 'queued') return
+  resumePhase = 'running'
+  try {
+    await runResume($)
+  } catch (err) {
+    $.ui.toast(`Resumo do dia falhou: ${errorText(err)}.`)
+  } finally {
+    resumePhase = 'idle'
+    await settle(() => update($, resuming, () => null))
   }
 }
 
@@ -1743,10 +1948,12 @@ export const register: Register = on => {
     hasSeenMainTurn = false
     planQueued = null
     refinePhase = 'idle'
+    resumePhase = 'idle'
     // Antes de zerar o rótulo: se ele dizia "compactando", a recarga caiu no meio (`compactingAt` NÃO zera aqui).
     if ((await read($, compacting)) === 'compacting') await notice($, 'O mod recarregou durante a compactação: confira a conversa e clique de novo se precisar.')
     await update($, compacting, () => null)
     await update($, refining, () => false)
+    await update($, resuming, () => null)
     qaQueued = null
     isQaStepping = false
     qaPending = null
@@ -1807,6 +2014,7 @@ export const register: Register = on => {
       void drainAutoResume($).catch(() => {})
       void drainPlan($).catch(() => {})
       void drainRefine($).catch(() => {})
+      void drainResume($).catch(() => {})
       void drainQa($).catch(() => {})
     })
     void refresh($).catch(() => {})
@@ -1975,6 +2183,9 @@ export const register: Register = on => {
         <Box flexGrow={1} />
         <Button key="compact" plain onPress={() => void pressCompact($).catch(() => {})}>
           {buttonLabel(await read($, compacting))}
+        </Button>
+        <Button key="resume" plain onPress={() => void pressResume($).catch(() => {})}>
+          {resumeLabelOf(await read($, resuming))}
         </Button>
         <Button key="refine" plain onPress={() => void pressRefine($).catch(() => {})}>
           {(await read($, refining)) ? 'Refinando…' : 'Planejar'}
