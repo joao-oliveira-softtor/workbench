@@ -1860,8 +1860,8 @@ export const register: Register = on => {
 
   // Nunca segura o prompt: sem chamada de modelo nem de armazenamento, só soma a instrução de delegar ao `context`.
   on('prompt.submit', async ($, e, next) => {
-    if (isUserOrigin(e.origin.kind)) humanSinceAutoResume = true
     try {
+      if (isUserOrigin(e.origin.kind)) humanSinceAutoResume = true
       // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
       const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
       if (handback !== null && (await read($, qaGuarded)).includes(handback)) return { drop: 'workbench: o relatório do agente de QA é lido pelo mod' }
