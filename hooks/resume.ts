@@ -70,9 +70,13 @@ export function hhmmOf(at: number): string {
   return `${two(d.getHours())}:${two(d.getMinutes())}`
 }
 
-// Título, branch e pasta entram em uma linha só da mensagem e do arquivo: sem quebra nem caractere de controle.
+// Uma linha só, sem caractere de controle; os de formato (direção do texto, largura zero) somem, porque escondem ou
+// reordenam o que se lê.
+const plainOf = (text: string): string => text.replace(/\p{Cf}+/gu, '').replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').trim()
+
+// Título, branch e pasta entram em uma linha só da mensagem e do arquivo.
 export function labelOf(text: string): string {
-  return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').trim().slice(0, LABEL_CAP).trimEnd()
+  return plainOf(text).slice(0, LABEL_CAP).trimEnd()
 }
 
 export function projectOf(cwd: string): string {
@@ -129,7 +133,6 @@ type Acc = {
   lastSummary: string
   awaySummary: string
   isMidway: boolean
-  skipReply: boolean
 }
 
 const fresh = (): Acc => ({
@@ -140,55 +143,90 @@ const fresh = (): Acc => ({
   lastSummary: '',
   awaySummary: '',
   isMidway: false,
-  skipReply: false,
 })
 
-// `text` é o conteúdo do transcrito (ou o fim dele, com `isTail`, e então a primeira linha pode vir cortada).
-export function sliceOf(text: string, isTail: boolean): Slice {
+const entryOf = (lines: readonly Line[]): string | undefined => lines.map(l => str(l.entrypoint)).find(e => e !== '')
+const isAutomaticEntry = (entry: string | undefined): boolean => entry !== undefined && !INTERACTIVE.includes(entry)
+
+// Leitura curta (o começo do arquivo): o `entrypoint` da primeira linha que o tem diz se a sessão é sem terminal. A última
+// linha pode vir cortada e é pulada.
+export function isAutomaticHead(head: string): boolean {
+  return isAutomaticEntry(entryOf(head.split('\n').map(parseLine).filter((l): l is Line => l !== null)))
+}
+
+// Segredo sai ANTES de qualquer corte: cortado, ele perde o fim e o padrão não o reconhece mais.
+const clip = (text: string, cap: number): string => scrub(text).slice(0, cap)
+
+const isBotMessage = (l: Line, body: string): boolean => l.type === 'user' && body.includes(RESUME_MESSAGE_HEAD)
+const isHumanPrompt = (l: Line, body: string): boolean => l.type === 'user' && l.origin?.kind === 'human' && body !== ''
+
+function takePrompt(acc: Acc, body: string, at: number): void {
+  acc.prompts.push(clip(body, PROMPT_CAP))
+  // Linha sem horário válido não entra nas datas (viraria NaN-NaN-NaN).
+  if (!Number.isNaN(at)) {
+    acc.startedAt = acc.startedAt || at
+    acc.lastHumanAt = at
+  }
+  acc.isMidway = true
+}
+
+function takeReply(acc: Acc, l: Line, body: string): void {
+  const last = blocksOf(l).at(-1)
+  if (body !== '') acc.replies.push(clip(body, REPLY_CAP))
+  if (body !== '' || last?.type === 'tool_use') acc.isMidway = last?.type === 'tool_use'
+}
+
+function takeUser(acc: Acc, l: Line, body: string, hasBot: boolean): void {
+  if (l.isCompactSummary) acc.lastSummary = hasBot ? '' : clip(body, SUMMARY_CAP)
+  else if (isHumanPrompt(l, body)) takePrompt(acc, body, Date.parse(str(l.timestamp)))
+  else if (blocksOf(l).some(b => b.type === 'tool_result')) acc.isMidway = true
+}
+
+type Where = { cwd: string; branch: string; title: string }
+// O valor novo da linha, ou o que já havia quando ela não o traz.
+const orOld = (v: unknown, old: string): string => str(v) || old
+
+function takeLine(acc: Acc, where: Where, l: Line, body: string, hasBot: boolean): void {
+  where.cwd = orOld(l.cwd, where.cwd)
+  where.branch = orOld(l.gitBranch, where.branch)
+  if (l.type === 'ai-title') where.title = orOld(l.aiTitle, where.title)
+  else if (l.type === 'system' && l.subtype === 'away_summary') acc.awaySummary = hasBot ? '' : clip(str(l.content), SUMMARY_CAP)
+  else if (l.type === 'assistant') takeReply(acc, l, body)
+  else if (l.type === 'user') takeUser(acc, l, body, hasBot)
+}
+
+// `text` é o conteúdo do transcrito (ou o fim dele, com `isTail`, e então a primeira linha pode vir cortada). `hasBotBefore`:
+// a leitura curta viu a mensagem do botão, que pode ter ficado fora do fim lido.
+export function sliceOf(text: string, isTail: boolean, hasBotBefore = false): Slice {
   const raw = text.split('\n')
   const parsed = (isTail ? raw.slice(1) : raw).map(parseLine).filter((l): l is Line => l !== null)
   if (parsed.length === 0) return { kind: 'broken' }
+  if (isAutomaticEntry(entryOf(parsed))) return { kind: 'automatic' }
 
-  const entry = parsed.map(l => str(l.entrypoint)).find(e => e !== '')
-  if (entry !== undefined && !INTERACTIVE.includes(entry)) return { kind: 'automatic' }
-
-  let cwd = ''
-  let branch = ''
-  let title = ''
+  const where: Where = { cwd: '', branch: '', title: '' }
   let acc = fresh()
+  // Sessão em que o botão rodou: depois da mensagem dele, tudo (resposta, título, recados) fala de todos os projetos até
+  // o próximo pedido seu; resumo de compactação e recado dela nunca entram.
+  let isAfterBot = hasBotBefore
+  let hasBot = hasBotBefore
   for (const l of parsed) {
-    cwd = str(l.cwd) || cwd
-    branch = str(l.gitBranch) || branch
-    const at = Date.parse(str(l.timestamp))
     const body = textOf(l)
-    if (l.type === 'ai-title') title = str(l.aiTitle) || title
-    else if (l.type === 'system' && l.subtype === 'away_summary') acc.awaySummary = str(l.content).slice(0, SUMMARY_CAP)
-    else if (l.type === 'assistant') {
-      const last = blocksOf(l).at(-1)
-      if (body !== '' && acc.skipReply) acc.skipReply = false
-      else if (body !== '') acc.replies.push(body.slice(0, REPLY_CAP))
-      if (body !== '' || last?.type === 'tool_use') acc.isMidway = last?.type === 'tool_use'
-    } else if (l.type === 'user') {
-      if (body.includes(RESUME_MESSAGE_HEAD)) {
-        // A sessão em que o botão rodou: o que veio antes já está no resumo de todos os clientes.
-        acc = fresh()
-        acc.skipReply = true
-      } else if (l.isCompactSummary) acc.lastSummary = body.slice(0, SUMMARY_CAP)
-      else if (l.origin?.kind === 'human' && body !== '') {
-        acc.prompts.push(body.slice(0, PROMPT_CAP))
-        acc.startedAt = acc.startedAt || at
-        acc.lastHumanAt = at
-        acc.isMidway = true
-      } else if (blocksOf(l).some(b => b.type === 'tool_result')) acc.isMidway = true
+    if (isBotMessage(l, body)) {
+      acc = fresh()
+      isAfterBot = true
+      hasBot = true
+    } else if (!isAfterBot || isHumanPrompt(l, body)) {
+      isAfterBot = false
+      takeLine(acc, where, l, body, hasBot)
     }
   }
   if (acc.prompts.length === 0) return { kind: 'empty' }
 
   return {
     kind: 'ok',
-    cwd: labelOf(cwd),
-    branch: labelOf(branch),
-    title: labelOf(title),
+    cwd: labelOf(scrub(where.cwd)),
+    branch: labelOf(scrub(where.branch)),
+    title: labelOf(scrub(where.title)),
     startedAt: acc.startedAt,
     lastHumanAt: acc.lastHumanAt,
     firstPrompts: acc.prompts.slice(0, 2),
@@ -233,15 +271,27 @@ export function sliceTextOf(slice: Ok): string {
 const NOT_ALNUM_BEFORE = '(?<![A-Za-z0-9])'
 const VALUE = `[^\\s"',]{4,}`
 const SCRUBS: [RegExp, string][] = [
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REMOVED],
-  [/([a-z][\w+.-]*:\/\/[^\s:/@]+:)[^\s@/]+(?=@)/gi, `$1${REMOVED}`],
+  // Sem a linha de fim (texto cortado ou colado pela metade), apaga até o fim do texto.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, REMOVED],
+  // Usuário (pode ser vazio) e senha: a senha vai até o ÚLTIMO `@` do endereço, porque pode ter `@` ou `/` sem codificar.
+  [/([a-z][\w+.-]*:\/\/[^\s:/@]*:)[^\s"'<>]*(?=@)/gi, `$1${REMOVED}`],
   [/\b(Bearer )[A-Za-z0-9._~+/=-]{16,}/gi, `$1${REMOVED}`],
   [/(?=[\w.-]{30})eyJ[\w-]*\.[\w-]+\.[\w-]+/g, REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}sk-[A-Za-z0-9_-]{20,}`, 'g'), REMOVED],
-  [new RegExp(`${NOT_ALNUM_BEFORE}gh[po]_[A-Za-z0-9]{30,}`, 'g'), REMOVED],
+  [new RegExp(`${NOT_ALNUM_BEFORE}sk_(?:live|test)_[A-Za-z0-9]{10,}`, 'g'), REMOVED],
+  [new RegExp(`${NOT_ALNUM_BEFORE}github_pat_[A-Za-z0-9_]{22,}`, 'g'), REMOVED],
+  [new RegExp(`${NOT_ALNUM_BEFORE}gh[pousr]_[A-Za-z0-9]{30,}`, 'g'), REMOVED],
+  [new RegExp(`${NOT_ALNUM_BEFORE}glpat-[A-Za-z0-9_-]{20,}`, 'g'), REMOVED],
+  [new RegExp(`${NOT_ALNUM_BEFORE}AIza[0-9A-Za-z_-]{35,}`, 'g'), REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}xox[abp]-[A-Za-z0-9-]{10,}`, 'g'), REMOVED],
   [new RegExp(`${NOT_ALNUM_BEFORE}AKIA[A-Z0-9]{16}(?![A-Z0-9])`, 'g'), REMOVED],
-  [new RegExp(`\\b(password|senha|token)=${VALUE}`, 'gi'), `$1=${REMOVED}`],
+  // Em JSON o valor vai até a aspa de fechamento (pode ter espaço e aspa escapada).
+  [/("(?:password|token|secret|api_key)"\s*:\s*")(?:[^"\\]|\\.)+(?=")/gi, `$1${REMOVED}`],
+  [/\b((?:password|senha)\s*:\s*["']?)[^\s"',]+/gi, `$1${REMOVED}`],
+  // Cabeçalho: qualquer esquema (Basic, Token…) ou nenhum, e o valor depois dele.
+  [/\b(authorization"?\s*:\s*"?(?:[A-Za-z][\w-]*[ \t]+)?)[^\s"',]+/gi, `$1${REMOVED}`],
+  [/\b(x-api-key"?\s*:\s*"?)[^\s"',]+/gi, `$1${REMOVED}`],
+  [new RegExp(`\\b(password|senha|token|api_?key)=${VALUE}`, 'gi'), `$1=${REMOVED}`],
   [new RegExp(`\\b([A-Z0-9_]*(?:_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*=["']?)${VALUE}`, 'g'), `$1${REMOVED}`],
 ]
 
@@ -280,7 +330,7 @@ export function parseSessionSummary(text: string): SessionSummary | null {
 }
 
 // Texto do modelo numa linha só do markdown: quebra de linha viraria título ou item falso.
-const oneLine = (text: string): string => text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').trim()
+const oneLine = plainOf
 const refsOf = (refs: SessionRef[]): string => refs.map(r => `${labelOf(r.project)} (${hhmmOf(r.at)})`).join(', ')
 
 function sessionLines({ slice, summary }: Summarized): string[] {

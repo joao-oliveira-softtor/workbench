@@ -94,6 +94,10 @@ describe('labelOf e projectOf', () => {
     expect(labelOf('  \n oi \n ')).toBe('oi')
     expect(labelOf('a'.repeat(LABEL_CAP + 50))).toHaveLength(LABEL_CAP)
   })
+  test('tira os caracteres de direção do texto e os de largura zero', () => {
+    expect(labelOf('a‮b‪c⁦d⁩e​f‍g﻿h')).toBe('abcdefgh')
+  })
+
   test('projectOf pega o nome da pasta', () => {
     expect(projectOf('/home/dev/loja-api')).toBe('loja-api')
     expect(projectOf('/home/dev/loja-api/')).toBe('loja-api')
@@ -249,6 +253,67 @@ describe('sliceOf', () => {
     expect(sliceOf(lines(human('antigo', 10), botMessage(9), reply('apresentei', 9, 1)), false)).toEqual({ kind: 'empty' })
   })
 
+  test('depois da mensagem do botão tudo é ignorado até o próximo pedido seu; resumos e recados dessa sessão nunca entram', () => {
+    const s = ok(
+      lines(
+        botMessage(9, 0, 11),
+        title('Resumo de todos os clientes'),
+        reply('apresentei o resumo', 9, 1, 11),
+        toolUse(9, 2),
+        toolResult(9, 3),
+        compactSummary('resumo com todos os projetos'),
+        away('recado com todos os projetos'),
+        human('segue no frete', 9, 30, {}, 11),
+        reply('ok', 9, 31, 11),
+        compactSummary('outro resumo com tudo'),
+        away('outro recado com tudo'),
+      ),
+    )
+    expect(s.title).toBe('')
+    expect(s.firstPrompts).toEqual(['segue no frete'])
+    expect(s.lastReplies).toEqual(['ok'])
+    expect(s.lastSummary).toBe('')
+    expect(s.awaySummary).toBe('')
+  })
+
+  test('mensagem do botão vista só na leitura curta (fora do fim lido): resumos e recados não entram', () => {
+    const tail = lines('{"cortada', away('recado com tudo'), human('segue', 9, 30, {}, 11), compactSummary('resumo com tudo'))
+    const s = sliceOf(tail, true, true)
+    if (s.kind !== 'ok') throw new Error(s.kind)
+    expect(s.firstPrompts).toEqual(['segue'])
+    expect(s.awaySummary).toBe('')
+    expect(s.lastSummary).toBe('')
+    expect(ok(tail, true).awaySummary).toBe('recado com tudo')
+  })
+
+  test('segredo é limpo antes do corte: chave cortada e token cortado não sobram', () => {
+    const key = `${'x'.repeat(PROMPT_CAP - 100)} -----BEGIN PRIVATE KEY-----\n${'A'.repeat(300)}\n-----END PRIVATE KEY-----`
+    const token = `${'y'.repeat(PROMPT_CAP - 10)} sk-${'b'.repeat(40)}`
+    const s = ok(lines(human(key, 8), human(token, 9), reply(`${'r'.repeat(REPLY_CAP - 5)} ghp_${'c'.repeat(36)}`, 9, 1)))
+    expect(s.firstPrompts[0]).not.toContain('AAAA')
+    expect(s.firstPrompts[1]).not.toContain('sk-b')
+    expect(s.lastReplies[0]).not.toContain('ghp_c')
+  })
+
+  test('título, branch e pasta também passam pela limpeza', () => {
+    const s = ok(lines(title(`deploy com ghp_${'d'.repeat(36)}`), human('a', 8, 0, { gitBranch: `feat/sk-${'e'.repeat(30)}` })))
+    expect(s.title).not.toContain('ghp_d')
+    expect(s.branch).not.toContain('sk-e')
+  })
+
+  test('pedido sem horário válido não entra nas datas', () => {
+    const s = ok(lines(human('sem hora', 8, 0, { timestamp: 'x' }), human('com hora', 9), human('sem hora 2', 10, 0, { timestamp: undefined })))
+    expect(s.firstPrompts).toEqual(['sem hora', 'com hora'])
+    expect(s.startedAt).toBe(at(9))
+    expect(s.lastHumanAt).toBe(at(9))
+  })
+
+  test('nenhum pedido com horário: datas ficam em 0', () => {
+    const s = ok(lines(human('sem hora', 8, 0, { timestamp: 'x' })))
+    expect(s.startedAt).toBe(0)
+    expect(s.lastHumanAt).toBe(0)
+  })
+
   test('resultado de ferramenta que cita a mensagem do botão não zera nada', () => {
     const quoting = JSON.stringify({
       type: 'user',
@@ -371,6 +436,30 @@ describe('scrub', () => {
       'a\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----\nb',
       `a\n${REMOVED}\nb`,
     ],
+    ['bloco de chave sem a linha de fim', 'a\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc', `a\n${REMOVED}`],
+    ['github_pat_', `x github_pat_${'A1b2'.repeat(6)}_fim y`, `x ${REMOVED} y`],
+    ['ghu_', `ghu_${'a1'.repeat(18)}`, REMOVED],
+    ['ghs_', `ghs_${'a1'.repeat(18)}`, REMOVED],
+    ['ghr_', `ghr_${'a1'.repeat(18)}`, REMOVED],
+    ['sk_live_', 'sk_live_FAKEfake0123456789', REMOVED],
+    ['sk_test_', 'chave=sk_test_FAKEfake0123456789', `chave=${REMOVED}`],
+    ['glpat-', 'glpat-' + 'FAKEfake0123456789ab', REMOVED],
+    ['AIza', `AIza${'F'.repeat(35)}`, REMOVED],
+    ['endereço com usuário vazio', 'redis://:s3nh4@cache:6379', `redis://:${REMOVED}@cache:6379`],
+    ['senha com @ no endereço', 'postgres://app:p@ss@db/x', `postgres://app:${REMOVED}@db/x`],
+    ['senha com / no endereço', 'postgres://app:pa/ss@db/x', `postgres://app:${REMOVED}@db/x`],
+    ['"password" em JSON', '{"password": "minha senha falsa", "b": 1}', `{"password": "${REMOVED}", "b": 1}`],
+    ['"token" em JSON', '{"Token":"abc"}', `{"Token":"${REMOVED}"}`],
+    ['"secret" em JSON', '{"secret" : "x y"}', `{"secret" : "${REMOVED}"}`],
+    ['"api_key" em JSON', '{"api_key": "abcd"}', `{"api_key": "${REMOVED}"}`],
+    ['password: valor', 'password: (vazio)', `password: ${REMOVED}`],
+    ['Password: valor', 'Password:hunter2 fim', `Password:${REMOVED} fim`],
+    ['api_key= em minúsculas', 'api_key=abcd1234', `api_key=${REMOVED}`],
+    ['apikey= em maiúsculas', 'APIKEY=abcd1234', `APIKEY=${REMOVED}`],
+    ['Authorization com Basic', 'Authorization: Basic dXNlcjpmYWtl', `Authorization: Basic ${REMOVED}`],
+    ['Authorization com outro esquema', 'authorization: Token abc', `authorization: Token ${REMOVED}`],
+    ['Authorization sem esquema', 'Authorization: abcdef', `Authorization: ${REMOVED}`],
+    ['x-api-key', 'X-Api-Key: abcd1234', `X-Api-Key: ${REMOVED}`],
   ]
   for (const [name, input, output] of cases) {
     test(`troca ${name}`, () => {
@@ -399,13 +488,30 @@ describe('scrub', () => {
       'API_KEY=abc',
       'postgres://app@db:5432/x',
       'http://localhost:3000/a/b',
-      '-----BEGIN RSA PRIVATE KEY----- sem fim',
+      'https://site.example/u/@fulano',
+      `github_pat_${'a'.repeat(21)}`,
+      `ghu_${'a'.repeat(29)}`,
+      'sk_live_abc',
+      'glpat-abc',
+      `AIza${'F'.repeat(34)}`,
+      '{"password": ""}',
+      '{"tokens": "abc"}',
+      'password:',
     ]
     for (const text of keep) expect(scrub(text)).toBe(text)
   })
 
   test('não apaga palavras comuns que contêm o prefixo', () => {
-    const keep = ['task-manager-configuration-file', 'risk-assessment-and-mitigation-plan', 'AKIAABCDEFGHIJKLMNOPQ', 'monkey=banana1']
+    const keep = [
+      'task-manager-configuration-file',
+      'risk-assessment-and-mitigation-plan',
+      'AKIAABCDEFGHIJKLMNOPQ',
+      'monkey=banana1',
+      'mask_live_preview_component',
+      'o header authorization vai no pedido',
+      'passwordless: true',
+      'my-api-key-rotation',
+    ]
     for (const text of keep) expect(scrub(text)).toBe(text)
   })
 
@@ -422,6 +528,7 @@ describe('scrub', () => {
   test('rodar duas vezes dá o mesmo resultado', () => {
     const once = scrub('senha=abcd e sk-ant-abc123def456ghi789 e Bearer abc.def.ghi1234567')
     expect(scrub(once)).toBe(once)
+    for (const [, input] of cases) expect(scrub(scrub(input))).toBe(scrub(input))
   })
 })
 
@@ -570,6 +677,19 @@ describe('dayFileOf', () => {
     expect(text).not.toContain('\u0007')
     expect(text).toContain('- Em andamento: linha 1 # título falso')
     expect(text).toContain('- Falharam: pa nel (16:05)')
+  })
+
+  test('texto do modelo perde os caracteres de direção do texto e os de largura zero', () => {
+    const text = dayFileOf({
+      day: '2026-11-10',
+      sessions: [summarized(okSlice(), { emAndamento: 'a‮b​c', proximoPasso: 'd⁧e', pendente: ['f﻿g'] })],
+      failed: [],
+      leftOut: [],
+      counts: { automatic: 0, empty: 0, broken: 0, idle: 0 },
+    })
+    expect(text).toContain('- Em andamento: abc')
+    expect(text).toContain('- Próximo passo: de')
+    expect(text).toContain('  - fg')
   })
 
   test('título longo é cortado em LABEL_CAP', () => {
