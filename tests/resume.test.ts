@@ -19,9 +19,10 @@ import {
   scrub,
   sliceOf,
   sliceTextOf,
+  tallyOf,
   workDayOf,
 } from '../hooks/resume'
-import type { DayInput, SessionSummary, Slice, Summarized } from '../hooks/resume'
+import type { DayInput, Read, SessionSummary, Slice, Summarized } from '../hooks/resume'
 
 type Ok = Extract<Slice, { kind: 'ok' }>
 
@@ -652,6 +653,35 @@ const okSlice = (over: Partial<Ok> = {}): Ok => ({
   ...over,
 })
 const summarized = (slice: Ok, summary: SessionSummary): Summarized => ({ slice, summary })
+
+describe('tallyOf', () => {
+  test('separa as do dia escolhido (o dia vira às 05:00) e de hoje, mais nova primeiro, conta o resto e põe o ilegível em Falharam', () => {
+    const read = (slice: Slice | null, project = '-home-dev-loja-api'): Read => ({ project, at: at(9), slice })
+    const ontem = okSlice({ title: 'ontem', lastHumanAt: at(18, 47, 10) })
+    const madrugada = okSlice({ title: 'madrugada', lastHumanAt: at(4, 30, 11) })
+    const hoje = okSlice({ title: 'hoje', lastHumanAt: at(9, 15, 12) })
+    const antiga = okSlice({ title: 'antiga', lastHumanAt: at(18, 0, 8) })
+    const reads = [
+      read(ontem),
+      read(null, '-home-dev-painel'),
+      read(hoje),
+      read({ kind: 'automatic' }),
+      read({ kind: 'empty' }),
+      read({ kind: 'empty' }),
+      read({ kind: 'broken' }),
+      read(antiga),
+      read(madrugada),
+    ]
+    const t = tallyOf(reads, '2026-11-10', '2026-11-12')
+    expect(t.ok.map(s => s.title)).toEqual(['hoje', 'madrugada', 'ontem'])
+    expect(t.failed).toEqual([{ project: '-home-dev-painel', at: at(9) }])
+    expect(t.counts).toEqual({ automatic: 1, empty: 2, broken: 1, idle: 1 })
+  })
+
+  test('sem leituras, tudo vazio e zerado', () => {
+    expect(tallyOf([], '2026-11-10', '2026-11-12')).toEqual({ ok: [], failed: [], counts: { automatic: 0, empty: 0, broken: 0, idle: 0 } })
+  })
+})
 
 describe('dayFileOf', () => {
   test('formato literal do plano', () => {

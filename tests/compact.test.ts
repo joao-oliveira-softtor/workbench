@@ -13,6 +13,7 @@ import {
   analyzePromptOf,
   buttonLabel,
   clickAction,
+  compactInstructionsOf,
   hasTurnIntervened,
   instructionsOf,
   parseAnalysis,
@@ -267,6 +268,15 @@ describe('withCriteria', () => {
     expect(withCriteria(undefined)).toBe(COMPACT_CRITERIA)
     expect(withCriteria('  ')).toBe(COMPACT_CRITERIA)
     expect(withCriteria('foque no frete')).toBe(`foque no frete\n\n${COMPACT_CRITERIA}`)
+  })
+})
+
+describe('compactInstructionsOf', () => {
+  test('automática e /compact levam os critérios; outro mod e o pré-cálculo passam intactos', () => {
+    expect(compactInstructionsOf('auto', undefined)).toBe(COMPACT_CRITERIA)
+    expect(compactInstructionsOf('manual', 'foque no frete')).toBe(`foque no frete\n\n${COMPACT_CRITERIA}`)
+    expect(compactInstructionsOf('plugin', 'do outro mod')).toBe('do outro mod')
+    expect(compactInstructionsOf('precompute', undefined)).toBeUndefined()
   })
 })
 
