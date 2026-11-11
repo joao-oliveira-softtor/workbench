@@ -1,6 +1,6 @@
 # workbench
 
-Mod do Claude Code: faixa acima do prompt com as worktrees em voo (push, PR, distância da base, migrations atrás da base) e o painel `/workbench`; botões Compactar e continuar, Planejar (`/plan` refinado com o fluxo EGM), EGM (fluxo Elephant-Goldfish) e QA (testa o app num navegador e corrige o que achar); delegação de tarefas ao modelo certo (`/route auto on|off`).
+Mod do Claude Code: faixa acima do prompt com as worktrees em voo (push, PR, distância da base, migrations atrás da base) e o painel `/workbench`; botões Compactar e continuar, Retomada (resumo do dia), Planejar (`/plan` refinado com o fluxo EGM), EGM (fluxo Elephant-Goldfish) e QA (testa o app num navegador e corrige o que achar); delegação de tarefas ao modelo certo (`/route auto on|off`).
 
 Os botões Planejar e EGM usam os plugins `superpowers` e `egm`, quando instalados.
 
@@ -31,6 +31,38 @@ claude plugin update workbench@workbench
 Depois, reinicie a sessão.
 
 Para atualizar sozinho a cada sessão nova, ligue o auto-update do marketplace: em `/plugin`, aba Marketplaces, escolha `workbench` e ative o auto-update. Ou, no `~/.claude/settings.json`, ponha `"autoUpdate": true` em `extraKnownMarketplaces.workbench`.
+
+## Compactar e continuar
+
+Compactar troca a conversa longa por um resumo, para liberar espaço na memória de trabalho do Claude. O botão **Compactar e continuar** analisa a conversa, compacta e manda uma mensagem para o Claude voltar ao trabalho sozinho. Ele só retoma se você não mandou nada no meio e o campo de digitação está vazio; senão avisa e deixa a conversa quieta.
+
+- **Compactação automática do Claude Code**: com a sessão parada (nenhum turno rodando), o mod também retoma sozinho, no máximo uma vez por pedido seu. Se o Claude Code compactar de novo sem você ter escrito nada no meio, o mod só grava um aviso e não retoma (evita laço). Se há texto no campo de digitação, também só avisa.
+- **`/compact` digitado**: a sessão fica quieta, você decide quando continuar.
+- **O que o resumo guarda a mais**, em toda compactação (botão, `/compact` e automática): os agentes em segundo plano ainda rodando, com o id de cada um; as perguntas feitas a você que ficaram sem resposta; as regras que você disse na conversa; e o caminho do registro de progresso (plano, log), se houver. No `/compact` digitado, o seu texto vem primeiro e esses itens depois.
+- **Avisos gravados**: ficam na própria conversa (não só num aviso que some em segundos) quando a retomada falha (o turno deu erro, foi interrompido, foi recusado, ou o pedido não entrou), quando a compactação passa de 5 minutos sem terminar (o mod não consegue cancelá-la, só avisa) e quando o mod recarrega no meio de uma compactação.
+- **Registro**: cada compactação que chega ao mod deixa uma linha na conversa, com quem compactou (`trigger`), se a sessão estava parada e se a retomada foi marcada. Para conferir em todas as suas conversas: `grep -h -o 'workbench: compactação[^"]*' ~/.claude/projects/*/*.jsonl`.
+
+Limite: ainda não foi visto, numa sessão com tela, a compactação feita com a sessão parada chegando marcada como automática (`trigger=auto`). Se vier com outra marca, nada retoma, e o registro acima mostra qual foi.
+
+## Retomada (resumo do dia)
+
+O botão **Retomada** resume o seu último dia de trabalho, de todos os projetos, para você abrir uma sessão limpa e saber o que ficou em andamento, qual é o próximo passo e o que está pendente.
+
+- Só funciona em **sessão limpa** (você ainda não mandou nenhum pedido); senão, avisa e não faz nada.
+- Lê as sessões do último dia de trabalho (o dia vira às 05:00; até 7 dias para trás) e as de hoje, de todos os projetos, só as abertas no terminal ou na IDE. Rodadas sem terminal (`claude -p`, scripts) ficam de fora.
+- Cada sessão vira um resumo em três partes: em andamento, próximo passo e pendente. No máximo 12 sessões por clique; as outras aparecem só com projeto e hora, em "ficaram de fora".
+- O resumo do dia fica em `~/.claude/workbench-resume/<dia>.md` (ou na pasta de `CLAUDE_CONFIG_DIR`, se definida). Resumos com mais de 14 dias são apagados.
+- Um segundo clique sobre o mesmo dia reaproveita o arquivo já gravado, sem chamar o modelo de novo. Para refazer, apague o arquivo daquele dia. Na sessão em que o resumo já entrou, o botão só avisa, sem reenviar.
+- Cada arquivo de sessão é lido em dois passos: uma leitura curta do começo (para saber se a sessão foi aberta no terminal) e, só para as do terminal ou da IDE, a leitura longa. O teto é de 400 leituras curtas e 60 longas por clique; ao bater um deles, o mod para de ler, resume o que já leu e diz no arquivo do dia e no aviso final quantos arquivos ficaram sem leitura.
+- O mod manda o resumo na conversa pedindo ao Claude que só apresente e pergunte por onde seguir, sem rodar comandos, abrir arquivos nem chamar agentes. Se há texto no campo de digitação, ou a sessão já começou, o arquivo é gravado e o mod só avisa onde ele está.
+
+### Limites e privacidade
+
+- O resumo junta projetos de clientes diferentes e entra na conversa onde você clicou. Abra a Retomada numa sessão na sua pasta pessoal, fora de qualquer projeto.
+- A limpeza de segredos cobre formatos conhecidos (chaves de API comuns, tokens, senhas em endereço, em JSON e na linha de comando, chaves privadas) e pode deixar passar um segredo em formato fora da lista, tanto para o modelo quanto para o arquivo do dia; o modelo pode repeti-lo no resumo.
+- Arquivos de sessão muito grandes (mais de 3 MB) são lidos só pelo final: o começo da sessão pode faltar.
+- O conteúdo das sessões vai para o modelo barato (Haiku), pela conta que o Claude Code estiver usando.
+- Não há tarefa agendada: o mod não captura nada sozinho, só lê o que existe no disco quando você clica.
 
 ## QA
 

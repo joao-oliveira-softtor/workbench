@@ -97,10 +97,15 @@ declare module 'claude-code' {
       removal: { at: number; agentId: string | null; allowed: string[] } | null
       // Etapa de "Compactar e continuar" que o botão mostra; null = parado. A trava de verdade é variável do módulo.
       compacting: 'queued' | 'analyzing' | 'compacting' | null
+      // Hora em que a compactação do botão começou; null = nenhuma. Sobrevive à recarga do mod (que zera a trava): impede
+      // um clique de começar outra por cima até um turno começar ou o prazo passar.
+      compactingAt: number | null
       // Planejar: etapa que o botão mostra e o doc revisado pelo /egm:egm-review (vazio fora do Executar).
       planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string }
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.
       refining: boolean
+      // Resumo do dia (botão "Retomada"): etapa que o botão mostra; null = parado. A trava de verdade é variável do módulo.
+      resuming: 'reading' | 'summarizing' | null
       // QA: etapa do botão e as pastas; não zera no session.start.
       qaFlow: { step: 'plan' | 'login' | 'run' | 'fix'; runDir: string; fixDir: string }
       // QA: o trabalho em curso (fila, item e a matriz lida no clique: os passos não relêem o matriz.md); não zera no

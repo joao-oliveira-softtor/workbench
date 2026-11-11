@@ -2,19 +2,25 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Row, Snapshot, StaleReport } from '../types'
-import { askAnalysis, askHaiku, askRefine, askRoute, collect, measureSizes, repoRoot, unsizedPaths } from './collect'
+import { askAnalysis, askHaiku, askRefine, askRoute, askSessionSummary, collect, measureSizes, readHead, readTranscript, repoRoot, unsizedPaths } from './collect'
 import {
+  COMPACT_TIMEOUT_MS,
+  RESUME_HEAD,
+  TRANSCRIPT_CAP,
   buttonLabel,
   clickAction,
+  compactInstructionsOf,
   hasTurnIntervened,
   instructionsOf,
   parseAnalysis,
+  resumeFailureOf,
   resumePromptOf,
+  shouldAutoResume,
   shouldStart,
   tokensLabel,
   transcriptOf,
 } from './compact'
-import type { Analysis, Phase, Step } from './compact'
+import type { Analysis, Phase, RunningAgent, Step } from './compact'
 import {
   EGM_COMMANDS,
   PLAN_LABELS,
@@ -118,11 +124,13 @@ import {
   writeScripts,
 } from './qa-flow'
 import type { FixCheck, QaApp, QaEnv } from './qa-flow'
+import type { Settled } from './model'
 import { bandOf, fetchAgeLabel, freedKb, handoffTable, idleDays, isFetchStale, lineOf, pushLabel, settle, sizeLabel, sortRows, summaryOf } from './model'
 import { DELEGATE_CONTEXT, formatRoute, isUserOrigin, parseRoute, shouldDelegate, tierOf } from './route'
 import {
   ABORT_BACKOFF_MS,
   ARM_MS,
+  ENDED,
   MAX_REMOVAL_LINES,
   REMOVER_AGENT,
   REMOVER_PROMPT,
@@ -149,6 +157,31 @@ import {
   splitCandidates,
 } from './stale'
 import type { Failure, Judged, Known, Listed, Stored } from './stale'
+import {
+  DAY_CUTOFF_HOUR,
+  DAY_LOOKBACK,
+  MAX_CALLS,
+  MAX_HEADS,
+  MAX_TAILS,
+  RESUME_MESSAGE_HEAD,
+  dayFileOf,
+  expiredOf,
+  hhmmOf,
+  historyBlockOf,
+  isAutomaticHead,
+  isOkOn,
+  labelOf as lineLabelOf,
+  parseSessionSummary,
+  refOf,
+  resumeMessageOf,
+  scrub,
+  shiftDay,
+  sliceOf,
+  sliceTextOf,
+  tallyOf,
+  workDayOf,
+} from './resume'
+import type { Read, Slice, Summarized } from './resume'
 
 const PANE = 'workbench'
 const REFRESH_MS = 5 * 60 * 1000
@@ -167,9 +200,11 @@ const suggesting = atom({ plugin: 'workbench', key: 'suggesting' } as const, fal
 const armed = atom({ plugin: 'workbench', key: 'armed' } as const, null)
 const removal = atom({ plugin: 'workbench', key: 'removal' } as const, null)
 const compacting = atom({ plugin: 'workbench', key: 'compacting' } as const, null)
+const compactingAt = atom({ plugin: 'workbench', key: 'compactingAt' } as const, null)
 // Etapa do botão EGM e o doc revisado. Não zera no session.start: ele roda também a cada recarga do mod.
 const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_START)
 const refining = atom({ plugin: 'workbench', key: 'refining' } as const, false)
+const resuming = atom({ plugin: 'workbench', key: 'resuming' } as const, null)
 // QA: nenhum destes zera no session.start (é o que permite retomar e o que mantém suprimidos os agentes já lançados).
 const qaFlow = atom({ plugin: 'workbench', key: 'qaFlow' } as const, QA_START)
 const qaJob = atom({ plugin: 'workbench', key: 'qaJob' } as const, null)
@@ -196,10 +231,23 @@ let abortedUntil = 0
 let compactPhase: Phase = 'idle'
 let isMainTurn = false
 let mainTurns = 0
+// Vigia do turno da retomada: `{ text }` depois do envio; o próximo turn.start do loop principal a troca por `{ turnId }`
+// (era o da retomada) ou `null` (não era). Limite: uma retomada que ficou na fila atrás de outro turno não é vigiada.
+let resumeWatch: { text: string } | { turnId: string } | null = null
+// Retomada depois da compactação automática com a sessão parada: `seen` é o mainTurns daquele momento. No máximo uma por
+// pedido seu (`humanSinceAutoResume`), sem laço. `hasSeenMainTurn`: a recarga zera `isMainTurn` mesmo com um turno rodando,
+// então "parada" só vale depois de um turno visto desde a carga.
+let autoResume: { seen: number } | null = null
+let humanSinceAutoResume = true
+let hasSeenMainTurn = false
 // EGM: o clique só enfileira a etapa (o dispatch de um botão pode ser abandonado); o drainPlan faz o trabalho no timer.
 let planQueued: PlanStep | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
 let refinePhase: Phase = 'idle'
+// Resumo do dia (botão "Retomada"): a trava é `resumePhase`, como o `refinePhase`; `resuming` em $.state é só o rótulo.
+let resumePhase: Phase = 'idle'
+// O resumo já entrou nesta sessão: o segundo clique só avisa (não depende de `$.session.turns()` contar o envio do mod).
+let resumeSent = false
 
 // Delegação de modelo (/route auto on): lida do `$.store` no session.start e mantida aqui, porque o hook do prompt nunca
 // espera o armazenamento. Desligada por padrão.
@@ -217,11 +265,6 @@ let qaBlocked: string | null = QA_OFF
 let qaApp: QaApp | null = null
 // Quantos stops já houve: o clique Corrigir que prepara a worktree por minutos não monta o trabalho se um stop chegou no meio.
 let qaStops = 0
-
-function hhmm(at: number): string {
-  const d = new Date(at)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
 
 function storeKey(root: string): string {
   return `stale:${root}`
@@ -252,7 +295,7 @@ async function afterRefresh($: EngineInterface, snap: Snapshot): Promise<void> {
     missingReason: 'sem veredito ainda',
     hash,
     at: fromHaiku ? prev.at : snap.at,
-    note: fromHaiku ? (prev.hash === hash ? prev.note : `Haiku de ${hhmm(prev.at)} (o conjunto mudou)`) : null,
+    note: fromHaiku ? (prev.hash === hash ? prev.note : `Haiku de ${hhmmOf(prev.at)} (o conjunto mudou)`) : null,
   })
   await update($, stale, () => report)
   const surfaces = await settle(() => $.session.surfaces())
@@ -325,8 +368,8 @@ async function drainSuggest($: EngineInterface): Promise<void> {
 
 function noteOf(o: { failure: Failure; reason: string; fresh: number; isComplete: boolean; now: number }): string {
   if (o.failure !== null) return `Haiku indisponível: ${o.reason}${o.fresh > 0 ? ` (${o.fresh} vereditos novos guardados)` : ''}`
-  if (o.isComplete) return `Haiku às ${hhmm(o.now)}`
-  return `Haiku às ${hhmm(o.now)}; faltam vereditos, o resto vai na próxima consulta`
+  if (o.isComplete) return `Haiku às ${hhmmOf(o.now)}`
+  return `Haiku às ${hhmmOf(o.now)}; faltam vereditos, o resto vai na próxima consulta`
 }
 
 // Lotes de até 20 (no máximo 5) só com as candidatas sem veredito válido; o que gravar no fim sai de persistOf.
@@ -420,7 +463,13 @@ async function drainSizes($: EngineInterface): Promise<void> {
 
 async function agentsOf($: EngineInterface): Promise<Listed[] | null> {
   const listed = await settle(() => $.agent.list())
-  return listed.ok ? listed.value.map(a => ({ id: a.id, type: a.type, status: a.status })) : null
+  return listed.ok ? listed.value.map(a => ({ id: a.id, type: a.type, status: a.status, description: a.description })) : null
+}
+
+// Os agentes que ainda rodam, para a compactação e a retomada. A listagem que falha vira lista vazia: retoma sem a linha.
+async function runningAgentsOf($: EngineInterface): Promise<RunningAgent[]> {
+  const listed = (await agentsOf($)) ?? []
+  return listed.filter(a => !ENDED.has(a.status)).map(a => ({ id: a.id, type: a.type, description: a.description ?? '' }))
 }
 
 // O agente é o remover? Fora da lista (ou com a consulta falhando) não é: o turn.complete não encerra nada por um agente
@@ -633,11 +682,18 @@ async function pressCompact($: EngineInterface): Promise<void> {
       await setStep($, null)
       $.ui.toast('Fila cancelada: nada foi compactado.')
       return
-    case 'queue':
+    case 'queue': {
+      // Recarga no meio de uma compactação do botão: a trava zerou, mas a compactação pode seguir rodando.
+      const at = await read($, compactingAt)
+      if (at !== null && (await $.clock.now()) - at < COMPACT_TIMEOUT_MS) {
+        $.ui.toast('Compactação em andamento (começou antes de o mod recarregar).')
+        return
+      }
       compactPhase = 'queued'
       await setStep($, 'queued')
       if (isMainTurn) $.ui.toast('Compactação na fila: roda quando o turno acabar.')
       return
+    }
     default:
       throw new Error('Caso não tratado: ' + String(click satisfies never))
   }
@@ -646,7 +702,7 @@ async function pressCompact($: EngineInterface): Promise<void> {
 // O Sonnet lê o fim da conversa e devolve a análise; qualquer falha vira null e a compactação segue só com os critérios.
 async function analyzeSession($: EngineInterface): Promise<Analysis | null> {
   const read = await settle(() => $.session.messages())
-  const transcript = read.ok ? transcriptOf(read.value) : ''
+  const transcript = read.ok ? transcriptOf(read.value, TRANSCRIPT_CAP, true) : ''
   const asked = transcript === '' ? null : await askAnalysis($, transcript)
   const analysis = asked?.ok ? parseAnalysis(asked.text) : null
   if (analysis === null) $.ui.toast('Análise falhou: compactando só com os critérios.')
@@ -654,9 +710,96 @@ async function analyzeSession($: EngineInterface): Promise<Analysis | null> {
   return analysis
 }
 
+// Aviso gravado: o toast some, a linha `system` fica no transcrito (o modelo não a lê). Nunca derruba o fluxo.
+async function notice($: EngineInterface, text: string): Promise<void> {
+  $.ui.toast(text)
+  const wrote = await settle(() => $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }))
+  const reason = wrote.ok ? wrote.value.deny : wrote.error
+  if (reason !== undefined) $.ui.log(`workbench: aviso não gravado (${reason})`)
+}
+
+// Manda a retomada no molde do sendQaStep. A vigia é armada ANTES: o submit só resolve depois que o turno começou, então
+// o turn.start da retomada chega durante a espera. No sucesso não mexe nela (o turn.start decide).
+async function sendResume($: EngineInterface, text: string): Promise<void> {
+  resumeWatch = { text }
+  const sent = await settle(() => $.prompt.submit({ text }))
+  const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  if (drop === undefined) return
+  resumeWatch = null
+  await notice($, `Retomada falhou: o prompt não entrou (${drop}).`)
+}
+
+// A compactação corre contra o prazo. Passou dele: avisa e segue esperando (a API não cancela, e soltar a trava antes
+// deixaria um segundo clique compactar por cima); quando ela termina, devolve 'late' e o botão só solta a trava.
+async function compactWithin($: EngineInterface, instructions: string) {
+  const startedAt = await $.clock.now()
+  await update($, compactingAt, () => startedAt)
+  const stop = new AbortController()
+  let isLate = false
+  const deadline = $.clock.sleep(COMPACT_TIMEOUT_MS, { signal: stop.signal }).then(
+    () => {
+      isLate = true
+      return notice($, 'A compactação passou de 5 min sem terminar; o mod não vai retomar sozinho.')
+    },
+    () => {},
+  )
+  try {
+    const done = await settle(() => $.session.compact({ instructions }))
+    return isLate ? ('late' as const) : done
+  } finally {
+    stop.abort()
+    await deadline
+    await settle(() => update($, compactingAt, () => null))
+  }
+}
+
+const isButtonBusy = (): boolean => compactPhase !== 'idle' || resumePhase !== 'idle'
+
+// Por que a retomada automática não entra pelo campo de prompt; null quando ele está vazio.
+async function fieldRefusalOf($: EngineInterface): Promise<string | null> {
+  const field = await settle(() => $.prompt.read())
+  if (!field.ok) return 'Retomada automática não enviada: não deu para ler o campo de digitação.'
+  return field.value.text === '' ? null : 'Compactado sozinho, sem retomar: há texto no campo de prompt.'
+}
+
+// Roda no timer: retoma depois da compactação automática, se nada mudou desde ela. A marca sai já no começo, para um
+// tique seguinte não mandar de novo enquanto este espera a lista de agentes. Com o botão Compactar ou Retomada na fila
+// ou rodando, a marca é descartada com aviso: a retomada de cada um não pode correr junto com esta.
+async function drainAutoResume($: EngineInterface): Promise<void> {
+  const pending = autoResume
+  if (pending === null) return
+  autoResume = null
+  if (isButtonBusy()) {
+    await notice($, 'Compactado sozinho, sem retomar: o botão Compactar ou Retomada está em uso.')
+    return
+  }
+  const agents = await runningAgentsOf($)
+  const decision = shouldAutoResume({ pending, isMainTurn, mainTurns, humanSince: humanSinceAutoResume })
+  switch (decision) {
+    case 'drop':
+      return
+    case 'blocked':
+      await notice($, 'Compactado sozinho, sem retomar: já houve uma retomada automática sem pedido seu depois.')
+      return
+    case 'send':
+      break
+    default:
+      throw new Error('Caso não tratado: ' + String(decision satisfies never))
+  }
+  const refusal = await fieldRefusalOf($)
+  if (refusal !== null) {
+    await notice($, refusal)
+    return
+  }
+  humanSinceAutoResume = false
+  await sendResume($, resumePromptOf(null, agents))
+}
+
 // Compacta e retoma. `seen` é o contador de turnos de quando a análise começou: se mudou, o usuário voltou a trabalhar.
 async function runCompact($: EngineInterface, analysis: Analysis | null, seen: number): Promise<void> {
-  const done = await settle(() => $.session.compact({ instructions: instructionsOf(analysis) }))
+  const agents = await runningAgentsOf($)
+  const done = await compactWithin($, instructionsOf(analysis, agents))
+  if (done === 'late') return
   const intervened = hasTurnIntervened({ isMainTurn, mainTurns, seen })
   if (!done.ok) {
     // Rejeitou porque um turno começou: espera a vez. Qualquer outro motivo (API, nada a compactar) NÃO repete a análise.
@@ -670,10 +813,14 @@ async function runCompact($: EngineInterface, analysis: Analysis | null, seen: n
   }
   $.ui.toast(`Compactado ${tokensLabel(done.value.tokensBefore, done.value.tokensAfter)}`.trim())
   if (intervened) {
-    $.ui.toast('Compactado, mas um prompt entrou antes: não retomou sozinho.')
+    await notice($, 'Compactado, mas um prompt entrou antes: não retomou sozinho.')
     return
   }
-  await $.prompt.submit({ text: resumePromptOf(analysis) })
+  if ((await $.prompt.read()).text !== '') {
+    await notice($, 'Compactado, mas há texto no campo de prompt: não retomou sozinho.')
+    return
+  }
+  await sendResume($, resumePromptOf(analysis, await runningAgentsOf($)))
 }
 
 // Roda no timer de 3 s. Só começa com o pedido na fila e a sessão parada; um turno que aparece durante a análise devolve
@@ -799,6 +946,223 @@ async function drainRefine($: EngineInterface): Promise<void> {
   } finally {
     refinePhase = 'idle'
     await settle(() => update($, refining, () => false))
+  }
+}
+
+// ---- Resumo do dia (botão "Retomada"): o clique só enfileira; o trabalho roda no timer (drainResume) ----
+
+const CLEAN_ONLY = 'Resumo do dia só numa sessão limpa: abra uma sessão nova e clique de novo.'
+const RESUMING_LABELS = { reading: 'Lendo sessões…', summarizing: 'Resumindo…' } satisfies Record<'reading' | 'summarizing', string>
+type Transcript = { path: string; project: string; size: number; mtimeMs: number }
+type DayPick = { kind: 'none' } | { kind: 'reuse'; day: string } | { kind: 'fresh'; day: string; reads: Read[] }
+
+const resumeLabelOf = (r: 'reading' | 'summarizing' | null): string => (r === null ? 'Retomada' : RESUMING_LABELS[r])
+
+async function pressResume($: EngineInterface): Promise<void> {
+  if (resumeSent) {
+    $.ui.toast('Resumo do dia: o resumo já foi enviado nesta sessão.')
+    return
+  }
+  if (resumePhase !== 'idle') return
+  resumePhase = 'queued'
+  await update($, resuming, () => 'reading')
+}
+
+async function isCleanSession($: EngineInterface): Promise<boolean> {
+  return !isMainTurn && (await $.session.turns()) === 0
+}
+
+// A pasta do Claude: CLAUDE_CONFIG_DIR; senão <HOME>/.claude; senão <USERPROFILE>/.claude (lidos direto do $.env).
+// O engine exige o nome literal em cada `$.env.get`.
+async function claudeDirOf($: EngineInterface): Promise<string | null> {
+  const set = (got: Settled<string | undefined>): string | undefined => (got.ok && got.value !== '' ? got.value : undefined)
+  const config = set(await settle(() => $.env.get('CLAUDE_CONFIG_DIR')))
+  if (config !== undefined) return config
+  const home = set(await settle(() => $.env.get('HOME'))) ?? set(await settle(() => $.env.get('USERPROFILE')))
+  return home === undefined ? null : `${home}/.claude`
+}
+
+const dayPathOf = (root: string, day: string): string => `${root}/workbench-resume/${day}.md`
+const fileDayOf = (file: Transcript): string => workDayOf(file.mtimeMs, DAY_CUTOFF_HOUR)
+
+// Lista sem ler: só os .jsonl do primeiro nível de cada pasta em projects/ (os de subagente ficam em <id>/subagents/), sem
+// a sessão atual, do modificado mais recentemente para o mais antigo.
+async function transcriptsOf($: EngineInterface, root: string, currentId: string): Promise<Transcript[]> {
+  const folders = await settle(() => $.fs.list(`${root}/projects`))
+  if (!folders.ok) return []
+  const lists = await Promise.all(
+    folders.value
+      .filter(folder => folder.kind === 'dir')
+      .map(async folder => {
+        const dir = `${root}/projects/${folder.name}`
+        const entries = await settle(() => $.fs.list(dir))
+        if (!entries.ok) return []
+        return entries.value
+          .filter(f => f.kind === 'file' && f.name.endsWith('.jsonl') && f.name !== `${currentId}.jsonl`)
+          .map(f => ({ path: `${dir}/${f.name}`, project: lineLabelOf(folder.name), size: f.size, mtimeMs: f.mtimeMs }))
+      }),
+  )
+  return lists.flat().sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+// Sem dia achado, o teto batido muda a leitura do aviso: pode haver sessão sua entre os arquivos não lidos.
+const uncappedOf = (unread: number): string =>
+  unread === 0 ? '' : ` (${unread} arquivos ficaram sem leitura: teto de ${MAX_HEADS} leituras curtas e ${MAX_TAILS} longas).`
+
+// Leituras do clique: um objeto por clique, passado a todas as leituras dele.
+type Budget = { heads: number; tails: number; unread: number }
+
+// Uma leitura de cada vez, na ordem recebida (a mais recente primeiro): a curta (`head`) acha o `entrypoint`, e só a sessão
+// com terminal (ou sem `entrypoint` no começo) recebe a longa (`tail`). Batido um teto, para e conta o resto como sem leitura.
+async function readOne($: EngineInterface, file: Transcript, budget: Budget): Promise<Read> {
+  budget.heads += 1
+  const head = await readHead($, file.path)
+  if (head !== null && isAutomaticHead(head)) return { project: file.project, at: file.mtimeMs, slice: { kind: 'automatic' } }
+  budget.tails += 1
+  const got = await readTranscript($, file.path, file.size)
+  if (got === null) return { project: file.project, at: file.mtimeMs, slice: null }
+  // A mensagem do botão pode ter ficado fora do fim lido; a leitura curta a vê (a linha pode vir cortada: busca no texto cru).
+  const hasBot = got.isTail && head !== null && head.includes(RESUME_MESSAGE_HEAD)
+  return { project: file.project, at: file.mtimeMs, slice: sliceOf(got.text, got.isTail, hasBot) }
+}
+
+async function readAll($: EngineInterface, files: readonly Transcript[], budget: Budget): Promise<Read[]> {
+  const reads: Read[] = []
+  for (const [i, file] of files.entries()) {
+    if (budget.heads >= MAX_HEADS || budget.tails >= MAX_TAILS) {
+      budget.unread += files.length - i
+      break
+    }
+    reads.push(await readOne($, file, budget))
+  }
+  return reads
+}
+
+// O dia do último pedido seu de cada sessão lida.
+const lastDaysOf = (reads: readonly Read[]): string[] =>
+  reads.flatMap(r => (r.slice?.kind === 'ok' ? [workDayOf(r.slice.lastHumanAt, DAY_CUTOFF_HOUR)] : []))
+
+// Ordem: lê os de hoje primeiro (contam nos tetos, sem modelo) → candidatos = dias de modificação + dia do último pedido
+// seu nos de hoje (um `--resume` hoje não tira ontem da lista) → do mais novo para o mais velho (até DAY_LOOKBACK): o
+// <dia>.md do dia escolhido é reaproveitado (C7) e para; senão lê os do dia e para no primeiro com sessão sua. O
+// reaproveitamento só se decide depois de escolher o dia. Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
+async function pickDay($: EngineInterface, root: string, files: readonly Transcript[], today: string, budget: Budget): Promise<DayPick> {
+  const oldest = shiftDay(today, -DAY_LOOKBACK)
+  const isCandidate = (d: string): boolean => d < today && d >= oldest
+  const byMtime = [...new Set(files.map(fileDayOf))].filter(isCandidate)
+  const ofToday = await readAll($, files.filter(f => fileDayOf(f) === today), budget)
+  const days = [...new Set([...byMtime, ...lastDaysOf(ofToday).filter(isCandidate)])].sort().reverse()
+  for (const day of days) {
+    if (await $.fs.exists(dayPathOf(root, day))) return { kind: 'reuse', day }
+    const reads = [...(await readAll($, files.filter(f => fileDayOf(f) === day), budget)), ...ofToday]
+    if (reads.some(r => isOkOn(r, day))) return { kind: 'fresh', day, reads }
+  }
+  if (!ofToday.some(r => isOkOn(r, today))) return { kind: 'none' }
+  if (await $.fs.exists(dayPathOf(root, today))) return { kind: 'reuse', day: today }
+  return { kind: 'fresh', day: today, reads: ofToday }
+}
+
+type SliceAsked = { kind: 'ok'; done: Summarized } | { kind: 'failed'; slice: Summarized['slice']; reason: string }
+
+async function summaryOfSlice($: EngineInterface, slice: Summarized['slice']): Promise<SliceAsked> {
+  const asked = await askSessionSummary($, historyBlockOf(scrub(sliceTextOf(slice))))
+  if (!asked.ok) return { kind: 'failed', slice, reason: asked.reason }
+  const summary = parseSessionSummary(asked.text)
+  return summary === null ? { kind: 'failed', slice, reason: 'resposta fora do formato' } : { kind: 'ok', done: { slice, summary } }
+}
+
+// Apaga os arquivos do dia com mais de KEEP_DAYS dias (pela data do nome). A pasta só tem arquivos do mod.
+async function pruneDays($: EngineInterface, root: string, today: string): Promise<void> {
+  const dir = `${root}/workbench-resume`
+  const names = (await $.fs.list(dir)).filter(e => e.kind === 'file').map(e => e.name)
+  for (const name of expiredOf(names, today)) await settle(() => $.process.run(['rm', '-f', '--', `${dir}/${name}`]))
+}
+
+// Teto de MAX_CALLS chamadas ao Haiku, em paralelo, com o recorte já sem segredos. Zero resumidas: não grava e deixa o aviso
+// gravado. Devolve o texto gravado, o caminho e o toast de conclusão.
+async function summarizeDay($: EngineInterface, root: string, day: string, today: string, reads: readonly Read[], unread: number) {
+  const tally = tallyOf(reads, day, today)
+  await update($, resuming, () => 'summarizing')
+  const results = await Promise.all(tally.ok.slice(0, MAX_CALLS).map(slice => summaryOfSlice($, slice)))
+  const sessions = results.flatMap(r => (r.kind === 'ok' ? [r.done] : []))
+  const failures = results.flatMap(r => (r.kind === 'failed' ? [r] : []))
+  if (sessions.length === 0) {
+    await notice($, `Resumo do dia falhou: ${failures[0]?.reason ?? 'nenhuma sessão resumida'}`)
+    return null
+  }
+  const failed = [...tally.failed, ...failures.map(f => refOf(f.slice))]
+  const leftOut = tally.ok.slice(MAX_CALLS).map(refOf)
+  const path = dayPathOf(root, day)
+  const text = scrub(dayFileOf({ day, sessions, failed, leftOut, counts: tally.counts, unread }))
+  await $.fs.write(path, text)
+  await settle(() => pruneDays($, root, today))
+  const capped = unread === 0 ? '' : ` ${unread} arquivos ficaram sem leitura (teto de ${MAX_HEADS} leituras curtas e ${MAX_TAILS} longas).`
+  const done = `Resumo do dia: ${sessions.length} sessões resumidas, ${failed.length} falharam, ${leftOut.length} ficaram de fora.${capped} Arquivo: ${path}.`
+  return { text, path, done }
+}
+
+// Manda só com a sessão ainda limpa e o campo de prompt vazio; senão o arquivo fica gravado e o toast diz onde.
+async function sendDay($: EngineInterface, dayText: string, path: string, done: string): Promise<void> {
+  if (!(await isCleanSession($))) {
+    $.ui.toast(`Resumo pronto em ${path}: não mandei na conversa porque a sessão já começou.`)
+    return
+  }
+  if ((await $.prompt.read()).text !== '') {
+    $.ui.toast(`Resumo pronto em ${path}: não mandei na conversa porque há texto no campo de prompt.`)
+    return
+  }
+  const sent = await settle(() => $.prompt.submit({ text: resumeMessageOf(dayText, path) }))
+  const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  if (drop === undefined) resumeSent = true
+  $.ui.toast(drop === undefined ? done : `Resumo do dia falhou: o pedido não entrou (${drop}).`)
+}
+
+async function runResume($: EngineInterface): Promise<void> {
+  if (!(await isCleanSession($))) {
+    $.ui.toast(CLEAN_ONLY)
+    return
+  }
+  const root = await claudeDirOf($)
+  if (root === null) {
+    $.ui.toast('Resumo do dia falhou: sem CLAUDE_CONFIG_DIR, HOME nem USERPROFILE.')
+    return
+  }
+  const today = workDayOf(await $.clock.now(), DAY_CUTOFF_HOUR)
+  const budget: Budget = { heads: 0, tails: 0, unread: 0 }
+  const pick = await pickDay($, root, await transcriptsOf($, root, await $.session.id()), today, budget)
+  switch (pick.kind) {
+    case 'none':
+      $.ui.toast(`Nenhuma sessão sua nos últimos ${DAY_LOOKBACK} dias${uncappedOf(budget.unread)}`)
+      return
+    case 'reuse': {
+      const path = dayPathOf(root, pick.day)
+      await sendDay($, await $.fs.read(path), path, `Resumo do dia: o resumo de ${pick.day} já existe (${path}). Apague-o para refazer.`)
+      return
+    }
+    case 'fresh': {
+      const made = await summarizeDay($, root, pick.day, today, pick.reads, budget.unread)
+      if (made !== null) await sendDay($, made.text, made.path, made.done)
+      return
+    }
+    default:
+      throw new Error('Caso não tratado: ' + String(pick satisfies never))
+  }
+}
+
+// Roda no timer de 3 s, só com o pedido na fila (o dispatch de um botão pode ser abandonado). Trava solta no finally.
+// Ordem: sessão limpa → pastas → listar arquivos com data → ler os de hoje (curta e, nos interativos, longa; sem modelo)
+// → escolher o dia (datas de modificação + último pedido seu nos de hoje) → <dia>.md desse dia existe: reaproveita e para
+// → senão lê os do dia → descartes → teto de MAX_CALLS chamadas ao modelo → grava → envia.
+async function drainResume($: EngineInterface): Promise<void> {
+  if (resumePhase !== 'queued') return
+  resumePhase = 'running'
+  try {
+    await runResume($)
+  } catch (err) {
+    $.ui.toast(`Resumo do dia falhou: ${errorText(err)}.`)
+  } finally {
+    resumePhase = 'idle'
+    await settle(() => update($, resuming, () => null))
   }
 }
 
@@ -1614,10 +1978,19 @@ export const register: Register = on => {
     compactPhase = 'idle'
     isMainTurn = false
     mainTurns = 0
+    resumeWatch = null
+    autoResume = null
+    humanSinceAutoResume = true
+    hasSeenMainTurn = false
     planQueued = null
     refinePhase = 'idle'
+    resumePhase = 'idle'
+    resumeSent = false
+    // Antes de zerar o rótulo: se ele dizia "compactando", a recarga caiu no meio (`compactingAt` NÃO zera aqui).
+    if ((await read($, compacting)) === 'compacting') await notice($, 'O mod recarregou durante a compactação: confira a conversa e clique de novo se precisar.')
     await update($, compacting, () => null)
     await update($, refining, () => false)
+    await update($, resuming, () => null)
     qaQueued = null
     isQaStepping = false
     qaPending = null
@@ -1675,8 +2048,10 @@ export const register: Register = on => {
       void drainSizes($).catch(() => {})
       void drainRemove($).catch(() => {})
       void drainCompact($).catch(() => {})
+      void drainAutoResume($).catch(() => {})
       void drainPlan($).catch(() => {})
       void drainRefine($).catch(() => {})
+      void drainResume($).catch(() => {})
       void drainQa($).catch(() => {})
     })
     void refresh($).catch(() => {})
@@ -1731,6 +2106,7 @@ export const register: Register = on => {
   // Nunca segura o prompt: sem chamada de modelo nem de armazenamento, só soma a instrução de delegar ao `context`.
   on('prompt.submit', async ($, e, next) => {
     try {
+      if (isUserOrigin(e.origin.kind)) humanSinceAutoResume = true
       // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
       const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
       if (handback !== null && (await read($, qaGuarded)).includes(handback)) return { drop: 'workbench: o relatório do agente de QA é lido pelo mod' }
@@ -1774,18 +2150,51 @@ export const register: Register = on => {
     return authReplyOf($, env, (await read($, qaFlow)).runDir, call.profile, await $.clock.now())
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'qa_auth: a consulta falhou' }))
 
+  // Toda compactação que chega ao mod (`/compact`, a automática do Claude Code, o pré-cálculo, a de outro mod; a do
+  // próprio botão o engine não passa por aqui) deixa um aviso gravado no transcrito: é a prova de qual `trigger` chega.
+  // O registro vai depois do resultado (antes cairia dentro da compactação) e nunca lança. O /compact e a automática levam
+  // os critérios; só a automática do loop principal com a sessão parada marca a retomada (o /compact não retoma: C1; a de
+  // subagente e a de outro mod passam intactas).
+  on('session.compact', async ($, e, next) => {
+    const isParked = !isMainTurn
+    const seen = mainTurns
+    const isAgent = e.agentId !== undefined
+    const done = await next(isAgent ? e : { ...e, instructions: compactInstructionsOf(e.trigger, e.instructions) })
+    const isMarked = e.trigger === 'auto' && !isAgent && done.skip === undefined && compactPhase === 'idle' && hasSeenMainTurn && !isMainTurn
+    if (isMarked) autoResume = { seen }
+    const outcome = done.skip === undefined ? 'compactou' : `vetada (${done.skip})`
+    // shortcut: registro de toda compactação, prova pendente da compactação ociosa; sai (ou vira opcional) depois que a
+    // marca `trigger=auto, parada=sim` for vista numa sessão com tela.
+    const text = `workbench: compactação trigger=${e.trigger}, agente=${e.agentId ?? 'não'}, parada=${isParked ? 'sim' : 'não'}, resultado=${outcome}, retomada=${isMarked ? 'marcada' : 'não'}`
+    await settle(() => $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }))
+    return done
+  }).catch(($, e, next) => next(e))
+
   // Só o loop principal conta (subagentes e a fork da compactação trazem agentId): a compactação espera a sessão parar.
-  on('turn.start', async (_$, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       isMainTurn = true
+      hasSeenMainTurn = true
       mainTurns += 1
+      // Um turno só começa com a compactação terminada (ela não roda durante um turno).
+      await settle(() => update($, compactingAt, () => null))
+      // O texto-base com `includes`: vale mesmo que o engine ponha uma moldura em volta do pedido do mod.
+      if (resumeWatch !== null && 'text' in resumeWatch) resumeWatch = e.text.includes(RESUME_HEAD) ? { turnId: e.turnId } : null
     }
     return next(e)
   })
 
   // Fim do turno do remover: limpa a trava e refaz o snapshot. Aqui um agente que não se consegue identificar NÃO encerra nada.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) isMainTurn = false
+    if (e.agentId === undefined) {
+      isMainTurn = false
+      hasSeenMainTurn = true
+    }
+    const watch = resumeWatch
+    if (e.agentId === undefined && watch !== null && 'turnId' in watch && watch.turnId === e.turnId) {
+      resumeWatch = null
+      if (e.reason !== 'answer') await notice($, resumeFailureOf(e.reason))
+    }
     // Só marca o fim do agente do item de QA em curso: quem avança é o timer.
     const agentId = e.agentId
     if (agentId !== undefined && (await read($, qaJob))?.current?.agentId === agentId) {
@@ -1813,6 +2222,9 @@ export const register: Register = on => {
         <Box flexGrow={1} />
         <Button key="compact" plain onPress={() => void pressCompact($).catch(() => {})}>
           {buttonLabel(await read($, compacting))}
+        </Button>
+        <Button key="resume" plain onPress={() => void pressResume($).catch(() => {})}>
+          {resumeLabelOf(await read($, resuming))}
         </Button>
         <Button key="refine" plain onPress={() => void pressRefine($).catch(() => {})}>
           {(await read($, refining)) ? 'Refinando…' : 'Planejar'}
@@ -1917,7 +2329,7 @@ export const register: Register = on => {
           {summaryOf(current).replace(/^workbench: /, '')}
         </Text>
         <Text dimColor wrap="truncate">
-          base {current.base} @{current.baseHead} · última migration {current.baseMigration ?? '—'} · {hhmm(current.at)}
+          base {current.base} @{current.baseHead} · última migration {current.baseMigration ?? '—'} · {hhmmOf(current.at)}
           {isBusy ? ' · atualizando…' : ''}
         </Text>
         <Text color={isFetchStale(current.fetchedAt, current.at) ? 'warning' : 'subtle'} wrap="truncate">
@@ -1969,7 +2381,7 @@ export const register: Register = on => {
           <Box flexDirection="column">
             <Text> </Text>
             <Text bold wrap="truncate">
-              Limpeza sugerida ({report.source === 'haiku' ? `Haiku ${hhmm(report.at)}` : 'regra'}){freed > 0 ? ` · libera ~${sizeLabel(freed)}` : ''}
+              Limpeza sugerida ({report.source === 'haiku' ? `Haiku ${hhmmOf(report.at)}` : 'regra'}){freed > 0 ? ` · libera ~${sizeLabel(freed)}` : ''}
             </Text>
             {report.note !== null && (
               <Text dimColor wrap="truncate">

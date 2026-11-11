@@ -436,7 +436,8 @@ export function removalPromptOf(lines: readonly string[]): string {
 }
 
 export type Removal = { at: number; agentId: string | null; allowed: string[] }
-export type Listed = { id: string; type: string; status: string }
+// `description` só a retomada da compactação lê; opcional para a remoção e o QA não precisarem dela.
+export type Listed = { id: string; type: string; status: string; description?: string }
 export type RemovalStep = { step: 'wait' } | { step: 'adopt'; agentId: string } | { step: 'finish' }
 
 export const ENDED = new Set(['completed', 'failed', 'killed', 'idle'])
