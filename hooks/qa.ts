@@ -62,22 +62,12 @@ function fixVerbOf(role: QaRole, attempt: number, cell: string): string {
   }
 }
 
-function runVerbOf(role: QaRole): string {
-  switch (role) {
-    case 'observer':
-      return 'verificando'
-    case 'runner':
-    case 'fixer':
-      return 'executando'
-    default:
-      throw new Error('Caso não tratado: ' + String(role satisfies never))
-  }
-}
+const RUN_VERBS = { observer: 'verificando', runner: 'executando', fixer: 'executando' } satisfies Record<QaRole, string>
 
 function verbOf(phase: QaJob['phase'], c: QaCurrent): string {
   switch (phase) {
     case 'run':
-      return runVerbOf(c.role)
+      return RUN_VERBS[c.role]
     case 'fix':
       return fixVerbOf(c.role, c.attempt, c.cell)
     default:
@@ -95,22 +85,17 @@ export function qaLabelOf(flow: QaFlow, job: QaJob | null): string {
 
 export type RunNext = 'observer' | 'repeat' | 'done'
 
-function isFailure(verdict: Verdict): boolean {
-  switch (verdict) {
-    case 'FAIL-APP':
-    case 'FAIL-VISUAL':
-      return true
-    case 'AMBIENTE':
-    case 'FAIL-AGENTE':
-    case 'INSTÁVEL':
-    case 'CANDIDATO-VISUAL':
-    case 'PASS':
-    case 'NÃO VERIFICADO':
-      return false
-    default:
-      throw new Error('Caso não tratado: ' + String(verdict satisfies never))
-  }
-}
+// Só falha da aplicação pede a repetição; o resto já é veredito final.
+const FAILURES = {
+  'FAIL-APP': true,
+  'FAIL-VISUAL': true,
+  AMBIENTE: false,
+  'FAIL-AGENTE': false,
+  INSTÁVEL: false,
+  'CANDIDATO-VISUAL': false,
+  PASS: false,
+  'NÃO VERIFICADO': false,
+} satisfies Record<Verdict, boolean>
 
 // `verdict` só importa quando o papel é `observer`: a célula que falha na primeira roda de novo, do zero, uma vez.
 export function nextRunOf(current: { role: QaRole; attempt: number }, verdict: Verdict): RunNext {
@@ -118,7 +103,7 @@ export function nextRunOf(current: { role: QaRole; attempt: number }, verdict: V
     case 'runner':
       return 'observer'
     case 'observer':
-      return current.attempt === 1 && isFailure(verdict) ? 'repeat' : 'done'
+      return current.attempt === 1 && FAILURES[verdict] ? 'repeat' : 'done'
     case 'fixer':
       return 'done'
     default:
