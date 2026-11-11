@@ -459,17 +459,22 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (refusal !== null) return { error: `a trava recusaria o corretor na worktree ${real} (${refusal})` }
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
-  // O commit da correção faz `git add -A`: a fase só começa com a árvore limpa antes e depois da instalação.
-  const before = await porcelainOf($, real)
-  if (before === null) return { error: 'não deu para ler o git status da worktree' }
-  if (before.trim() !== '') return { error: `a worktree ${real} tem mudanças que nenhum commit levou: ${changedPathsOf(before)}. Commite ou descarte e clique de novo.` }
-  const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
-  if (installed.code !== 0) return { error: `o comando ${matrix.installCommand} falhou (${exitOf(installed)})` }
-  const after = await porcelainOf($, real)
-  if (after === null) return { error: 'não deu para ler o git status da worktree' }
-  if (after.trim() !== '') return { error: `o comando de instalação mudou arquivos do repositório: ${changedPathsOf(after)}. Ajuste o installCommand da matriz (por exemplo npm ci) e clique de novo.` }
-  return { fixDir: real, baseline: statusSumOf(after) }
+  const dirty = await installedCleanOf($, matrix, real)
+  return dirty === null ? { fixDir: real, baseline: statusSumOf('') } : { error: dirty }
 }
+
+// O commit da correção faz `git add -A`: a fase só começa com a árvore limpa antes e depois da instalação. null = limpa.
+async function installedCleanOf($: EngineInterface, matrix: Matrix, real: string): Promise<string | null> {
+  const before = await porcelainOf($, real)
+  if (before !== '') return before === null ? NO_STATUS : `a worktree ${real} tem mudanças que nenhum commit levou: ${changedPathsOf(before)}. Commite ou descarte e clique de novo.`
+  const installed = await runFull($, argvOf(matrix.installCommand), { cwd: real, timeoutMs: TEN_MIN })
+  if (installed.code !== 0) return `o comando ${matrix.installCommand} falhou (${exitOf(installed)})`
+  const after = await porcelainOf($, real)
+  if (after !== '') return after === null ? NO_STATUS : `o comando de instalação mudou arquivos do repositório: ${changedPathsOf(after)}. Ajuste o installCommand da matriz (por exemplo npm ci) e clique de novo.`
+  return null
+}
+
+const NO_STATUS = 'não deu para ler o git status da worktree'
 
 export async function freePortOf($: EngineInterface): Promise<number | null> {
   const out = await run($, ['node', '-e', "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"])

@@ -861,10 +861,7 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   const runBase = await runBaseOf($, env.root)
   await update($, qaRunBase, () => runBase)
   const queue = await pendingCellsOf($, flow.runDir, matrix)
-  if (stops !== qaStops) {
-    $.ui.toast('QA: parado durante o clique Executar; clique em "QA: Executar" para retomar.')
-    return
-  }
+  if (isStoppedSince($, stops, 'QA: parado durante o clique Executar; clique em "QA: Executar" para retomar.')) return
   await update($, qaJob, cur => cur ?? { phase: 'run' as const, queue, total: queue.length, current: null, matrix })
 }
 
@@ -919,14 +916,8 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   const { all, left } = await fixQueueAt($, flow.runDir, await outcomesOf($, flow.runDir, matrix))
   const runId = runIdIn(flow.runDir)
   const fixDir = fixDirOf(env.root, runId)
-  // Parado (ou fechado) entre o último defeito resolvido e o fim da fila: o clique faz o fechamento que faltou. Depois de
-  // reabrir o Claude Code a etapa guardada volta sem a worktree (o storedFlowOf não confia nela): vale a da execução.
-  if (all.length > 0 && left.length === 0) return closeFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir || fixDir, matrix }, all)
-  if (left.length === 0) {
-    await setFlow($, f => ({ ...f, step: 'plan' as const }))
-    $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${flow.runDir}/celulas/<id>/teste.spec.ts.`)
-    return
-  }
+  // Depois de reabrir o Claude Code a etapa guardada volta sem a worktree (o storedFlowOf não confia nela): vale a da execução.
+  if (left.length === 0) return emptyFixQueue($, { env, runDir: flow.runDir, fixDir: flow.fixDir || fixDir, matrix }, all)
   if ((await read($, qaJob)) !== null || !(await isFixConfirmed($, matrix, fixDir))) return
   const stops = qaStops
   const ready = await setupWorktree($, env, matrix, { runDir: flow.runDir, defect: left[0] ?? '', fixDir }, fixBranchOf(runId))
@@ -934,15 +925,27 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
     $.ui.toast(`QA: ${ready.error}`)
     return
   }
-  if (stops !== qaStops) {
-    $.ui.toast('QA: parado durante a preparação da worktree; clique em "QA: Corrigir" para retomar.')
-    return
-  }
+  if (isStoppedSince($, stops, 'QA: parado durante a preparação da worktree; clique em "QA: Corrigir" para retomar.')) return
   const root = await rootSnapOf($, env.root)
   await setFlow($, f => ({ ...f, fixDir: ready.fixDir }))
   await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], defects: all }))
   await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null, matrix })
   void refresh($, true).catch(() => {})
+}
+
+// Nada pendente. Com defeitos marcados, todos já resolvidos (parado ou fechado antes do fim da fila), faz o fechamento que
+// faltou; sem nenhum, avisa onde ficaram os testes e volta ao começo.
+async function emptyFixQueue($: EngineInterface, f: FixCtx, all: readonly string[]): Promise<void> {
+  if (all.length > 0) return closeFix($, f, all)
+  await setFlow($, x => ({ ...x, step: 'plan' as const }))
+  $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${f.runDir}/celulas/<id>/teste.spec.ts.`)
+}
+
+// Um qa stop chegou desde `stops` (o clique roda por minutos): avisa e o clique não cria o trabalho.
+function isStoppedSince($: EngineInterface, stops: number, text: string): boolean {
+  if (stops === qaStops) return false
+  $.ui.toast(text)
+  return true
 }
 
 // Primeiro clique (ou fora do prazo): mostra os comandos e arma. Segundo clique em até ARM_MS: desarma e segue.
