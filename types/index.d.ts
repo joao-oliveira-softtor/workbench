@@ -92,8 +92,8 @@ declare module 'claude-code' {
       suggesting: boolean
       // Confirmação pendente de "Aceitar remoções": quando foi armada e a lista que o usuário viu (linhas juntas por \n).
       armed: { at: number; key: string } | null
-      // Remoção em andamento (botão em "Removendo…") e as únicas linhas de Bash que o subagente remover pode rodar.
-      // agentId é preenchido depois do spawn.
+      // Remoção em andamento (botão em "Removendo…") e as linhas aprovadas, gravadas também no arquivo da trava do remover
+      // (lista não vazia = o spawn pode ter nascido). agentId é preenchido depois do spawn.
       removal: { at: number; agentId: string | null; allowed: string[] } | null
       // Etapa de "Compactar e continuar" que o botão mostra; null = parado. A trava de verdade é variável do módulo.
       compacting: 'queued' | 'analyzing' | 'compacting' | null
@@ -101,6 +101,75 @@ declare module 'claude-code' {
       planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string }
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.
       refining: boolean
+      // QA: etapa do botão e as pastas; não zera no session.start.
+      qaFlow: { step: 'plan' | 'login' | 'run' | 'fix'; runDir: string; fixDir: string }
+      // QA: o trabalho em curso (fila, item e a matriz lida no clique: os passos não relêem o matriz.md); não zera no
+      // session.start, é o que permite retomar.
+      // O contrato não importa nada: a forma repete a de `QaJob`/`QaCurrent` do hooks/qa.ts e, em `matrix`, a de `Matrix` do
+      // hooks/qa-evidence.ts (o tsc confere).
+      qaJob: {
+        phase: 'run' | 'fix'
+        queue: string[]
+        total: number
+        current: {
+          item: string
+          role: 'runner' | 'observer' | 'fixer'
+          attempt: number
+          agentId: string | null
+          at: number
+          isEnded: boolean
+          cell: string
+          sha: string
+          port: number
+          session: string
+          cdpPort: number | null
+          reasons: string[]
+        } | null
+        matrix: {
+          baseUrl: string
+          loginRoute: string
+          allowedDomains: string[]
+          installCommand: string
+          startCommand: string
+          testCommand: string
+          testDir: string
+          backend: { containers: string[] }
+          profiles: string[]
+          requirements: { id: string; text: string; source: string }[]
+          cells: {
+            id: string
+            requirement: string
+            risk: 'alto' | 'medio' | 'baixo'
+            flow: string
+            route: string
+            profile: string
+            width: 360 | 768 | 1280
+            reason: string
+            steps: string[]
+            criteria: { given: string; when: string; then: string }[]
+            expectedStatus: { url: string; status: number }[]
+          }[]
+          cut: string[]
+        }
+      } | null
+      // QA: todo agentId de QA já lançado; nunca diminui (o relatório deles é suprimido e nenhum é adotado de novo).
+      qaGuarded: string[]
+      // QA: HEAD e estado da árvore do app no começo do Executar.
+      qaRunBase: { head: string; isDirty: boolean } | null
+      // QA: o código do nome do arquivo da trava; criado uma vez, não zera no session.start (o agente lançado antes de um
+      // reload continua lendo o mesmo arquivo, e o stop e o fim da execução chegam nele).
+      qaGuardToken: string | null
+      // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
+      qaArmed: { at: number } | null
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o HEAD do começo da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e a fila inteira de defeitos lida no clique
+      // (a matriz fica no `qaJob`). Não zera no session.start (é o que permite retomar).
+      qaFix: {
+        root: string
+        attemptSha: string
+        regression: string | null
+        pending: string[]
+        defects: string[]
+      } | null
     }
   }
 }
