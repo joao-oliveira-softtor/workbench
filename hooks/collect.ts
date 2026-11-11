@@ -22,7 +22,7 @@ import {
 } from './model'
 import type { Upstream, Worktree } from './model'
 import { ANALYZE_MAX_TOKENS, ANALYZE_RULES, ANALYZE_TIMEOUT_MS, analyzePromptOf } from './compact'
-import { RESUME_MAX_TOKENS, RESUME_RULES, RESUME_TIMEOUT_MS, TAIL_BYTES } from './resume'
+import { RESUME_MAX_TOKENS, RESUME_RULES, RESUME_TIMEOUT_MS, HEAD_BYTES, TAIL_BYTES } from './resume'
 import { REFINE_MAX_TOKENS, REFINE_RULES, REFINE_TIMEOUT_MS } from './plan'
 import { ROUTE_EFFORT, ROUTE_MAX_TOKENS, ROUTE_RULES, ROUTE_TIMEOUT_MS, buildRoutePrompt } from './route'
 import { RULES, candidatesOf } from './stale'
@@ -347,7 +347,13 @@ export function askSessionSummary($: EngineInterface, sliceText: string): Promis
 // Um caminho só para todo tamanho: o fim do transcrito por `tail -c` (o `$.fs.read` recusa acima de 4 MiB). Com o arquivo
 // maior que TAIL_BYTES, a primeira linha pode vir cortada (`isTail`). Falha ou código diferente de 0 devolve null.
 export async function readTranscript($: EngineInterface, path: string, size: number): Promise<{ text: string; isTail: boolean } | null> {
-  const run = await settle(() => $.process.run(['tail', '-c', String(TAIL_BYTES), path], { timeoutMs: 30_000 }))
+  const run = await settle(() => $.process.run(['tail', '-c', String(TAIL_BYTES), '--', path], { timeoutMs: 30_000 }))
   if (!run.ok || run.value.exitCode !== 0) return null
   return { text: run.value.stdout, isTail: size > TAIL_BYTES }
+}
+
+// Leitura curta: o começo do arquivo (HEAD_BYTES), para achar o `entrypoint` antes de pagar o `tail`. Falha devolve null.
+export async function readHead($: EngineInterface, path: string): Promise<string | null> {
+  const run = await settle(() => $.process.run(['head', '-c', String(HEAD_BYTES), '--', path], { timeoutMs: 30_000 }))
+  return run.ok && run.value.exitCode === 0 ? run.value.stdout : null
 }

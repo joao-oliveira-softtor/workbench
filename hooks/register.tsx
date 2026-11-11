@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Row, Snapshot, StaleReport } from '../types'
-import { askAnalysis, askHaiku, askRefine, askRoute, askSessionSummary, collect, measureSizes, readTranscript, repoRoot, unsizedPaths } from './collect'
+import { askAnalysis, askHaiku, askRefine, askRoute, askSessionSummary, collect, measureSizes, readHead, readTranscript, repoRoot, unsizedPaths } from './collect'
 import {
   COMPACT_TIMEOUT_MS,
   RESUME_HEAD,
@@ -163,8 +163,13 @@ import {
   DAY_CUTOFF_HOUR,
   DAY_LOOKBACK,
   MAX_CALLS,
+  MAX_HEADS,
+  MAX_TAILS,
+  RESUME_MESSAGE_HEAD,
   dayFileOf,
   expiredOf,
+  historyBlockOf,
+  isAutomaticHead,
   isOkOn,
   labelOf as lineLabelOf,
   parseSessionSummary,
@@ -242,6 +247,8 @@ let planQueued: PlanStep | null = null
 let refinePhase: Phase = 'idle'
 // Resumo do dia (botão "Retomada"): a trava é `resumePhase`, como o `refinePhase`; `resuming` em $.state é só o rótulo.
 let resumePhase: Phase = 'idle'
+// O resumo já entrou nesta sessão: o segundo clique só avisa (não depende de `$.session.turns()` contar o envio do mod).
+let resumeSent = false
 
 // Delegação de modelo (/route auto on): lida do `$.store` no session.start e mantida aqui, porque o hook do prompt nunca
 // espera o armazenamento. Desligada por padrão.
@@ -943,6 +950,10 @@ type DayPick = { kind: 'none' } | { kind: 'reuse'; day: string } | { kind: 'fres
 const resumeLabelOf = (r: 'reading' | 'summarizing' | null): string => (r === null ? 'Retomada' : RESUMING_LABELS[r])
 
 async function pressResume($: EngineInterface): Promise<void> {
+  if (resumeSent) {
+    $.ui.toast('Resumo do dia: o resumo já foi enviado nesta sessão.')
+    return
+  }
   if (resumePhase !== 'idle') return
   resumePhase = 'queued'
   await update($, resuming, () => 'reading')
@@ -985,33 +996,56 @@ async function transcriptsOf($: EngineInterface, root: string, currentId: string
   return lists.flat().sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
-// Uma leitura de cada vez, na ordem recebida (a mais recente primeiro).
-async function readAll($: EngineInterface, files: readonly Transcript[]): Promise<Read[]> {
+// Leituras do clique: um objeto por clique, passado a todas as leituras dele.
+type Budget = { heads: number; tails: number; unread: number }
+
+// Uma leitura de cada vez, na ordem recebida (a mais recente primeiro): a curta (`head`) acha o `entrypoint`, e só a sessão
+// com terminal (ou sem `entrypoint` no começo) recebe a longa (`tail`). Batido um teto, para e conta o resto como sem leitura.
+async function readOne($: EngineInterface, file: Transcript, budget: Budget): Promise<Read> {
+  budget.heads += 1
+  const head = await readHead($, file.path)
+  if (head !== null && isAutomaticHead(head)) return { project: file.project, at: file.mtimeMs, slice: { kind: 'automatic' } }
+  budget.tails += 1
+  const got = await readTranscript($, file.path, file.size)
+  if (got === null) return { project: file.project, at: file.mtimeMs, slice: null }
+  // A mensagem do botão pode ter ficado fora do fim lido; a leitura curta a vê (a linha pode vir cortada: busca no texto cru).
+  const hasBot = got.isTail && head !== null && head.includes(RESUME_MESSAGE_HEAD)
+  return { project: file.project, at: file.mtimeMs, slice: sliceOf(got.text, got.isTail, hasBot) }
+}
+
+async function readAll($: EngineInterface, files: readonly Transcript[], budget: Budget): Promise<Read[]> {
   const reads: Read[] = []
-  for (const file of files) {
-    const got = await readTranscript($, file.path, file.size)
-    const slice: Slice | null = got === null ? null : sliceOf(got.text, got.isTail)
-    reads.push({ project: file.project, at: file.mtimeMs, slice })
+  for (const [i, file] of files.entries()) {
+    if (budget.heads >= MAX_HEADS || budget.tails >= MAX_TAILS) {
+      budget.unread += files.length - i
+      break
+    }
+    reads.push(await readOne($, file, budget))
   }
   return reads
 }
 
-// Do dia mais novo para o mais velho (até DAY_LOOKBACK): arquivo do dia já gravado é reaproveitado (C7) antes de ler
-// qualquer transcrito; senão lê o dia e para no primeiro com sessão sua. Hoje é lido uma vez só, na primeira vez que
-// precisa e antes do dia (é mais recente): uma sessão tocada hoje com o último pedido seu no dia D conta como sessão de D.
-// Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
-async function pickDay($: EngineInterface, root: string, files: readonly Transcript[], today: string): Promise<DayPick> {
-  let todayReads: Read[] | null = null
-  const readToday = async (): Promise<Read[]> => (todayReads ??= await readAll($, files.filter(f => fileDayOf(f) === today)))
+// O dia do último pedido seu de cada sessão lida.
+const lastDaysOf = (reads: readonly Read[]): string[] =>
+  reads.flatMap(r => (r.slice?.kind === 'ok' ? [workDayOf(r.slice.lastHumanAt, DAY_CUTOFF_HOUR)] : []))
+
+// Ordem: se o dia mais recente antes de hoje (pela data de modificação) já tem <dia>.md, reaproveita e para, sem ler nada
+// (C7) → senão lê os de hoje, e os dias do último pedido seu neles entram nos candidatos (um `--resume` hoje não tira
+// ontem da lista) → do dia mais novo para o mais velho (até DAY_LOOKBACK): <dia>.md existente é reaproveitado; senão lê
+// os do dia e para no primeiro com sessão sua. Sem nenhum dia, o dia é hoje, se houver sessão sua hoje.
+async function pickDay($: EngineInterface, root: string, files: readonly Transcript[], today: string, budget: Budget): Promise<DayPick> {
   const oldest = shiftDay(today, -DAY_LOOKBACK)
-  const days = [...new Set(files.map(fileDayOf))].filter(d => d < today && d >= oldest).sort().reverse()
+  const isCandidate = (d: string): boolean => d < today && d >= oldest
+  const byMtime = [...new Set(files.map(fileDayOf))].filter(isCandidate).sort().reverse()
+  const latest = byMtime[0]
+  if (latest !== undefined && (await $.fs.exists(dayPathOf(root, latest)))) return { kind: 'reuse', day: latest }
+  const ofToday = await readAll($, files.filter(f => fileDayOf(f) === today), budget)
+  const days = [...new Set([...byMtime, ...lastDaysOf(ofToday).filter(isCandidate)])].sort().reverse()
   for (const day of days) {
     if (await $.fs.exists(dayPathOf(root, day))) return { kind: 'reuse', day }
-    const ofToday = await readToday()
-    const reads = [...(await readAll($, files.filter(f => fileDayOf(f) === day))), ...ofToday]
+    const reads = [...(await readAll($, files.filter(f => fileDayOf(f) === day), budget)), ...ofToday]
     if (reads.some(r => isOkOn(r, day))) return { kind: 'fresh', day, reads }
   }
-  const ofToday = await readToday()
   if (!ofToday.some(r => isOkOn(r, today))) return { kind: 'none' }
   if (await $.fs.exists(dayPathOf(root, today))) return { kind: 'reuse', day: today }
   return { kind: 'fresh', day: today, reads: ofToday }
@@ -1020,7 +1054,7 @@ async function pickDay($: EngineInterface, root: string, files: readonly Transcr
 type SliceAsked = { kind: 'ok'; done: Summarized } | { kind: 'failed'; slice: Summarized['slice']; reason: string }
 
 async function summaryOfSlice($: EngineInterface, slice: Summarized['slice']): Promise<SliceAsked> {
-  const asked = await askSessionSummary($, scrub(sliceTextOf(slice)))
+  const asked = await askSessionSummary($, historyBlockOf(scrub(sliceTextOf(slice))))
   if (!asked.ok) return { kind: 'failed', slice, reason: asked.reason }
   const summary = parseSessionSummary(asked.text)
   return summary === null ? { kind: 'failed', slice, reason: 'resposta fora do formato' } : { kind: 'ok', done: { slice, summary } }
@@ -1035,7 +1069,7 @@ async function pruneDays($: EngineInterface, root: string, today: string): Promi
 
 // Teto de MAX_CALLS chamadas ao Haiku, em paralelo, com o recorte já sem segredos. Zero resumidas: não grava e deixa o aviso
 // gravado. Devolve o texto gravado, o caminho e o toast de conclusão.
-async function summarizeDay($: EngineInterface, root: string, day: string, today: string, reads: readonly Read[]) {
+async function summarizeDay($: EngineInterface, root: string, day: string, today: string, reads: readonly Read[], unread: number) {
   const tally = tallyOf(reads, day, today)
   await update($, resuming, () => 'summarizing')
   const results = await Promise.all(tally.ok.slice(0, MAX_CALLS).map(slice => summaryOfSlice($, slice)))
@@ -1048,10 +1082,11 @@ async function summarizeDay($: EngineInterface, root: string, day: string, today
   const failed = [...tally.failed, ...failures.map(f => refOf(f.slice))]
   const leftOut = tally.ok.slice(MAX_CALLS).map(refOf)
   const path = dayPathOf(root, day)
-  const text = scrub(dayFileOf({ day, sessions, failed, leftOut, counts: tally.counts }))
+  const text = scrub(dayFileOf({ day, sessions, failed, leftOut, counts: tally.counts, unread }))
   await $.fs.write(path, text)
   await settle(() => pruneDays($, root, today))
-  const done = `Resumo do dia: ${sessions.length} sessões resumidas, ${failed.length} falharam, ${leftOut.length} ficaram de fora. Arquivo: ${path}.`
+  const capped = unread === 0 ? '' : ` ${unread} arquivos ficaram sem leitura (teto de ${MAX_HEADS} leituras curtas e ${MAX_TAILS} longas).`
+  const done = `Resumo do dia: ${sessions.length} sessões resumidas, ${failed.length} falharam, ${leftOut.length} ficaram de fora.${capped} Arquivo: ${path}.`
   return { text, path, done }
 }
 
@@ -1067,6 +1102,7 @@ async function sendDay($: EngineInterface, dayText: string, path: string, done: 
   }
   const sent = await settle(() => $.prompt.submit({ text: resumeMessageOf(dayText, path) }))
   const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  if (drop === undefined) resumeSent = true
   $.ui.toast(drop === undefined ? done : `Resumo do dia falhou: o pedido não entrou (${drop}).`)
 }
 
@@ -1081,7 +1117,8 @@ async function runResume($: EngineInterface): Promise<void> {
     return
   }
   const today = workDayOf(await $.clock.now(), DAY_CUTOFF_HOUR)
-  const pick = await pickDay($, root, await transcriptsOf($, root, await $.session.id()), today)
+  const budget: Budget = { heads: 0, tails: 0, unread: 0 }
+  const pick = await pickDay($, root, await transcriptsOf($, root, await $.session.id()), today, budget)
   switch (pick.kind) {
     case 'none':
       $.ui.toast(`Nenhuma sessão sua nos últimos ${DAY_LOOKBACK} dias`)
@@ -1092,7 +1129,7 @@ async function runResume($: EngineInterface): Promise<void> {
       return
     }
     case 'fresh': {
-      const made = await summarizeDay($, root, pick.day, today, pick.reads)
+      const made = await summarizeDay($, root, pick.day, today, pick.reads, budget.unread)
       if (made !== null) await sendDay($, made.text, made.path, made.done)
       return
     }
@@ -1102,6 +1139,9 @@ async function runResume($: EngineInterface): Promise<void> {
 }
 
 // Roda no timer de 3 s, só com o pedido na fila (o dispatch de um botão pode ser abandonado). Trava solta no finally.
+// Ordem: sessão limpa → pastas → listar arquivos com data → <dia>.md do dia mais recente reaproveitado sem ler nada → ler
+// os de hoje → escolher o dia (reaproveita o <dia>.md dele, se houver) → ler os do dia → descartes → teto de MAX_CALLS
+// chamadas ao modelo → grava → envia.
 async function drainResume($: EngineInterface): Promise<void> {
   if (resumePhase !== 'queued') return
   resumePhase = 'running'
@@ -1949,6 +1989,7 @@ export const register: Register = on => {
     planQueued = null
     refinePhase = 'idle'
     resumePhase = 'idle'
+    resumeSent = false
     // Antes de zerar o rótulo: se ele dizia "compactando", a recarga caiu no meio (`compactingAt` NÃO zera aqui).
     if ((await read($, compacting)) === 'compacting') await notice($, 'O mod recarregou durante a compactação: confira a conversa e clique de novo se precisar.')
     await update($, compacting, () => null)
