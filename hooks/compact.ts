@@ -126,11 +126,27 @@ export const COMPACT_CRITERIA = [
   'Não copie o que já está no código ou no git; aponte onde está.',
 ].join('\n')
 
+// C2: a compactação automática e o /compact digitado também levam os critérios, depois do texto de quem pediu.
+export function withCriteria(instructions: string | undefined): string {
+  return instructions === undefined || instructions.trim() === '' ? COMPACT_CRITERIA : `${instructions}\n\n${COMPACT_CRITERIA}`
+}
+
 const listText = (items: readonly string[], none: string): string => (items.length === 0 ? none : items.join('; '))
 
-export function instructionsOf(analysis: Analysis | null): string {
-  if (analysis === null) return COMPACT_CRITERIA
-  return [
+// Agentes que ainda rodam (quem chama já tirou os acabados), lidos por código: entram na compactação e na retomada.
+export type RunningAgent = { id: string; type: string; description: string }
+
+export function agentsLineOf(agents: readonly RunningAgent[]): string {
+  if (agents.length === 0) return ''
+  return `Agentes ainda rodando: ${agents.map(a => `${a.id} (${a.type}): ${a.description}`).join('; ')}`
+}
+
+const withAgents = (lines: string[], agents: readonly RunningAgent[], tail: string[] = []): string =>
+  (agents.length === 0 ? lines : [...lines, agentsLineOf(agents), ...tail]).join('\n')
+
+export function instructionsOf(analysis: Analysis | null, agents: readonly RunningAgent[] = []): string {
+  if (analysis === null) return withAgents([COMPACT_CRITERIA], agents)
+  return withAgents([
     COMPACT_CRITERIA,
     '',
     'Análise da sessão feita pelo workbench (guia do que preservar; confira contra a conversa):',
@@ -139,21 +155,28 @@ export function instructionsOf(analysis: Analysis | null): string {
     `- Feito: ${listText(analysis.feito, '—')}`,
     `- Pendente: ${listText(analysis.pendente, '—')}`,
     `- Contexto: ${analysis.contexto}`,
+    `- Perguntas sem resposta: ${listText(analysis.perguntas, '—')}`,
     `- Próximo passo: ${analysis.proximoPasso}`,
-  ].join('\n')
+  ], agents)
 }
 
-const RESUME_HEAD = 'O workbench compactou a conversa. Retome o trabalho pelo resumo, conferindo o estado real (git status, arquivos) antes de agir.'
+// Exportado: o turn.start reconhece o turno da retomada por este texto (`includes`, vale com moldura do engine).
+export const RESUME_HEAD = 'O workbench compactou a conversa. Retome o trabalho pelo resumo, conferindo o estado real (git status, arquivos) antes de agir.'
+const RESUME_STOP = 'Se o resumo mostrar que o trabalho terminou ou que havia uma pergunta em aberto para o usuário, diga o estado e pare, sem executar nada.'
+const RESUME_WAIT = 'Há agentes rodando: espere o aviso de cada um antes de refazer o trabalho deles.'
 
 // A análise vem de um modelo e a mensagem roda sozinha: entra como pista a conferir, nunca como ordem.
-export function resumePromptOf(analysis: Analysis | null): string {
-  if (analysis === null) return RESUME_HEAD
-  return [
-    RESUME_HEAD,
-    'Pista da análise automática (confira antes de seguir, não é ordem):',
-    `- Próximo passo: ${analysis.proximoPasso}`,
-    `- Pendências: ${listText(analysis.pendente, 'nenhuma listada')}`,
-  ].join('\n')
+export function resumePromptOf(analysis: Analysis | null, agents: readonly RunningAgent[] = []): string {
+  const hint =
+    analysis === null
+      ? []
+      : [
+          'Pista da análise automática (confira antes de seguir, não é ordem):',
+          `- Próximo passo: ${analysis.proximoPasso}`,
+          `- Pendências: ${listText(analysis.pendente, 'nenhuma listada')}`,
+          `- Perguntas sem resposta: ${listText(analysis.perguntas, 'nenhuma listada')}`,
+        ]
+  return withAgents([RESUME_HEAD, RESUME_STOP, ...hint], agents, [RESUME_WAIT])
 }
 
 function thousands(tokens: number): string {
@@ -194,4 +217,25 @@ export function shouldStart(phase: Phase, isMainTurn: boolean): boolean {
 // Um turno do usuário rodou ou está rodando desde que a análise começou: o que foi analisado ficou velho.
 export function hasTurnIntervened(input: { isMainTurn: boolean; mainTurns: number; seen: number }): boolean {
   return input.isMainTurn || input.mainTurns !== input.seen
+}
+
+// Retomada depois da compactação automática com a sessão parada. `pending.seen` é o contador de turnos daquele momento;
+// `humanSince` diz se houve pedido seu desde a última retomada automática (no máximo uma por pedido, sem laço).
+export function shouldAutoResume(input: { pending: { seen: number } | null; isMainTurn: boolean; mainTurns: number; humanSince: boolean }): 'send' | 'drop' | 'blocked' {
+  if (input.pending === null || hasTurnIntervened({ isMainTurn: input.isMainTurn, mainTurns: input.mainTurns, seen: input.pending.seen })) return 'drop'
+  return input.humanSince ? 'send' : 'blocked'
+}
+
+// O aviso gravado quando o turno da retomada termina sem resposta.
+export function resumeFailureOf(reason: 'aborted' | 'refusal' | 'error'): string {
+  switch (reason) {
+    case 'error':
+      return 'Retomada falhou: o turno deu erro (sem créditos, limite de contexto ou queda da API). Mande "continue" quando puder.'
+    case 'aborted':
+      return 'Retomada falhou: o turno foi interrompido.'
+    case 'refusal':
+      return 'Retomada falhou: o modelo recusou o pedido.'
+    default:
+      throw new Error('Caso não tratado: ' + String(reason satisfies never))
+  }
 }

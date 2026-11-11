@@ -8,18 +8,23 @@ import {
   FIRST_CAP,
   LIST_CAP,
   MARKER_ROOM,
+  RESUME_HEAD,
+  agentsLineOf,
   analyzePromptOf,
   buttonLabel,
   clickAction,
   hasTurnIntervened,
   instructionsOf,
   parseAnalysis,
+  resumeFailureOf,
   resumePromptOf,
+  shouldAutoResume,
   shouldStart,
   textField,
   tokensLabel,
   TOOL_TEXT_CAP,
   transcriptOf,
+  withCriteria,
 } from '../hooks/compact'
 import type { Analysis, Turn } from '../hooks/compact'
 
@@ -219,6 +224,76 @@ describe('instructionsOf e resumePromptOf', () => {
     expect(text).toContain('resumo')
     expect(text).toContain('estado real')
     expect(text).not.toContain('não é ordem')
+  })
+})
+
+const AGENTS = [
+  { id: 'ag-1', type: 'executor', description: 'roda os testes' },
+  { id: 'ag-2', type: 'scout', description: 'mapeia o hook' },
+]
+const STOP = 'Se o resumo mostrar que o trabalho terminou ou que havia uma pergunta em aberto para o usuário, diga o estado e pare, sem executar nada.'
+const AGENTS_LINE = 'Agentes ainda rodando: ag-1 (executor): roda os testes; ag-2 (scout): mapeia o hook'
+const WAIT = 'Há agentes rodando: espere o aviso de cada um antes de refazer o trabalho deles.'
+
+describe('agentes na compactação e na retomada', () => {
+  test('agentsLineOf junta id, tipo e descrição; lista vazia dá texto vazio', () => {
+    expect(agentsLineOf(AGENTS)).toBe(AGENTS_LINE)
+    expect(agentsLineOf([])).toBe('')
+  })
+
+  test('retomada sem análise: texto exato, com e sem agentes', () => {
+    expect(resumePromptOf(null)).toBe([RESUME_HEAD, STOP].join('\n'))
+    expect(resumePromptOf(null, AGENTS)).toBe([RESUME_HEAD, STOP, AGENTS_LINE, WAIT].join('\n'))
+  })
+
+  test('retomada com análise: a pista e as perguntas vêm antes das linhas de agentes', () => {
+    const text = resumePromptOf(analysis({ perguntas: ['tabela fixa ou API?'] }), AGENTS)
+    expect(text.startsWith(`${RESUME_HEAD}\n${STOP}\n`)).toBe(true)
+    expect(text).toContain('- Perguntas sem resposta: tabela fixa ou API?')
+    expect(text.indexOf('Pista da análise')).toBeLessThan(text.indexOf(AGENTS_LINE))
+    expect(text.endsWith(`${AGENTS_LINE}\n${WAIT}`)).toBe(true)
+  })
+
+  test('instruções: a linha de agentes vem depois da análise, ou logo depois dos critérios', () => {
+    expect(instructionsOf(null, AGENTS)).toBe(`${COMPACT_CRITERIA}\n${AGENTS_LINE}`)
+    const text = instructionsOf(analysis({ perguntas: ['tabela fixa ou API?'] }), AGENTS)
+    expect(text).toContain('- Perguntas sem resposta: tabela fixa ou API?')
+    expect(text.endsWith(`- Próximo passo: ligar o drainCompact\n${AGENTS_LINE}`)).toBe(true)
+  })
+})
+
+describe('withCriteria', () => {
+  test('sem texto do usuário, só os critérios; com texto, o texto primeiro e os critérios depois', () => {
+    expect(withCriteria(undefined)).toBe(COMPACT_CRITERIA)
+    expect(withCriteria('  ')).toBe(COMPACT_CRITERIA)
+    expect(withCriteria('foque no frete')).toBe(`foque no frete\n\n${COMPACT_CRITERIA}`)
+  })
+})
+
+describe('shouldAutoResume', () => {
+  const base = { pending: { seen: 3 }, isMainTurn: false, mainTurns: 3, humanSince: true }
+
+  test('sem compactação marcada, ou com turno desde ela, descarta', () => {
+    expect(shouldAutoResume({ ...base, pending: null })).toBe('drop')
+    expect(shouldAutoResume({ ...base, isMainTurn: true })).toBe('drop')
+    expect(shouldAutoResume({ ...base, mainTurns: 4 })).toBe('drop')
+  })
+
+  test('sem pedido seu desde a última retomada automática, bloqueia; senão envia', () => {
+    expect(shouldAutoResume({ ...base, humanSince: false })).toBe('blocked')
+    expect(shouldAutoResume(base)).toBe('send')
+  })
+
+  test('turno no meio vence o bloqueio: descarta sem aviso', () => {
+    expect(shouldAutoResume({ ...base, mainTurns: 4, humanSince: false })).toBe('drop')
+  })
+})
+
+describe('resumeFailureOf', () => {
+  test('cada motivo de fim de turno vira o seu aviso', () => {
+    expect(resumeFailureOf('error')).toBe('Retomada falhou: o turno deu erro (sem créditos, limite de contexto ou queda da API). Mande "continue" quando puder.')
+    expect(resumeFailureOf('aborted')).toBe('Retomada falhou: o turno foi interrompido.')
+    expect(resumeFailureOf('refusal')).toBe('Retomada falhou: o modelo recusou o pedido.')
   })
 })
 
