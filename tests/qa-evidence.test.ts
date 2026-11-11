@@ -176,6 +176,7 @@ describe('parseMatrix', () => {
     ['id de célula com ponto', { cells: [cellOf({ id: 'a.b' })] }, 'id'],
     ['id de célula com maiúscula', { cells: [cellOf({ id: 'C1' })] }, 'id'],
     ['id de célula com 32 caracteres', { cells: [cellOf({ id: 'a'.repeat(32) })] }, 'id'],
+    ['id de célula auth (a trava recusa pasta com esse nome)', { cells: [cellOf({ id: 'auth' })] }, '"auth"'],
     ['id de requisito repetido', { requirements: [{ id: 'r1', text: 'a', source: 's' }, { id: 'r1', text: 'b', source: 's' }] }, 'r1'],
     ['id de requisito inválido', { requirements: [{ id: 'R/1', text: 'a', source: 's' }] }, 'id'],
     ['perfil repetido', { profiles: ['admin', 'admin'] }, 'admin'],

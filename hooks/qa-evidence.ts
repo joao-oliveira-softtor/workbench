@@ -234,6 +234,8 @@ function cellAt(raw: unknown, i: number, known: { requirements: Set<string>; pro
   const at = `cells[${i}].`
   const o = recOf(raw, `cells[${i}]`)
   const id = identAt(o.id, CELL_ID, `${at}id`, seen)
+  // O id vira pasta da execução, e a trava recusa qualquer pasta com um segmento `auth` (é onde ficam as sessões).
+  need(id.toLowerCase() !== 'auth', `${at}id: "auth" é reservado (é o nome da pasta das sessões de login)`)
   const requirement = textAt(o, 'requirement', at)
   need(known.requirements.has(requirement), `${at}requirement: "${requirement}" não existe em requirements`)
   const profile = textAt(o, 'profile', at)

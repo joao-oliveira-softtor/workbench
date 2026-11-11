@@ -33,7 +33,7 @@ por código: campo faltando ou com tipo errado torna a matriz inteira inválida.
    Passou de 12: corte o de menor risco primeiro e ponha em `cut` uma linha por corte, com o motivo
    (ex.: `"c-relatorio a 768: risco baixo, 12 células já usadas"`).
 5. **Cada célula** tem todos estes campos:
-   - `id` (`c01`, `c02`…), `requirement` (um `id` de requisito), `risk`, `flow` (nome curto do fluxo);
+   - `id` (`c01`, `c02`…; nunca `auth`, que o mod recusa), `requirement` (um `id` de requisito), `risk`, `flow` (nome curto do fluxo);
    - `route`: caminho que começa com UM `/` (nunca URL inteira);
    - `profile` (um dos `profiles`), `width` (360, 768 ou 1280, número), `reason` (por que esta combinação);
    - `steps`: ações concretas, uma por item, com o texto que o usuário do app vê
