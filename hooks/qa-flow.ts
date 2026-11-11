@@ -57,7 +57,6 @@ import {
   qaRootOf,
   removerFileOf,
   retestDirOf,
-  statusSumOf,
   toolsDirOf,
   wrapperOf,
 } from './qa'
@@ -368,13 +367,14 @@ const wtGit = (fixDir: string, ...args: string[]): EnvRun => ({
   env: { GIT_CEILING_DIRECTORIES: fixDir.slice(0, fixDir.lastIndexOf('/')) },
 })
 
-// A pasta da worktree sem o `.git`: a fase para sem rodar nada destrutivo (quem pega é o passo da fase, no register.tsx).
-export class LostWorktree extends Error {}
+// A fase Corrigir para sem desfazer nem commitar nada na worktree (ela perdeu o `.git` ou tem mudança que o mod não fez); quem
+// pega é o passo da fase, no register.tsx.
+export class StopFix extends Error {}
 
 // Antes de todo git destrutivo: a raiz do repositório que o git vê na pasta é a própria worktree.
 export async function assertFixDir($: EngineInterface, fixDir: string): Promise<void> {
   if ((await run($, wtGit(fixDir, 'rev-parse', '--show-toplevel')))?.trim() !== fixDir) {
-    throw new LostWorktree(`a worktree de correção sumiu (${fixDir}); nada foi desfeito nem commitado nela`)
+    throw new StopFix(`a worktree de correção sumiu (${fixDir}); nada foi desfeito nem commitado nela`)
   }
 }
 
@@ -449,9 +449,9 @@ async function snapBase($: EngineInterface, runDir: string): Promise<boolean> {
 }
 
 // A worktree da correção pronta: criada (ou reaproveitada), conferida pela trava do corretor (no contexto do primeiro defeito),
-// com os `.env` não versionados, a foto dos vereditos e as dependências instaladas. Devolve o caminho real e o `git status` de
-// base, ou o motivo.
-export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matrix, at: { runDir: string; defect: string; fixDir: string }, branch: string): Promise<{ fixDir: string; baseline: string } | { error: string }> {
+// com os `.env` não versionados, a foto dos vereditos e as dependências instaladas, e a árvore limpa. Devolve o caminho real, ou o
+// motivo.
+export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matrix, at: { runDir: string; defect: string; fixDir: string }, branch: string): Promise<{ fixDir: string } | { error: string }> {
   const made = await worktreeOf($, env.root, at.fixDir, branch)
   if (made !== null) return { error: made }
   const real = (await run($, ['realpath', at.fixDir]))?.trim() || at.fixDir
@@ -460,7 +460,7 @@ export async function setupWorktree($: EngineInterface, env: QaEnv, matrix: Matr
   if (!(await excludeAndCopyEnv($, env.root, real))) return { error: 'não deu para preparar o info/exclude e os .env da worktree' }
   if (!(await snapBase($, at.runDir))) return { error: `não deu para copiar os vereditos da execução para ${baseDirOf(at.runDir)}` }
   const dirty = await installedCleanOf($, matrix, real)
-  return dirty === null ? { fixDir: real, baseline: statusSumOf('') } : { error: dirty }
+  return dirty === null ? { fixDir: real } : { error: dirty }
 }
 
 // O commit da correção faz `git add -A`: a fase só começa com a árvore limpa antes e depois da instalação. null = limpa.
@@ -554,12 +554,6 @@ export async function freshDir($: EngineInterface, dir: string): Promise<boolean
   return (await run($, ['rm', '-rf', dir])) !== null && (await mkdirs($, dir))
 }
 
-// O resumo do `git status` (é o que a linha de base guarda no estado); null = o git falhou.
-export async function statusOf($: EngineInterface, fixDir: string): Promise<string | null> {
-  const status = await porcelainOf($, fixDir)
-  return status === null ? null : statusSumOf(status)
-}
-
 // O `git status --porcelain` da worktree, por extenso (os avisos mostram os caminhos); null = o git falhou.
 export async function porcelainOf($: EngineInterface, fixDir: string): Promise<string | null> {
   return run($, wtGit(fixDir, 'status', '--porcelain'))
@@ -574,14 +568,15 @@ export async function resetFixOut($: EngineInterface, outDir: string): Promise<b
 export type FixCheck = { kind: 'refuse'; reason: string; detail?: string } | { kind: 'unverified'; reason: string } | { kind: 'ok'; regression: string | null; pending: string[] }
 // `sha`: o HEAD do começo da tentativa; a recusa no commit desfaz só até ele, e o diff conferido é o da tentativa.
 // `restart`: para e sobe o app da worktree na mesma porta; false = não subiu.
-type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; baseline: string; port: number; restart: () => Promise<boolean> }
+type FixIn = { env: QaEnv; matrix: Matrix; runDir: string; defectId: string; fixDir: string; sha: string; port: number; restart: () => Promise<boolean> }
 
 const refuse = (reason: string, detail?: string): FixCheck => ({ kind: 'refuse', reason, ...(detail === undefined ? {} : { detail }) })
 const unverified = (fix: Fix): FixCheck => ({ kind: 'unverified', reason: fix.reason ?? 'o corretor marcou a correção como não retestável' })
 
 // Etapas b a d: o que mudou vira UM commit feito pelo mod, ou é desfeito. null = commitado (ou nada a commitar e retestável: segue).
 async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixCheck | null> {
-  const isChanged = (await statusOf($, o.fixDir)) !== o.baseline
+  // A fase só lança um corretor com a árvore limpa: qualquer mudança é dele (null = o git falhou, conta como mudança).
+  const isChanged = (await porcelainOf($, o.fixDir)) !== ''
   const message = commitMessageOf(fix)
   if (!isChanged) return fix.retestable ? refuse('o corretor não mudou nada') : unverified(fix)
   const undone = async (check: FixCheck): Promise<FixCheck> => {
@@ -629,7 +624,7 @@ export async function checkFix($: EngineInterface, o: FixIn): Promise<FixCheck> 
   const fix = parseFix((await readText($, `${fixOutDirOf(o.runDir, o.defectId)}/fix.json`)) ?? '')
   // Sem fix.json, o que o corretor mudou é desfeito: toda saída das conferências deixa uma árvore que o mod fez.
   if (fix === null) {
-    if ((await statusOf($, o.fixDir)) !== o.baseline) await undoFix($, o.fixDir, o.sha)
+    if ((await porcelainOf($, o.fixDir)) !== '') await undoFix($, o.fixDir, o.sha)
     return refuse('fix.json ausente ou inválido')
   }
   // O HEAD já andou desde o começo da tentativa: o commit dela foi feito (um reload cortou o passo depois dele). Segue daí.

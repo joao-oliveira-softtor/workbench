@@ -55,7 +55,6 @@ import {
   runIdOf,
   sessionOf,
   spawnPromptOf,
-  statusSumOf,
   storedFlowOf,
   toolsDirOf,
   wrapperOf,
@@ -341,13 +340,6 @@ describe('caminhos', () => {
     expect(projectSlugOf('/x/ç')).toMatch(/^projeto-[0-9a-f]{6}$/)
   })
 
-  test('o resumo do git status é curto, igual para o mesmo texto e diferente quando o texto muda', () => {
-    const big = ' M src/a.ts\n'.repeat(50_000)
-    expect(statusSumOf(big).length).toBeLessThan(20)
-    expect(statusSumOf(' M a.ts\n')).toBe(statusSumOf(' M a.ts\n'))
-    expect(statusSumOf(' M a.ts\n')).not.toBe(statusSumOf(' M b.ts\n'))
-    expect(statusSumOf('')).not.toBe(statusSumOf(' M a.ts\n'))
-  })
 
   test('identificador da execução é a hora local AAAAMMDD-HHMM', () => {
     const d = new Date(2026, 10, 9, 7, 5, 59)
@@ -802,9 +794,9 @@ describe('handbackAgentOf', () => {
 
 // Bordas que o teste de mutação achou sem teste.
 describe('ub-mode: bordas de qa.ts', () => {
-  test('statusSumOf usa o FNV-1a de 32 bits de todo o texto', () => {
-    expect(statusSumOf('')).toBe('0:811c9dc5')
-    expect(statusSumOf('a')).toBe('1:e40c292c')
+  test('projectSlugOf usa o FNV-1a de 32 bits de todo o caminho', () => {
+    expect(projectSlugOf('')).toBe('projeto-811c9d')
+    expect(projectSlugOf('a')).toBe('a-e40c29')
   })
 
   describe('storedFlowOf', () => {

@@ -67,7 +67,6 @@ import {
   runIdOf,
   sessionOf,
   spawnPromptOf,
-  statusSumOf,
   storedFlowOf,
   toolsDirOf,
   wrapperOf,
@@ -78,7 +77,7 @@ import type { Cell, Defect, FixStatus, Matrix } from './qa-evidence'
 import { removerStateTextOf } from './qa-guard'
 import type { GuardCtx } from './qa-guard'
 import {
-  LostWorktree,
+  StopFix,
   appMatrixOf,
   authReplyOf,
   assertFixDir,
@@ -97,7 +96,6 @@ import {
   rootSnapOf,
   setupWorktree,
   startApp,
-  statusOf,
   stopApp,
   targetOf,
   undoFix,
@@ -1292,7 +1290,7 @@ async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: 
   if (isStoppedSince($, stops, 'QA: parado durante a preparação da worktree; clique em "QA: Corrigir" para retomar.')) return
   const root = await rootSnapOf($, env.root)
   await setFlow($, f => ({ ...f, fixDir: ready.fixDir }))
-  await update($, qaFix, () => ({ root, baseline: ready.baseline, attemptSha: '', regression: null, pending: [], defects: all }))
+  await update($, qaFix, () => ({ root, attemptSha: '', regression: null, pending: [], defects: all }))
   await update($, qaJob, cur => cur ?? { phase: 'fix' as const, queue: left, total: left.length, current: null, matrix })
   void refresh($, true).catch(() => {})
 }
@@ -1552,10 +1550,10 @@ async function teardownFix($: EngineInterface, env: QaEnv, fixDir: string, c: Qa
   if (undone?.ok === false) $.ui.toast(`QA: ${undone.error.slice(0, 200)}`)
 }
 
-// A worktree perdeu o `.git` no meio do passo: a fase para (trava `{}`, app parado, navegador do item fechado e o agente vivo
+// A worktree perdeu o `.git` ou tem mudança que o mod não fez (`StopFix`): a fase para (trava `{}`, app parado, navegador do item fechado e o agente vivo
 // fora de qualquer adoção, como no stop) sem desfazer nada nela. A subida do app confere com o agente e o navegador abertos.
 async function lostFix($: EngineInterface, env: QaEnv, err: unknown): Promise<void> {
-  if (!(err instanceof LostWorktree)) throw err
+  if (!(err instanceof StopFix)) throw err
   const current = (await read($, qaJob))?.current ?? null
   await update($, qaJob, () => null)
   await guardLive($)
@@ -1617,19 +1615,17 @@ async function setFixCurrent($: EngineInterface, f: FixCtx, next: QaCurrent | nu
   if (next === null) await teardownQa($, f.env, null)
 }
 
-// Mudança que o mod não deixou (um corretor cortado no meio ou um arquivo que o app criou ao rodar): o próximo commit a
-// levaria junto. Para a fase e avisa, sem commitar nem desfazer: o usuário decide.
-async function isLeftover($: EngineInterface, f: FixCtx): Promise<boolean> {
+// Antes de cada defeito e de cada corretor a árvore está limpa: mudança que o mod não deixou (um corretor cortado no meio ou um
+// arquivo que o app criou ao rodar) iria no próximo `git add -A`. A fase para (`lostFix`), sem commitar nem desfazer.
+async function assertClean($: EngineInterface, f: FixCtx): Promise<void> {
   const status = await porcelainOf($, f.fixDir)
-  if ((status === null ? null : statusSumOf(status)) === (await read($, qaFix))?.baseline) return false
-  await update($, qaJob, () => null)
-  $.ui.toast(`QA: há mudanças na pasta de correção que nenhum commit levou: ${changedPathsOf(status ?? '')}; podem ser de um corretor interrompido ou arquivos criados pelo app ao rodar. A fase parou sem commitar nem desfazer (${f.fixDir}). Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
-  return true
+  if (status === '') return
+  throw new StopFix(`há mudanças na pasta de correção que nenhum commit levou: ${changedPathsOf(status ?? '')}; podem ser de um corretor interrompido ou arquivos criados pelo app ao rodar (se forem arquivos que o app cria ao rodar, ponha-os no .gitignore). A fase parou sem commitar nem desfazer (${f.fixDir}). Commite ou descarte e clique em "QA: Corrigir" para seguir.`)
 }
 
 async function startDefect($: EngineInterface, f: FixCtx, defectId: string): Promise<QaCurrent | null> {
   await assertFixDir($, f.fixDir)
-  if (await isLeftover($, f)) return null
+  await assertClean($, f)
   const target = await targetOf($, baseDirOf(f.runDir), f.matrix, defectId)
   if (target === null) {
     $.ui.toast(`QA: o defeito ${defectId} não está mais no veredito da execução; ficou de fora.`)
@@ -1666,12 +1662,9 @@ async function finishDefect($: EngineInterface, f: FixCtx, c: QaCurrent, status:
 }
 
 // O defeito acaba sem reverificar antes de qualquer conferência aprovada: depois da tentativa 1, os commits das anteriores foram
-// recusados, então nada da correção fica na branch (desfaz até o começo do defeito e refaz a linha de base).
+// recusados, então nada da correção fica na branch (desfaz até o começo do defeito).
 async function unverifiedFix($: EngineInterface, f: FixCtx, c: QaCurrent, reason: string): Promise<null> {
-  if (c.attempt > 1) {
-    await undoFix($, f.fixDir, c.sha)
-    await rebaseline($, f)
-  }
+  if (c.attempt > 1) await undoFix($, f.fixDir, c.sha)
   return finishDefect($, f, c, 'não reverificado', [reason], [])
 }
 
@@ -1697,7 +1690,7 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   const outDir = fixOutDirOf(f.runDir, c.item)
   const session = sessionOf(runIdIn(f.runDir), `${c.item}-f${c.attempt}`)
   const app = appMatrixOf(f.matrix, c.port)
-  await rebaseline($, f)
+  await assertClean($, f)
   // O HEAD do começo da tentativa: uma recusa no meio dela desfaz só até aqui (os commits das tentativas anteriores ficam).
   const attemptSha = await headOf($, f.fixDir)
   await update($, qaFix, x => (x === null ? x : { ...x, attemptSha }))
@@ -1714,13 +1707,6 @@ async function startFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: T
   // Sem id, o contexto aceitaria qualquer agente do papel: fica `{}` até a adoção gravá-lo com o id.
   if (launched.agentId === null) await teardownQa($, f.env, null)
   return launched
-}
-
-// A linha de base é o `git status` que o próprio mod deixou na worktree (antes de cada corretor e depois de commitar ou
-// desfazer); o que fugir dela no começo de um defeito veio de um corretor cortado.
-async function rebaseline($: EngineInterface, f: FixCtx): Promise<void> {
-  const baseline = await statusOf($, f.fixDir)
-  await update($, qaFix, x => (x === null || baseline === null ? x : { ...x, baseline }))
 }
 
 // O agente do item acabou: runner → observer; observer → próxima célula ou julgamento; corretor → as conferências do mod.
@@ -1769,20 +1755,17 @@ async function judged($: EngineInterface, f: FixCtx, c: QaCurrent, target: Targe
       return startFixer($, f, { ...c, attempt: c.attempt + 1, reasons: [...c.reasons, ...verdict.reasons] }, target, verdict.detail)
     case 'desistiu':
       await undoFix($, f.fixDir, c.sha)
-      await rebaseline($, f)
       return finishDefect($, f, c, 'desistiu', verdict.reasons, cells)
     default:
       throw new Error('Caso não tratado: ' + String(after satisfies never))
   }
 }
 
-// As conferências do corretor, a partir do HEAD do começo da tentativa; depois delas a linha de base é o que deixaram.
+// As conferências do corretor, a partir do HEAD do começo da tentativa.
 async function checkAttempt($: EngineInterface, f: FixCtx, c: QaCurrent): Promise<FixCheck> {
   const fix = await read($, qaFix)
   const restart = () => restartApp($, f, c.port)
-  const check = await checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, baseline: fix?.baseline ?? statusSumOf(''), port: c.port, restart })
-  await rebaseline($, f)
-  return check
+  return checkFix($, { ...f, defectId: c.item, sha: fix?.attemptSha || c.sha, port: c.port, restart })
 }
 
 async function afterFixer($: EngineInterface, f: FixCtx, c: QaCurrent, target: Target, cells: readonly string[]): Promise<QaCurrent | null> {
@@ -1817,7 +1800,7 @@ async function closeFix($: EngineInterface, f: FixCtx, defects: readonly string[
   const lost = await commitPassTests($, f.runDir, f.matrix, outcomes, f.fixDir).then(
     () => null,
     (err: unknown) => {
-      if (!(err instanceof LostWorktree)) throw err
+      if (!(err instanceof StopFix)) throw err
       return err.message
     },
   )

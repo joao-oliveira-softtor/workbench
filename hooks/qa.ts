@@ -186,9 +186,6 @@ export function projectSlugOf(root: string): string {
   return `${name === '' ? 'projeto' : name}-${hashOf(path).slice(0, 6)}`
 }
 
-// O `git status` da worktree no estado é só tamanho e hash: o texto inteiro pode ter milhares de linhas.
-export const statusSumOf = (status: string): string => `${status.length}:${hashOf(status)}`
-
 // Até 5 caminhos de um `git status --porcelain` (linhas "XY caminho"), para os avisos.
 export function changedPathsOf(status: string): string {
   const paths = status.split('\n').filter(l => l.trim() !== '').map(l => l.slice(3))

@@ -166,12 +166,10 @@ declare module 'claude-code' {
       qaGuardToken: string | null
       // QA: confirmação pendente do "QA: Corrigir" (o segundo clique em até ARM_MS segue); zera no session.start.
       qaArmed: { at: number } | null
-      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o resumo (tamanho e hash, `statusSumOf`) do `git status` que o
-      // mod deixou na worktree, o HEAD do começo da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e a fila inteira de defeitos lida no clique
+      // QA, fase Corrigir: a foto da raiz (HEAD, branch e stash), o HEAD do começo da tentativa em curso, o teste de regressão e as pendências do defeito em curso, e a fila inteira de defeitos lida no clique
       // (a matriz fica no `qaJob`). Não zera no session.start (é o que permite retomar).
       qaFix: {
         root: string
-        baseline: string
         attemptSha: string
         regression: string | null
         pending: string[]
