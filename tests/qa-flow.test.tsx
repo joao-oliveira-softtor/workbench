@@ -1037,6 +1037,19 @@ describe('QA: clique Corrigir', () => {
     expect(t.log.toasts.at(-1)).toContain('trava recusaria o corretor')
     expect(t.log.spawns).toEqual([])
   })
+
+  test('git rev-parse --git-common-dir que falha: sem exclude nem corretor, e avisa', async ($, on) => {
+    // Só a chamada depois do `worktree add` falha: a de antes é a que acha o repositório da sessão.
+    let added = false
+    const { t } = await fixing($, on, {
+      run: argv => {
+        if (argv.join(' ').startsWith('git worktree add ')) added = true
+        return added && argv.includes('--git-common-dir') ? { exitCode: 128, stdout: '' } : undefined
+      },
+    })
+    expect(t.log.toasts.at(-1)).toContain('não deu para preparar o info/exclude')
+    expect(t.log.spawns).toEqual([])
+  })
 })
 
 describe('QA: fase Corrigir', () => {
@@ -1190,6 +1203,16 @@ describe('QA: fase Corrigir', () => {
     expect(t.log.runs.some(a => a.join(' ') === 'npm test' || a[0] === 'npx')).toBe(false)
     expect(resultOf(t)).toMatchObject({ status: 'não reverificado', attempts: 1, reasons: ['o app não subiu pela worktree'], commits: ['f0 corrige'] })
     expect(types(t)).toEqual([QA_FIXER])
+  })
+
+  test('sem fix.json: o que o corretor mudou é desfeito antes da tentativa 2; sem mudança, nada a desfazer', async ($, on) => {
+    const { t } = await fixing($, on)
+    await fixerEnds($, t, null, '')
+    expect(t.log.runs.filter(a => a.includes('-C') && (a.includes('reset') || a.includes('clean')))).toEqual([])
+    await fixerEnds($, t, null)
+    expect(types(t)).toEqual([QA_FIXER, QA_FIXER, QA_FIXER])
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(t.log.runs).toContainEqual(gitIn(t, 'clean', '-fdq'))
   })
 
   test('três recusas: desistiu, com reset e clean na worktree', async ($, on) => {
