@@ -7,7 +7,7 @@ export const MAX_CALLS = 12
 export const DAY_LOOKBACK = 7
 export const TAIL_BYTES = 3_000_000
 // Leitura curta (só para achar o `entrypoint`) e tetos de leitura por clique.
-export const HEAD_BYTES = 8192
+export const HEAD_BYTES = 65536
 export const MAX_HEADS = 400
 export const MAX_TAILS = 60
 export const DAY_CUTOFF_HOUR = 5

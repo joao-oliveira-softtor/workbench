@@ -46,6 +46,8 @@ type Over = {
   typed?: string
   drop?: string
   unreadable?: (path: string) => boolean
+  // O que o `tail` devolve no lugar do arquivo inteiro.
+  tail?: (text: string) => string
   // Resposta do modelo para um recorte; undefined = o JSON certo.
   model?: (prompt: string, n: number) => Promise<string | null | undefined> | string | null | undefined
 }
@@ -129,12 +131,12 @@ async function boot($: Engine, on: On, files: Record<string, File>, over: Over =
     if (cmd === 'head') {
       log.heads.push(path)
       const file = disk.get(path)
-      return file === undefined || over.unreadable?.(path) === true ? done(1) : done(0, file.text.slice(0, 8192))
+      return file === undefined || over.unreadable?.(path) === true ? done(1) : done(0, file.text.slice(0, Number(e.argv[2])))
     }
     if (cmd === 'tail') {
       log.tails.push(path)
       const file = disk.get(path)
-      return file === undefined || over.unreadable?.(path) === true ? done(1) : done(0, file.text)
+      return file === undefined || over.unreadable?.(path) === true ? done(1) : done(0, over.tail?.(file.text) ?? file.text)
     }
     if (cmd === 'rm') {
       const target = e.argv.at(-1) ?? ''
@@ -348,7 +350,7 @@ describe('botão Retomada (Resumo do dia)', () => {
     const t = await boot($, on, Object.fromEntries([session('site', 's2', 10, 11), session('loja-api', 's1', 10, 18), session('site', 'hoje', 11, 8)]))
     await click(t)
     const tail = (path: string) => ['tail', '-c', '3000000', '--', path]
-    expect(t.log.argvs.filter(a => a[0] === 'head')[0]).toEqual(['head', '-c', '8192', '--', `${PROJECTS}/-home-dev-site/hoje.jsonl`])
+    expect(t.log.argvs.filter(a => a[0] === 'head')[0]).toEqual(['head', '-c', '65536', '--', `${PROJECTS}/-home-dev-site/hoje.jsonl`])
     expect(t.log.argvs.filter(a => a[0] === 'tail')).toEqual([
       tail(`${PROJECTS}/-home-dev-site/hoje.jsonl`),
       tail(`${PROJECTS}/-home-dev-loja-api/s1.jsonl`),
@@ -516,6 +518,19 @@ describe('botão Retomada (Resumo do dia)', () => {
     const awayLine = { type: 'system', subtype: 'away_summary', content: 'recado-de-todos-os-projetos', timestamp: new Date(at(10, 10)).toISOString() }
     const path = `${PROJECTS}/-home-dev-loja-api/b1.jsonl`
     const t = await boot($, on, { [path]: { text: jsonl(bot, awayLine, human('segue no frete', at(10, 11))), mtimeMs: at(10, 11), size: 3_000_001 } })
+    await click(t)
+    expect(t.log.prompts[0]).toContain('segue no frete')
+    expect(t.log.prompts[0]).not.toContain('recado-de-todos-os-projetos')
+  })
+
+  test('mensagem do botão depois de 20 KB de contexto de outros hooks ainda é reconhecida', async ($, on) => {
+    const hooked = { type: 'user', isMeta: true, message: { content: 'contexto-de-hook '.repeat(1_200) }, timestamp: new Date(at(10, 8)).toISOString(), entrypoint: 'cli' }
+    const bot = { type: 'user', message: { content: `${RESUME_MESSAGE_HEAD} tudo` }, timestamp: new Date(at(10, 9)).toISOString(), entrypoint: 'cli' }
+    const awayLine = { type: 'system', subtype: 'away_summary', content: 'recado-de-todos-os-projetos', timestamp: new Date(at(10, 10)).toISOString() }
+    const path = `${PROJECTS}/-home-dev-loja-api/b2.jsonl`
+    const rest = jsonl(awayLine, human('segue no frete', at(10, 11)))
+    const file = { text: jsonl(hooked, bot) + '\n' + rest, mtimeMs: at(10, 11), size: 3_000_001 }
+    const t = await boot($, on, { [path]: file }, { tail: () => `cortado"}\n${rest}` })
     await click(t)
     expect(t.log.prompts[0]).toContain('segue no frete')
     expect(t.log.prompts[0]).not.toContain('recado-de-todos-os-projetos')
