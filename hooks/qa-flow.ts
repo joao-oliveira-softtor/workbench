@@ -585,9 +585,11 @@ async function commitFix($: EngineInterface, o: FixIn, fix: Fix): Promise<FixChe
   }
   if (message === null) return undone(refuse('mudança sem descrição de commit'))
   await run($, wtGit(o.fixDir, 'add', '-A'))
-  const nameStatus = (await run($, wtGit(o.fixDir, '-c', 'core.quotepath=off', 'diff', '--cached', '--name-status', o.sha))) ?? ''
+  const nameStatus = await run($, wtGit(o.fixDir, '-c', 'core.quotepath=off', 'diff', '--cached', '--name-status', o.sha))
   // `--text` e sem diff externo nem textconv: um `.gitattributes` com `-diff` não esconde do diffCheckOf as linhas do patch.
-  const patch = (await run($, wtGit(o.fixDir, 'diff', '--cached', '--text', '--no-ext-diff', '--no-textconv', '-U0', o.sha))) ?? ''
+  const patch = await run($, wtGit(o.fixDir, 'diff', '--cached', '--text', '--no-ext-diff', '--no-textconv', '-U0', o.sha))
+  // Diff que falha não é diff vazio: sem ele o diffCheckOf aprovaria qualquer mudança.
+  if (nameStatus === null || patch === null) return undone(refuse('não deu para conferir o que mudou'))
   const checked = diffCheckOf(nameStatus, patch)
   if (checked.migration) return undone({ kind: 'unverified', reason: 'a correção cria migração' })
   if (checked.reasons.length > 0) return undone(refuse(checked.reasons.join('; ')))
@@ -609,7 +611,8 @@ async function regressionOf($: EngineInterface, o: FixIn, fix: Fix): Promise<Fix
   const argv = ['npx', 'playwright', 'test', file]
   const runAt = (url: string): Promise<Ran> => runFull($, argv, { cwd: o.fixDir, env: { ...authEnvsOf(o), QA_BASE_URL: url }, timeoutMs: TEN_MIN })
   const original = await runAt(o.matrix.baseUrl)
-  if (original.code === null || original.code === 0) return refuse(`o teste de regressão ${file} não falhou no app original`)
+  if (original.code === null) return refuse(`o teste de regressão ${file} não terminou no app original`)
+  if (original.code === 0) return refuse(`o teste de regressão ${file} não falhou no app original`)
   const fixed = await runAt(baseUrlAt(o.matrix.baseUrl, o.port))
   if (fixed.code !== 0) return refuse(`o teste de regressão ${file} não passou no app da worktree (${exitOf(fixed)})`, outputOf(argv.join(' '), fixed))
   return { kind: 'ok', regression: file, pending: [] }

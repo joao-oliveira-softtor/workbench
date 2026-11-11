@@ -90,6 +90,8 @@ type Over = {
   failRegister?: (name: string) => boolean
   // `stall`: a resposta àquele comando nunca chega (o passo some, como num reload do mod no meio dele).
   stall?: (key: string) => boolean
+  // `reject`: aquele comando rejeita (não começou ou estourou o tempo); a chave leva ` @<QA_BASE_URL>` quando há um.
+  reject?: (key: string) => boolean
   // O que o `$.store` e os arquivos já têm antes do session.start (uma sessão anterior do Claude Code).
   store?: Record<string, unknown>
   files?: Record<string, string>
@@ -217,14 +219,17 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: REPO }))
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? (over.home ?? HOME) : undefined }))
-  on('process.run', async (_$, e) => {
+  on('process.run', async (_$, e, next) => {
     // O teto do git vai pelo ambiente; aqui ele é escrito na frente do comando, para cada teste conferir comando e teto juntos.
     const ceiling = e.init?.env?.GIT_CEILING_DIRECTORIES
     const argv = ceiling === undefined ? [...e.argv] : ['env', `GIT_CEILING_DIRECTORIES=${ceiling}`, ...e.argv]
     if (over.hold?.(argv.join(' ')) === true) await clock.sleep(HOLD_MS)
     if (over.stall?.(argv.join(' ')) === true) await clock.sleep(1e12)
     log.runs.push(argv)
-    log.events.push(`${argv.join(' ')}${e.init?.env?.QA_BASE_URL === undefined ? '' : ` @${e.init.env.QA_BASE_URL}`}`)
+    const event = `${argv.join(' ')}${e.init?.env?.QA_BASE_URL === undefined ? '' : ` @${e.init.env.QA_BASE_URL}`}`
+    log.events.push(event)
+    // Um programa que não existe: o hook de baixo do engine rejeita sem rodar nada (lançar daqui seria ignorado).
+    if (over.reject?.(event) === true) return next({ ...e, argv: ['/nonexistent/qa-reject'] })
     log.full.push({ argv: [...e.argv], cwd: e.init?.cwd ?? '', env: { ...e.init?.env } })
     const r = over.run?.(argv, e.init?.cwd, e.init?.env) ?? answer(argv, e.init?.env)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -1203,6 +1208,9 @@ describe('QA: fase Corrigir', () => {
       'supressão de regra (eslint-disable)',
     ],
     ['4f testes do projeto', () => ({ run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU x' } : undefined) }), FIX_OK, ' M a.ts', 'FALHOU x'],
+    ['4e git diff --name-status que falha', () => ({ run: a => (a.includes('--name-status') ? { exitCode: 128, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não deu para conferir o que mudou'],
+    ['4e git diff do patch que falha', () => ({ run: a => (a.includes('-U0') ? { exitCode: 128, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não deu para conferir o que mudou'],
+    ['4g não termina no original', () => ({ reject: k => k.startsWith('npx ') && k.endsWith(`@${MATRIX.baseUrl}`) }), FIX_OK, ' M a.ts', 'o teste de regressão e2e/qa-c1.d1.spec.ts não terminou no app original'],
     ['4g passa no original', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 0, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não falhou no app original'],
     ['4g falha na worktree', () => ({ run: a => (a[0] === 'npx' ? { exitCode: 1, stdout: '' } : undefined) }), FIX_OK, ' M a.ts', 'não passou no app da worktree'],
   ]
@@ -1215,6 +1223,13 @@ describe('QA: fase Corrigir', () => {
       expect(t.log.spawns[1]?.prompt).toContain(reason)
     })
   }
+
+  test('git diff que falha: a mudança é desfeita e nada é commitado', async ($, on) => {
+    const { t } = await fixing($, on, { run: a => (a.includes('--name-status') ? { exitCode: 128, stdout: '' } : undefined) })
+    await fixerEnds($, t)
+    expect(t.log.runs).toContainEqual(gitIn(t, 'reset', '-q', '--hard', 'abc123'))
+    expect(t.wt.commits).toEqual([])
+  })
 
   // A saída de um comando pode ter segredo: ela só vai no pedido da próxima tentativa do corretor, nunca em aviso nem em arquivo.
   const outputs: [string, (a: readonly string[], env?: Record<string, string>) => Run | undefined, string][] = [
