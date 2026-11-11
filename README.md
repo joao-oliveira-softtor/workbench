@@ -52,15 +52,16 @@ O botão **Retomada** resume o seu último dia de trabalho, de todos os projetos
 - Lê as sessões do último dia de trabalho (o dia vira às 05:00; até 7 dias para trás) e as de hoje, de todos os projetos, só as abertas no terminal ou na IDE. Rodadas sem terminal (`claude -p`, scripts) ficam de fora.
 - Cada sessão vira um resumo em três partes: em andamento, próximo passo e pendente. No máximo 12 sessões por clique; as outras aparecem só com projeto e hora, em "ficaram de fora".
 - O resumo do dia fica em `~/.claude/workbench-resume/<dia>.md` (ou na pasta de `CLAUDE_CONFIG_DIR`, se definida). Resumos com mais de 14 dias são apagados.
-- Um segundo clique sobre o mesmo dia reaproveita o arquivo já gravado, sem chamar o modelo de novo. Para refazer, apague o arquivo daquele dia.
+- Um segundo clique sobre o mesmo dia reaproveita o arquivo já gravado, sem chamar o modelo de novo. Para refazer, apague o arquivo daquele dia. Na sessão em que o resumo já entrou, o botão só avisa, sem reenviar.
+- Cada arquivo de sessão é lido em dois passos: uma leitura curta do começo (para saber se a sessão foi aberta no terminal) e, só para as do terminal ou da IDE, a leitura longa. O teto é de 400 leituras curtas e 60 longas por clique; ao bater um deles, o mod para de ler, resume o que já leu e diz no arquivo do dia e no aviso final quantos arquivos ficaram sem leitura.
 - O mod manda o resumo na conversa pedindo ao Claude que só apresente e pergunte por onde seguir, sem rodar comandos, abrir arquivos nem chamar agentes. Se há texto no campo de digitação, ou a sessão já começou, o arquivo é gravado e o mod só avisa onde ele está.
 
 ### Limites e privacidade
 
 - O resumo junta projetos de clientes diferentes e entra na conversa onde você clicou. Abra a Retomada numa sessão na sua pasta pessoal, fora de qualquer projeto.
-- A limpeza de segredos (senhas, chaves, tokens) é feita por padrões conhecidos e pode deixar passar um segredo com outro formato, tanto para o modelo quanto para o arquivo do dia.
+- A limpeza de segredos cobre os formatos que ela conhece: chaves privadas (`-----BEGIN … PRIVATE KEY-----`, mesmo sem a linha de fim), senha em endereço (`postgres://usuario:senha@host`), `Bearer`, `Authorization` e `x-api-key`, tokens com prefixo conhecido (`sk-`, `sk_live_`, `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`, `glpat-`, `xox…-`, `AKIA…`, `AIza…`, JWT) e `senha=`/`password=`/`token=`/`api_key=`, `password: …` e `"password"`/`"token"`/`"secret"`/`"api_key"` em JSON. Um segredo em formato desconhecido pode passar, tanto para o modelo quanto para o arquivo do dia, e o modelo pode repeti-lo no resumo.
 - Arquivos de sessão muito grandes (mais de 3 MB) são lidos só pelo final: o começo da sessão pode faltar.
-- O conteúdo das sessões vai para o modelo barato (Haiku) da sua própria conta.
+- O conteúdo das sessões vai para o modelo barato (Haiku), pela conta que o Claude Code estiver usando.
 - Não há tarefa agendada: o mod não captura nada sozinho, só lê o que existe no disco quando você clica.
 
 ## QA
