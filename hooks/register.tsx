@@ -492,12 +492,17 @@ async function launchRemoval($: EngineInterface, job: { key: string }): Promise<
   if (plan.lines.length === 0 || plan.lines.join('\n') !== job.key) {
     return { kind: 'abort', text: 'A lista mudou depois da confirmação: confira e aceite de novo.' }
   }
+  return spawnRemover($, plan, snap.root)
+}
+
+// Node pronto, trava do remover armada e só então o spawn do Haiku com as linhas confirmadas.
+async function spawnRemover($: EngineInterface, plan: { lines: string[]; count: number }, root: string): Promise<Launch> {
   if (!(await isNodeReady($))) return { kind: 'abort', text: `Nada foi removido: as remoções precisam do Node ${NODE_MIN} ou mais novo (o node do PATH falta ou é mais velho).` }
   if (!(await isRemoverArmed($, plan.lines))) return { kind: 'abort', text: 'Não deu para gravar a trava do remover: nada foi removido.' }
   await update($, removal, cur => (cur === null ? null : { ...cur, allowed: plan.lines }))
   $.ui.toast(`Haiku removendo ${plan.count} worktrees…`)
   const spawned = await settle(() =>
-    $.agent.spawn({ subagentType: REMOVER_AGENT, prompt: removalPromptOf(plan.lines), description: 'remover worktrees', cwd: snap.root }),
+    $.agent.spawn({ subagentType: REMOVER_AGENT, prompt: removalPromptOf(plan.lines), description: 'remover worktrees', cwd: root }),
   )
   // Rejeição ou timeout do spawn não prova que o agente não nasceu: a trava fica e o drainRemove adota ou encerra.
   if (!spawned.ok) return { kind: 'unsure', text: `Remoção sem confirmação do spawn (${spawned.error.slice(0, 80)}); aguardando.` }
