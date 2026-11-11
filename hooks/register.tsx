@@ -168,6 +168,7 @@ import {
   RESUME_MESSAGE_HEAD,
   dayFileOf,
   expiredOf,
+  hhmmOf,
   historyBlockOf,
   isAutomaticHead,
   isOkOn,
@@ -267,11 +268,6 @@ let qaApp: QaApp | null = null
 // Quantos stops já houve: o clique Corrigir que prepara a worktree por minutos não monta o trabalho se um stop chegou no meio.
 let qaStops = 0
 
-function hhmm(at: number): string {
-  const d = new Date(at)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
 function storeKey(root: string): string {
   return `stale:${root}`
 }
@@ -301,7 +297,7 @@ async function afterRefresh($: EngineInterface, snap: Snapshot): Promise<void> {
     missingReason: 'sem veredito ainda',
     hash,
     at: fromHaiku ? prev.at : snap.at,
-    note: fromHaiku ? (prev.hash === hash ? prev.note : `Haiku de ${hhmm(prev.at)} (o conjunto mudou)`) : null,
+    note: fromHaiku ? (prev.hash === hash ? prev.note : `Haiku de ${hhmmOf(prev.at)} (o conjunto mudou)`) : null,
   })
   await update($, stale, () => report)
   const surfaces = await settle(() => $.session.surfaces())
@@ -374,8 +370,8 @@ async function drainSuggest($: EngineInterface): Promise<void> {
 
 function noteOf(o: { failure: Failure; reason: string; fresh: number; isComplete: boolean; now: number }): string {
   if (o.failure !== null) return `Haiku indisponível: ${o.reason}${o.fresh > 0 ? ` (${o.fresh} vereditos novos guardados)` : ''}`
-  if (o.isComplete) return `Haiku às ${hhmm(o.now)}`
-  return `Haiku às ${hhmm(o.now)}; faltam vereditos, o resto vai na próxima consulta`
+  if (o.isComplete) return `Haiku às ${hhmmOf(o.now)}`
+  return `Haiku às ${hhmmOf(o.now)}; faltam vereditos, o resto vai na próxima consulta`
 }
 
 // Lotes de até 20 (no máximo 5) só com as candidatas sem veredito válido; o que gravar no fim sai de persistOf.
@@ -2350,7 +2346,7 @@ export const register: Register = on => {
           {summaryOf(current).replace(/^workbench: /, '')}
         </Text>
         <Text dimColor wrap="truncate">
-          base {current.base} @{current.baseHead} · última migration {current.baseMigration ?? '—'} · {hhmm(current.at)}
+          base {current.base} @{current.baseHead} · última migration {current.baseMigration ?? '—'} · {hhmmOf(current.at)}
           {isBusy ? ' · atualizando…' : ''}
         </Text>
         <Text color={isFetchStale(current.fetchedAt, current.at) ? 'warning' : 'subtle'} wrap="truncate">
@@ -2402,7 +2398,7 @@ export const register: Register = on => {
           <Box flexDirection="column">
             <Text> </Text>
             <Text bold wrap="truncate">
-              Limpeza sugerida ({report.source === 'haiku' ? `Haiku ${hhmm(report.at)}` : 'regra'}){freed > 0 ? ` · libera ~${sizeLabel(freed)}` : ''}
+              Limpeza sugerida ({report.source === 'haiku' ? `Haiku ${hhmmOf(report.at)}` : 'regra'}){freed > 0 ? ` · libera ~${sizeLabel(freed)}` : ''}
             </Text>
             {report.note !== null && (
               <Text dimColor wrap="truncate">

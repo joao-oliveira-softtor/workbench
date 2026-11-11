@@ -431,32 +431,35 @@ export const refOf = (slice: Ok): SessionRef => ({ project: projectOf(slice.cwd)
 
 export type Tally = { ok: Ok[]; failed: SessionRef[]; counts: DayInput['counts'] }
 
-// Separa as lidas do dia escolhido e de hoje: `ok` cujo último pedido seu é de `day` ou de hoje, da mais nova para a mais
-// velha; o resto vira contagem, e o arquivo ilegível vai para "Falharam".
+// Uma leitura na contagem: `ok` do dia escolhido ou de hoje entra em `ok`, o resto vira contagem e o ilegível vai para
+// "Falharam".
+function addRead(tally: Tally, read: Read, day: string, today: string): void {
+  const s = read.slice
+  if (s === null) {
+    tally.failed.push({ project: read.project, at: read.at })
+    return
+  }
+  switch (s.kind) {
+    case 'ok': {
+      const last = workDayOf(s.lastHumanAt, DAY_CUTOFF_HOUR)
+      if (last === day || last === today) tally.ok.push(s)
+      else tally.counts.idle += 1
+      return
+    }
+    case 'automatic':
+    case 'empty':
+    case 'broken':
+      tally.counts[s.kind] += 1
+      return
+    default:
+      throw new Error('Caso não tratado: ' + String(s satisfies never))
+  }
+}
+
+// Separa as lidas do dia escolhido e de hoje, da mais nova para a mais velha (pelo último pedido seu).
 export function tallyOf(reads: readonly Read[], day: string, today: string): Tally {
   const tally: Tally = { ok: [], failed: [], counts: { automatic: 0, empty: 0, broken: 0, idle: 0 } }
-  for (const read of reads) {
-    const s = read.slice
-    if (s === null) {
-      tally.failed.push({ project: read.project, at: read.at })
-      continue
-    }
-    switch (s.kind) {
-      case 'ok': {
-        const last = workDayOf(s.lastHumanAt, DAY_CUTOFF_HOUR)
-        if (last === day || last === today) tally.ok.push(s)
-        else tally.counts.idle += 1
-        break
-      }
-      case 'automatic':
-      case 'empty':
-      case 'broken':
-        tally.counts[s.kind] += 1
-        break
-      default:
-        throw new Error('Caso não tratado: ' + String(s satisfies never))
-    }
-  }
+  for (const read of reads) addRead(tally, read, day, today)
   tally.ok.sort((a, b) => b.lastHumanAt - a.lastHumanAt)
   return tally
 }
