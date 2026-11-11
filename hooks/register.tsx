@@ -759,12 +759,26 @@ async function compactWithin($: EngineInterface, instructions: string) {
   }
 }
 
+const isButtonBusy = (): boolean => compactPhase !== 'idle' || resumePhase !== 'idle'
+
+// Por que a retomada automática não entra pelo campo de prompt; null quando ele está vazio.
+async function fieldRefusalOf($: EngineInterface): Promise<string | null> {
+  const field = await settle(() => $.prompt.read())
+  if (!field.ok) return 'Retomada automática não enviada: não deu para ler o campo de digitação.'
+  return field.value.text === '' ? null : 'Compactado sozinho, sem retomar: há texto no campo de prompt.'
+}
+
 // Roda no timer: retoma depois da compactação automática, se nada mudou desde ela. A marca sai já no começo, para um
-// tique seguinte não mandar de novo enquanto este espera a lista de agentes.
+// tique seguinte não mandar de novo enquanto este espera a lista de agentes. Com o botão Compactar ou Retomada na fila
+// ou rodando, a marca é descartada com aviso: a retomada de cada um não pode correr junto com esta.
 async function drainAutoResume($: EngineInterface): Promise<void> {
   const pending = autoResume
   if (pending === null) return
   autoResume = null
+  if (isButtonBusy()) {
+    await notice($, 'Compactado sozinho, sem retomar: o botão Compactar ou Retomada está em uso.')
+    return
+  }
   const agents = await runningAgentsOf($)
   const decision = shouldAutoResume({ pending, isMainTurn, mainTurns, humanSince: humanSinceAutoResume })
   switch (decision) {
@@ -778,8 +792,9 @@ async function drainAutoResume($: EngineInterface): Promise<void> {
     default:
       throw new Error('Caso não tratado: ' + String(decision satisfies never))
   }
-  if ((await $.prompt.read()).text !== '') {
-    await notice($, 'Compactado sozinho, sem retomar: há texto no campo de prompt.')
+  const refusal = await fieldRefusalOf($)
+  if (refusal !== null) {
+    await notice($, refusal)
     return
   }
   humanSinceAutoResume = false
@@ -2167,6 +2182,8 @@ export const register: Register = on => {
     const isMarked = e.trigger === 'auto' && !isAgent && done.skip === undefined && compactPhase === 'idle' && hasSeenMainTurn && !isMainTurn
     if (isMarked) autoResume = { seen }
     const outcome = done.skip === undefined ? 'compactou' : `vetada (${done.skip})`
+    // shortcut: registro de toda compactação, prova pendente da compactação ociosa; sai (ou vira opcional) depois que a
+    // marca `trigger=auto, parada=sim` for vista numa sessão com tela.
     const text = `workbench: compactação trigger=${e.trigger}, agente=${e.agentId ?? 'não'}, parada=${isParked ? 'sim' : 'não'}, resultado=${outcome}, retomada=${isMarked ? 'marcada' : 'não'}`
     await settle(() => $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }))
     return done

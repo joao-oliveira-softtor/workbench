@@ -10,6 +10,14 @@ import { COMPACT_CRITERIA, COMPACT_TIMEOUT_MS, RESUME_HEAD, resumeFailureOf, res
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const GOOD = JSON.stringify({ objetivo: 'objetivo-x', fase: 'implementando', feito: ['a'], pendente: ['pendente-x'], contexto: 'ctx', proximoPasso: 'passo-x' })
 
+const BUSY = 'Compactado sozinho, sem retomar: o botão Compactar ou Retomada está em uso.'
+const BAND = {
+  plugin: 'workbench',
+  component: 'AbovePrompt',
+  surface: 'terminal',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 5 }, view: {} },
+} as const
+
 const PANE = {
   plugin: 'workbench',
   component: 'Pane',
@@ -28,8 +36,8 @@ type Over = {
   compact?: (n: number) => Promise<Outcome>
   // O que `$.agent.list()` devolve; 'fail' = nenhum hook responde e a listagem rejeita.
   agents?: readonly { id: string; type: string; status: 'running' | 'completed' | 'idle'; description: string }[] | 'fail'
-  // O texto do campo de prompt (`$.prompt.read()`).
-  typed?: string
+  // O texto do campo de prompt (`$.prompt.read()`); 'fail' = nenhum hook responde e a leitura rejeita.
+  typed?: string | 'fail'
   // Roda dentro do prompt.submit, antes de o pedido entrar; devolver { drop } recusa o pedido.
   onSubmit?: (text: string) => Promise<{ drop: string } | undefined>
   // O session.append recusa com este motivo.
@@ -66,7 +74,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
   })
   const agents = over.agents ?? []
   if (agents !== 'fail') on('agent.list', () => ({ value: agents.map(a => ({ ...a })) }))
-  on('prompt.read', () => ({ value: { text: over.typed ?? '', cursor: 0 } }))
+  const typed = over.typed ?? ''
+  if (typed !== 'fail') on('prompt.read', () => ({ value: { text: typed, cursor: 0 } }))
   on('ui.toast', (_$, e) => {
     log.toasts.push(e.text)
     return { value: undefined }
@@ -594,6 +603,38 @@ describe('retomada depois da compactação automática', () => {
     await tick(t)
     expect(resumes(t)).toEqual([])
     expect(t.log.notices).toContain('Compactado sozinho, sem retomar: há texto no campo de prompt.')
+  })
+
+  test('não lê o campo de prompt: grava o aviso em vez de ficar calado', async ($, on) => {
+    const t = await boot($, on, { typed: 'fail' })
+    await warm($)
+    await auto($)
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+    expect(t.log.notices).toContain('Retomada automática não enviada: não deu para ler o campo de digitação.')
+  })
+
+  test('botão Compactar na fila ou rodando: descarta a retomada automática com aviso, e o tique seguinte não manda', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await auto($)
+    await press(t)
+    await tick(t)
+    await tick(t)
+    expect(t.log.submits).not.toContain(resumePromptOf(null))
+    expect(resumes(t)).toHaveLength(1)
+    expect(t.log.notices).toContain(BUSY)
+  })
+
+  test('botão Retomada na fila: descarta a retomada automática com aviso', async ($, on) => {
+    const t = await boot($, on)
+    const band = await $.ui.mount(BAND)
+    await warm($)
+    await auto($)
+    await band.press({ key: 'resume' })
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+    expect(t.log.notices).toContain(BUSY)
   })
 
   test('um turno começa antes do tique: descarta sem aviso', async ($, on) => {
