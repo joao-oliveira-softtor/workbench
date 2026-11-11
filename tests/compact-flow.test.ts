@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { COMPACT_CRITERIA, COMPACT_TIMEOUT_MS, RESUME_HEAD, resumeFailureOf, resumePromptOf } from '../hooks/compact'
+import { COMPACT_CRITERIA, COMPACT_TIMEOUT_MS, RESUME_HEAD, resumeFailureOf, resumePromptOf, withCriteria } from '../hooks/compact'
 
 // Fluxo inteiro pelo engine: o `$` real do plugin, o painel montado, o botão apertado, o relógio e o armazenamento
 // simulados, e hooks do teste no lugar do engine (conversa, modelo, compactação, prompt, toast, turnos). As variáveis do
@@ -271,39 +271,41 @@ describe('registro de toda compactação', () => {
   const MESSAGES = [{ role: 'user' as const, text: 'conversa longa', toolUses: [] }]
   const compactLog = (t: Rig) => t.log.notices.filter(text => text.startsWith('workbench: compactação '))
 
-  test('automática com a sessão parada: registra trigger, agente, parada e resultado, e não muda as instruções', async ($, on) => {
+  test('automática com a sessão parada: registra trigger, agente, parada, resultado e retomada, e soma os critérios', async ($, on) => {
     const t = await boot($, on)
     await $.session.compact({ trigger: 'auto', messages: MESSAGES, instructions: 'texto do engine' })
-    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=compactou'])
-    expect(t.log.compacts).toEqual(['texto do engine'])
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=compactou, retomada=não'])
+    expect(t.log.compacts).toEqual([withCriteria('texto do engine')])
   })
 
   test('no meio de um turno e de subagente: parada=não e o id do agente', async ($, on) => {
     const t = await boot($, on)
     await startTurn($, 't1')
     await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'ag-1' })
-    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=ag-1, parada=não, resultado=compactou'])
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=ag-1, parada=não, resultado=compactou, retomada=não'])
+    expect(t.log.compacts).toEqual([undefined])
     await endTurn($, 't1')
   })
 
   test('compactação vetada embaixo: o registro diz o motivo', async ($, on) => {
     const t = await boot($, on, { compact: async () => 'skip' })
     await $.session.compact({ trigger: 'auto', messages: MESSAGES })
-    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=vetada (vetado pelo teste)'])
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=vetada (vetado pelo teste), retomada=não'])
   })
 
-  test('manual, precompute e a de outro mod aparecem; a do próprio botão não passa pelo hook do mod (o engine pula quem chamou)', async ($, on) => {
+  test('manual leva os critérios; precompute e a de outro mod passam intactos; todos aparecem; a do próprio botão não passa pelo hook', async ($, on) => {
     const t = await boot($, on)
     await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-    await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
-    await $.session.compact({ trigger: 'plugin', messages: MESSAGES })
+    await $.session.compact({ trigger: 'precompute', messages: MESSAGES, instructions: 'pré' })
+    await $.session.compact({ trigger: 'plugin', messages: MESSAGES, instructions: 'de outro mod' })
     await press(t)
     await tick(t)
+    expect(t.log.compacts.slice(0, 3)).toEqual([COMPACT_CRITERIA, 'pré', 'de outro mod'])
     expect(t.log.compacts.length).toBe(4)
     expect(compactLog(t)).toEqual([
-      'workbench: compactação trigger=manual, agente=não, parada=sim, resultado=compactou',
-      'workbench: compactação trigger=precompute, agente=não, parada=sim, resultado=compactou',
-      'workbench: compactação trigger=plugin, agente=não, parada=sim, resultado=compactou',
+      'workbench: compactação trigger=manual, agente=não, parada=sim, resultado=compactou, retomada=não',
+      'workbench: compactação trigger=precompute, agente=não, parada=sim, resultado=compactou, retomada=não',
+      'workbench: compactação trigger=plugin, agente=não, parada=sim, resultado=compactou, retomada=não',
     ])
     expect(t.log.submits.length).toBe(1)
   })
@@ -495,5 +497,135 @@ describe('prazo e recarga da compactação do botão', () => {
     const t = await boot($, on)
     await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
     expect(t.log.notices.some(text => text.includes('recarregou'))).toBe(false)
+  })
+})
+
+// Tarefa 5: depois da compactação automática com a sessão parada, o mod retoma sozinho, no máximo uma vez por pedido seu.
+describe('retomada depois da compactação automática', () => {
+  const MESSAGES = [{ role: 'user' as const, text: 'conversa longa', toolUses: [] }]
+  const auto = ($: Engine) => $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  const resumes = (t: Rig) => t.log.submits.filter(text => text.includes(RESUME_HEAD))
+  const userSays = ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+  // Um turno visto desde a carga do mod: sem isso a sessão "parada" pode ser só o contador zerado pela recarga.
+  const warm = async ($: Engine) => {
+    await startTurn($, 'w1')
+    await endTurn($, 'w1')
+  }
+
+  test('sessão parada depois de um turno: retoma no tique seguinte, com a frase de parar se acabou', async ($, on) => {
+    const t = await boot($, on, { agents: [{ id: 'ag-9', type: 'executor', status: 'running', description: 'revisa' }] })
+    await warm($)
+    await auto($)
+    expect(t.log.notices).toContain('workbench: compactação trigger=auto, agente=não, parada=sim, resultado=compactou, retomada=marcada')
+    await tick(t)
+    expect(resumes(t)).toEqual([resumePromptOf(null, [{ id: 'ag-9', type: 'executor', description: 'revisa' }])])
+    await tick(t)
+    expect(resumes(t).length).toBe(1)
+  })
+
+  test('no meio de um turno não retoma (o próprio Claude Code segue o turno)', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await startTurn($, 'm1')
+    await auto($)
+    await endTurn($, 'm1')
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('sem nenhum turno visto desde a carga do mod, não retoma', async ($, on) => {
+    const t = await boot($, on)
+    await auto($)
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('/compact digitado: leva os critérios depois do texto do usuário e não retoma', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await $.session.compact({ trigger: 'manual', messages: MESSAGES, instructions: 'foque no frete' })
+    await tick(t)
+    expect(t.log.compacts).toEqual([withCriteria('foque no frete')])
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('compactação de outro mod ou de subagente não retoma', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await $.session.compact({ trigger: 'plugin', messages: MESSAGES })
+    await tick(t)
+    await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'ag-1' })
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('compactação vetada embaixo não retoma', async ($, on) => {
+    const t = await boot($, on, { compact: async () => 'skip' })
+    await warm($)
+    await auto($)
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('segunda automática sem pedido seu: grava o aviso de teto e não retoma; depois de um pedido seu, retoma de novo', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await auto($)
+    await tick(t)
+    expect(resumes(t).length).toBe(1)
+    await startTurn($, 'r1')
+    await endTurn($, 'r1')
+    await auto($)
+    await tick(t)
+    expect(resumes(t).length).toBe(1)
+    expect(t.log.notices).toContain('Compactado sozinho, sem retomar: já houve uma retomada automática sem pedido seu depois.')
+    await userSays($, 'segue')
+    await startTurn($, 'u1')
+    await endTurn($, 'u1')
+    await auto($)
+    await tick(t)
+    expect(resumes(t).length).toBe(2)
+  })
+
+  test('campo de prompt com texto: grava o aviso e não manda', async ($, on) => {
+    const t = await boot($, on, { typed: 'rascunho' })
+    await warm($)
+    await auto($)
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+    expect(t.log.notices).toContain('Compactado sozinho, sem retomar: há texto no campo de prompt.')
+  })
+
+  test('um turno começa antes do tique: descarta sem aviso', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await auto($)
+    await startTurn($, 'u2')
+    await tick(t)
+    await endTurn($, 'u2')
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+    expect(t.log.notices.some(text => text.startsWith('Compactado sozinho'))).toBe(false)
+  })
+
+  test('recarga zera a retomada marcada e o turno visto', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await auto($)
+    await $.session.start({ cwd: '/repo', surface: null, isInteractive: true })
+    await tick(t)
+    await auto($)
+    await tick(t)
+    expect(resumes(t)).toEqual([])
+  })
+
+  test('a retomada automática que morre com erro também grava o aviso', async ($, on) => {
+    const t = await boot($, on)
+    await warm($)
+    await auto($)
+    await tick(t)
+    await $.turn.start({ text: resumes(t)[0] ?? '', turnId: 'r9' })
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 'r9', reason: 'error' })
+    expect(t.log.notices).toContain(resumeFailureOf('error'))
   })
 })

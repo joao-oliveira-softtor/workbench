@@ -133,6 +133,24 @@ export function withCriteria(instructions: string | undefined): string {
   return instructions === undefined || instructions.trim() === '' ? COMPACT_CRITERIA : `${instructions}\n\n${COMPACT_CRITERIA}`
 }
 
+// Quem compactou (o `trigger` do evento session.compact). A do próprio botão não passa pelo hook do mod: `plugin` é outro mod.
+export type CompactTrigger = 'manual' | 'auto' | 'plugin' | 'precompute'
+
+// As instruções que seguem embaixo: o /compact digitado e a automática levam os critérios (C2); a de outro mod e o
+// pré-cálculo passam intactos.
+export function compactInstructionsOf(trigger: CompactTrigger, instructions: string | undefined): string | undefined {
+  switch (trigger) {
+    case 'auto':
+    case 'manual':
+      return withCriteria(instructions)
+    case 'plugin':
+    case 'precompute':
+      return instructions
+    default:
+      throw new Error('Caso não tratado: ' + String(trigger satisfies never))
+  }
+}
+
 const listText = (items: readonly string[], none: string): string => (items.length === 0 ? none : items.join('; '))
 
 // Agentes que ainda rodam (quem chama já tirou os acabados), lidos por código: entram na compactação e na retomada.

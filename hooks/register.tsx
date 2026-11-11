@@ -9,11 +9,13 @@ import {
   TRANSCRIPT_CAP,
   buttonLabel,
   clickAction,
+  compactInstructionsOf,
   hasTurnIntervened,
   instructionsOf,
   parseAnalysis,
   resumeFailureOf,
   resumePromptOf,
+  shouldAutoResume,
   shouldStart,
   tokensLabel,
   transcriptOf,
@@ -207,6 +209,12 @@ let mainTurns = 0
 // Vigia do turno da retomada: `{ text }` depois do envio; o próximo turn.start do loop principal a troca por `{ turnId }`
 // (era o da retomada) ou `null` (não era). Limite: uma retomada que ficou na fila atrás de outro turno não é vigiada.
 let resumeWatch: { text: string } | { turnId: string } | null = null
+// Retomada depois da compactação automática com a sessão parada: `seen` é o mainTurns daquele momento. No máximo uma por
+// pedido seu (`humanSinceAutoResume`), sem laço. `hasSeenMainTurn`: a recarga zera `isMainTurn` mesmo com um turno rodando,
+// então "parada" só vale depois de um turno visto desde a carga.
+let autoResume: { seen: number } | null = null
+let humanSinceAutoResume = true
+let hasSeenMainTurn = false
 // EGM: o clique só enfileira a etapa (o dispatch de um botão pode ser abandonado); o drainPlan faz o trabalho no timer.
 let planQueued: PlanStep | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
@@ -719,6 +727,33 @@ async function compactWithin($: EngineInterface, instructions: string) {
     await deadline
     await settle(() => update($, compactingAt, () => null))
   }
+}
+
+// Roda no timer: retoma depois da compactação automática, se nada mudou desde ela. A marca sai já no começo, para um
+// tique seguinte não mandar de novo enquanto este espera a lista de agentes.
+async function drainAutoResume($: EngineInterface): Promise<void> {
+  const pending = autoResume
+  if (pending === null) return
+  autoResume = null
+  const agents = await runningAgentsOf($)
+  const decision = shouldAutoResume({ pending, isMainTurn, mainTurns, humanSince: humanSinceAutoResume })
+  switch (decision) {
+    case 'drop':
+      return
+    case 'blocked':
+      await notice($, 'Compactado sozinho, sem retomar: já houve uma retomada automática sem pedido seu depois.')
+      return
+    case 'send':
+      break
+    default:
+      throw new Error('Caso não tratado: ' + String(decision satisfies never))
+  }
+  if ((await $.prompt.read()).text !== '') {
+    await notice($, 'Compactado sozinho, sem retomar: há texto no campo de prompt.')
+    return
+  }
+  humanSinceAutoResume = false
+  await sendResume($, resumePromptOf(null, agents))
 }
 
 // Compacta e retoma. `seen` é o contador de turnos de quando a análise começou: se mudou, o usuário voltou a trabalhar.
@@ -1703,6 +1738,9 @@ export const register: Register = on => {
     isMainTurn = false
     mainTurns = 0
     resumeWatch = null
+    autoResume = null
+    humanSinceAutoResume = true
+    hasSeenMainTurn = false
     planQueued = null
     refinePhase = 'idle'
     // Antes de zerar o rótulo: se ele dizia "compactando", a recarga caiu no meio (`compactingAt` NÃO zera aqui).
@@ -1766,6 +1804,7 @@ export const register: Register = on => {
       void drainSizes($).catch(() => {})
       void drainRemove($).catch(() => {})
       void drainCompact($).catch(() => {})
+      void drainAutoResume($).catch(() => {})
       void drainPlan($).catch(() => {})
       void drainRefine($).catch(() => {})
       void drainQa($).catch(() => {})
@@ -1821,6 +1860,7 @@ export const register: Register = on => {
 
   // Nunca segura o prompt: sem chamada de modelo nem de armazenamento, só soma a instrução de delegar ao `context`.
   on('prompt.submit', async ($, e, next) => {
+    if (isUserOrigin(e.origin.kind)) humanSinceAutoResume = true
     try {
       // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
       const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
@@ -1867,13 +1907,19 @@ export const register: Register = on => {
 
   // Toda compactação que chega ao mod (`/compact`, a automática do Claude Code, o pré-cálculo, a de outro mod; a do
   // próprio botão o engine não passa por aqui) deixa um aviso gravado no transcrito: é a prova de qual `trigger` chega.
-  // Só registra, depois do resultado (o aviso antes cairia dentro da compactação); um erro aqui não a impede.
+  // O registro vai depois do resultado (antes cairia dentro da compactação) e nunca lança. O /compact e a automática levam
+  // os critérios; só a automática do loop principal com a sessão parada marca a retomada (o /compact não retoma: C1; a de
+  // subagente e a de outro mod passam intactas).
   on('session.compact', async ($, e, next) => {
     const isParked = !isMainTurn
-    const done = await next(e)
+    const seen = mainTurns
+    const isAgent = e.agentId !== undefined
+    const done = await next(isAgent ? e : { ...e, instructions: compactInstructionsOf(e.trigger, e.instructions) })
+    const isMarked = e.trigger === 'auto' && !isAgent && done.skip === undefined && compactPhase === 'idle' && hasSeenMainTurn && !isMainTurn
+    if (isMarked) autoResume = { seen }
     const outcome = done.skip === undefined ? 'compactou' : `vetada (${done.skip})`
-    const text = `workbench: compactação trigger=${e.trigger}, agente=${e.agentId ?? 'não'}, parada=${isParked ? 'sim' : 'não'}, resultado=${outcome}`
-    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+    const text = `workbench: compactação trigger=${e.trigger}, agente=${e.agentId ?? 'não'}, parada=${isParked ? 'sim' : 'não'}, resultado=${outcome}, retomada=${isMarked ? 'marcada' : 'não'}`
+    await settle(() => $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }))
     return done
   }).catch(($, e, next) => next(e))
 
@@ -1881,6 +1927,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       isMainTurn = true
+      hasSeenMainTurn = true
       mainTurns += 1
       // Um turno só começa com a compactação terminada (ela não roda durante um turno).
       await settle(() => update($, compactingAt, () => null))
@@ -1892,7 +1939,10 @@ export const register: Register = on => {
 
   // Fim do turno do remover: limpa a trava e refaz o snapshot. Aqui um agente que não se consegue identificar NÃO encerra nada.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) isMainTurn = false
+    if (e.agentId === undefined) {
+      isMainTurn = false
+      hasSeenMainTurn = true
+    }
     const watch = resumeWatch
     if (e.agentId === undefined && watch !== null && 'turnId' in watch && watch.turnId === e.turnId) {
       resumeWatch = null
