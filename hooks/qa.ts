@@ -37,6 +37,10 @@ export const AGENT_TIMEOUT_MS = 20 * 60_000
 export const VIEW_HEIGHT = 800
 export const NODE_MIN = '22.6'
 
+// Quem dispara ou para o QA: a pessoa pelo campo (`composer`), pelo Remote Control (`bridge`) ou pelo `claude -p` (`sdk`).
+// O resto (outro mod, notificação de tarefa, agendamento, sessão vizinha, `unclassified`) não. O /route usa isUserOrigin.
+export const isQaOrigin = (kind: string): boolean => kind === 'composer' || kind === 'bridge' || kind === 'sdk'
+
 // A saída do `node --version` (`v22.6.0`) é NODE_MIN ou mais nova? Fora desse formato: não.
 export function isNodeOk(version: string): boolean {
   const found = /^v(\d+)\.(\d+)\.\d+$/.exec(version.trim())

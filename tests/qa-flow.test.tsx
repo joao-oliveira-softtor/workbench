@@ -1,4 +1,4 @@
-import type { On } from 'claude-code'
+import type { On, PromptOrigin } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -650,20 +650,22 @@ describe('QA: fase Executar', () => {
     expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
   })
 
-  test('/workbench qa e qa stop só valem pelo usuário: de outra origem respondem que não e nada muda', async ($, on) => {
+  test('/workbench qa e qa stop só valem pela pessoa (composer, bridge ou claude -p): de outra origem respondem que não e nada muda', async ($, on) => {
     const { t, ui } = await toRun($, on)
-    const from = async (args: string, origin: { kind: 'sdk' } | { kind: 'unclassified' } | { kind: 'plugin'; name: string }) =>
-      (await $.command.run({ command: 'workbench', args, origin, presentation: { isFullscreen: false, columns: 120 } })).text
-    for (const origin of [{ kind: 'plugin', name: 'outro' }, { kind: 'sdk' }, { kind: 'unclassified' }] as const) expect(await from('qa', origin)).toContain('só o usuário')
+    const from = async (args: string, origin: PromptOrigin) => (await $.command.run({ command: 'workbench', args, origin, presentation: { isFullscreen: false, columns: 120 } })).text
+    const others: PromptOrigin[] = [{ kind: 'plugin', name: 'outro' }, { kind: 'task-notification' }, { kind: 'scheduled-trigger' }, { kind: 'peer-send-message' }, { kind: 'unclassified' }]
+    for (const origin of others) expect(await from('qa', origin)).toContain('só o usuário')
     await tick(t)
     expect(t.log.spawns).toEqual([])
     expect(await label(ui)).toBe('QA: Executar')
-    await click(t, ui)
+    expect(await from('qa', { kind: 'sdk' })).not.toContain('só o usuário')
+    await tick(t)
+    expect(await label(ui)).toMatch(/^QA: c1/)
     const guards = t.log.guards.length
-    expect(await from('qa stop', { kind: 'sdk' })).toContain('só o usuário')
+    for (const origin of others) expect(await from('qa stop', origin)).toContain('só o usuário')
     expect(t.log.guards).toHaveLength(guards)
     expect(await label(ui)).toMatch(/^QA: c1/)
-    await command($, 'qa stop')
+    expect(await from('qa stop', { kind: 'sdk' })).not.toContain('só o usuário')
     expect(await label(ui)).toBe('QA: Executar')
   })
 

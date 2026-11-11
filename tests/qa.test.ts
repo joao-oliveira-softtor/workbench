@@ -35,6 +35,7 @@ import {
   handbackAgentOf,
   hookCommandOf,
   isNodeOk,
+  isQaOrigin,
   impWrapperTextOf,
   nextFixOf,
   nextRunOf,
@@ -441,6 +442,16 @@ describe('impWrapperTextOf', () => {
     expect(text).toContain('export IMPECCABLE_NO_TELEMETRY=1')
     expect(text).toContain('export DO_NOT_TRACK=1')
     expect(text.trimEnd().endsWith(`exec '/t/o'\\''k/impeccable' "$@"`)).toBe(true)
+  })
+})
+
+// claude -p (sdk) é a vez do próprio host: conta como a pessoa. Outro mod, tarefa, agendamento e vizinha, não.
+describe('isQaOrigin', () => {
+  test('composer, bridge e sdk disparam o QA', () => {
+    for (const kind of ['composer', 'bridge', 'sdk']) expect(isQaOrigin(kind)).toBe(true)
+  })
+  test('outras origens não', () => {
+    for (const kind of ['plugin', 'task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'coordinator', 'auto-continuation', 'unclassified', '']) expect(isQaOrigin(kind)).toBe(false)
   })
 })
 
