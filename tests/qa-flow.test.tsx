@@ -1343,6 +1343,8 @@ describe('QA: fase Corrigir', () => {
     await click(t, ui)
     expect(t.log.toasts.join('\n')).not.toContain('nenhum defeito marcado')
     expect(t.files.get(`${t.runDir()}/correcoes.md`)).toContain(D1)
+    expect(t.wt.commits.some(c => c.includes('Testes de regressão gerados pelo QA'))).toBe(true)
+    expect(t.log.toasts.join('\n')).not.toContain('sumiu')
     expect(await label(ui)).toBe('QA')
     await tick(t)
     expect(t.log.submits.at(-1)).toContain(`${t.runDir()}/correcoes.md`)

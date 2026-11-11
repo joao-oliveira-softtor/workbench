@@ -917,15 +917,16 @@ const runIdIn = (runDir: string): string => runDir.split('/').pop() ?? ''
 // Dois tempos: o primeiro clique mostra os comandos e arma; o segundo em até ARM_MS prepara a worktree e monta a fila.
 async function qaFixClick($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matrix): Promise<void> {
   const { all, left } = await fixQueueAt($, flow.runDir, await outcomesOf($, flow.runDir, matrix))
-  // Parado (ou fechado) entre o último defeito resolvido e o fim da fila: o clique faz o fechamento que faltou.
-  if (all.length > 0 && left.length === 0) return closeFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir, matrix }, all)
+  const runId = runIdIn(flow.runDir)
+  const fixDir = fixDirOf(env.root, runId)
+  // Parado (ou fechado) entre o último defeito resolvido e o fim da fila: o clique faz o fechamento que faltou. Depois de
+  // reabrir o Claude Code a etapa guardada volta sem a worktree (o storedFlowOf não confia nela): vale a da execução.
+  if (all.length > 0 && left.length === 0) return closeFix($, { env, runDir: flow.runDir, fixDir: flow.fixDir || fixDir, matrix }, all)
   if (left.length === 0) {
     await setFlow($, f => ({ ...f, step: 'plan' as const }))
     $.ui.toast(`QA: nenhum defeito marcado para corrigir. Os testes gerados ficam em ${flow.runDir}/celulas/<id>/teste.spec.ts.`)
     return
   }
-  const runId = runIdIn(flow.runDir)
-  const fixDir = fixDirOf(env.root, runId)
   if ((await read($, qaJob)) !== null || !(await isFixConfirmed($, matrix, fixDir))) return
   const stops = qaStops
   const ready = await setupWorktree($, env, matrix, { runDir: flow.runDir, defect: left[0] ?? '', fixDir }, fixBranchOf(runId))
