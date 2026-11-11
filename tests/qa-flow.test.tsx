@@ -1634,6 +1634,24 @@ describe('QA: fase Corrigir, preparação e retomada', () => {
     expect(t.log.spawns[2]?.prompt).toContain('mudança sem descrição de commit')
   })
 
+  test('arquivo que o app cria nos testes da tentativa 1 (recusada): a fase para antes do corretor da tentativa 2, sem add nem commit', async ($, on) => {
+    const { t } = await fixing($, on, {
+      run: a => {
+        if (a.join(' ') !== 'npm test') return undefined
+        t.wt.status = '?? uploads/foto.png\n'
+        return { exitCode: 1, stdout: 'FALHOU' }
+      },
+    })
+    await fixerEnds($, t)
+    const runsBefore = t.log.runs.length
+    await tick(t)
+    expect(types(t)).toEqual([QA_FIXER])
+    expect(t.wt.commits.length).toBe(1)
+    expect(t.log.runs.slice(runsBefore).some(a => a.includes('-C') && (a.includes('add') || a.includes('commit') || a.includes('reset') || a.includes('clean')))).toBe(false)
+    expect(t.log.toasts.at(-1)).toContain('nenhum commit levou: uploads/foto.png')
+    expect(t.log.toasts.at(-1)).toContain('.gitignore')
+  })
+
   test('tentativa 2 que termina não reverificada desfaz até o começo do defeito: o commit recusado da tentativa 1 sai', async ($, on) => {
     const { t } = await fixing($, on, { run: a => (a.join(' ') === 'npm test' ? { exitCode: 1, stdout: 'FALHOU' } : undefined) })
     await fixerEnds($, t)
