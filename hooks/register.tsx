@@ -842,6 +842,7 @@ async function qaPlan($: EngineInterface, env: QaEnv, flow: QaFlow): Promise<voi
 
 // Portões, scripts e a fila com as células que ainda não têm veredito.
 async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matrix): Promise<void> {
+  const stops = qaStops
   const gate = await runGateOf($, env, matrix, await $.clock.now())
   if (gate !== null) {
     $.ui.toast(gate.text)
@@ -860,6 +861,10 @@ async function qaRun($: EngineInterface, env: QaEnv, flow: QaFlow, matrix: Matri
   const runBase = await runBaseOf($, env.root)
   await update($, qaRunBase, () => runBase)
   const queue = await pendingCellsOf($, flow.runDir, matrix)
+  if (stops !== qaStops) {
+    $.ui.toast('QA: parado durante o clique Executar; clique em "QA: Executar" para retomar.')
+    return
+  }
   await update($, qaJob, cur => cur ?? { phase: 'run' as const, queue, total: queue.length, current: null, matrix })
 }
 

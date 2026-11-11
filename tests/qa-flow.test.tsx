@@ -792,6 +792,18 @@ describe('QA: fase Executar', () => {
     expect(await label(ui)).toMatch(/^QA: c1 \(1\/2\)/)
   })
 
+  test('qa stop durante o clique Executar: o trabalho não nasce e nenhum agente é lançado', async ($, on) => {
+    const { t, ui } = await toRun($, on, { hold: holdOnce(k => k.startsWith('curl ')).hold })
+    await click(t, ui)
+    await command($, 'qa stop')
+    await t.clock.advance(HOLD_MS)
+    await tick(t)
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.toasts.at(-1)).toContain('parado durante o clique')
+    expect(await label(ui)).toBe('QA: Executar')
+  })
+
   test('qa stop enquanto o passo adota o agente: a trava fica em {}', async ($, on) => {
     const list = holdOnce(k => k === 'agent.list', false)
     const { t } = await running($, on, { hold: list.hold })
