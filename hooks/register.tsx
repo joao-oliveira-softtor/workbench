@@ -1791,6 +1791,18 @@ export const register: Register = on => {
     return authReplyOf($, env, (await read($, qaFlow)).runDir, call.profile, await $.clock.now())
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'qa_auth: a consulta falhou' }))
 
+  // Toda compactação que chega ao mod (`/compact`, a automática do Claude Code, o pré-cálculo, a de outro mod; a do
+  // próprio botão o engine não passa por aqui) deixa um aviso gravado no transcrito: é a prova de qual `trigger` chega.
+  // Só registra, depois do resultado (o aviso antes cairia dentro da compactação); um erro aqui não a impede.
+  on('session.compact', async ($, e, next) => {
+    const isParked = !isMainTurn
+    const done = await next(e)
+    const outcome = done.skip === undefined ? 'compactou' : `vetada (${done.skip})`
+    const text = `workbench: compactação trigger=${e.trigger}, agente=${e.agentId ?? 'não'}, parada=${isParked ? 'sim' : 'não'}, resultado=${outcome}`
+    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+    return done
+  }).catch(($, e, next) => next(e))
+
   // Só o loop principal conta (subagentes e a fork da compactação trazem agentId): a compactação espera a sessão parar.
   on('turn.start', async (_$, e, next) => {
     if (e.agentId === undefined) {

@@ -31,7 +31,7 @@ type Over = {
 async function boot($: Engine, on: On, over: Over = {}) {
   const clock = mock.clock(on)
   mock.store(on)
-  const log = { models: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[] }
+  const log = { models: [] as string[], compacts: [] as (string | undefined)[], submits: [] as string[], toasts: [] as string[], notices: [] as string[] }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('agent.register', (_$, e) => ({ value: { agent: e.name } }))
@@ -59,6 +59,11 @@ async function boot($: Engine, on: On, over: Over = {}) {
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('session.append', (_$, e, next) => {
+    const text = e.message.content[0]?.text
+    if (typeof text === 'string') log.notices.push(text)
+    return next(e)
+  })
   on('ui.status', () => ({ value: undefined }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId, kind: 'engine' as const, ref: 1 }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
@@ -240,5 +245,49 @@ describe('botão Compactar e continuar', () => {
     await endTurn($, 't5')
     await tick(t)
     expect(t.log.models).toEqual([])
+  })
+})
+
+// Tarefa 0: o hook de `session.compact` só registra quem compactou, sem mudar nada, num aviso gravado no transcrito. É a
+// prova de qual `trigger` chega ao mod quando o próprio Claude Code compacta.
+describe('registro de toda compactação', () => {
+  const MESSAGES = [{ role: 'user' as const, text: 'conversa longa', toolUses: [] }]
+  const compactLog = (t: Rig) => t.log.notices.filter(text => text.startsWith('workbench: compactação '))
+
+  test('automática com a sessão parada: registra trigger, agente, parada e resultado, e não muda as instruções', async ($, on) => {
+    const t = await boot($, on)
+    await $.session.compact({ trigger: 'auto', messages: MESSAGES, instructions: 'texto do engine' })
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=compactou'])
+    expect(t.log.compacts).toEqual(['texto do engine'])
+  })
+
+  test('no meio de um turno e de subagente: parada=não e o id do agente', async ($, on) => {
+    const t = await boot($, on)
+    await startTurn($, 't1')
+    await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'ag-1' })
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=ag-1, parada=não, resultado=compactou'])
+    await endTurn($, 't1')
+  })
+
+  test('compactação vetada embaixo: o registro diz o motivo', async ($, on) => {
+    const t = await boot($, on, { compact: async () => 'skip' })
+    await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+    expect(compactLog(t)).toEqual(['workbench: compactação trigger=auto, agente=não, parada=sim, resultado=vetada (vetado pelo teste)'])
+  })
+
+  test('manual, precompute e a de outro mod aparecem; a do próprio botão não passa pelo hook do mod (o engine pula quem chamou)', async ($, on) => {
+    const t = await boot($, on)
+    await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+    await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+    await $.session.compact({ trigger: 'plugin', messages: MESSAGES })
+    await press(t)
+    await tick(t)
+    expect(t.log.compacts.length).toBe(4)
+    expect(compactLog(t)).toEqual([
+      'workbench: compactação trigger=manual, agente=não, parada=sim, resultado=compactou',
+      'workbench: compactação trigger=precompute, agente=não, parada=sim, resultado=compactou',
+      'workbench: compactação trigger=plugin, agente=não, parada=sim, resultado=compactou',
+    ])
+    expect(t.log.submits.length).toBe(1)
   })
 })
