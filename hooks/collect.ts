@@ -22,6 +22,7 @@ import {
 } from './model'
 import type { Upstream, Worktree } from './model'
 import { ANALYZE_MAX_TOKENS, ANALYZE_RULES, ANALYZE_TIMEOUT_MS, analyzePromptOf } from './compact'
+import { RESUME_MAX_TOKENS, RESUME_RULES, RESUME_TIMEOUT_MS, TAIL_BYTES } from './resume'
 import { REFINE_MAX_TOKENS, REFINE_RULES, REFINE_TIMEOUT_MS } from './plan'
 import { ROUTE_EFFORT, ROUTE_MAX_TOKENS, ROUTE_RULES, ROUTE_TIMEOUT_MS, buildRoutePrompt } from './route'
 import { RULES, candidatesOf } from './stale'
@@ -336,4 +337,17 @@ export function askRefine($: EngineInterface, prompt: string): Promise<Asked> {
 // Classificação do /route manual: regras da skill, effort alto e teto curto de resposta.
 export function askRoute($: EngineInterface, task: string): Promise<Asked> {
   return askHaiku($, buildRoutePrompt(task), { system: ROUTE_RULES, effort: ROUTE_EFFORT, maxTokens: ROUTE_MAX_TOKENS, timeoutMs: ROUTE_TIMEOUT_MS })
+}
+
+// Resumo do dia: o Haiku resume o recorte de uma sessão e devolve o JSON de `parseSessionSummary`.
+export function askSessionSummary($: EngineInterface, sliceText: string): Promise<Asked> {
+  return askHaiku($, sliceText, { model: 'haiku', system: RESUME_RULES, maxTokens: RESUME_MAX_TOKENS, timeoutMs: RESUME_TIMEOUT_MS })
+}
+
+// Um caminho só para todo tamanho: o fim do transcrito por `tail -c` (o `$.fs.read` recusa acima de 4 MiB). Com o arquivo
+// maior que TAIL_BYTES, a primeira linha pode vir cortada (`isTail`). Falha ou código diferente de 0 devolve null.
+export async function readTranscript($: EngineInterface, path: string, size: number): Promise<{ text: string; isTail: boolean } | null> {
+  const run = await settle(() => $.process.run(['tail', '-c', String(TAIL_BYTES), path], { timeoutMs: 30_000 }))
+  if (!run.ok || run.value.exitCode !== 0) return null
+  return { text: run.value.stdout, isTail: size > TAIL_BYTES }
 }
