@@ -50,9 +50,11 @@ function lastIndexWhere(lines: readonly string[], isMatch: (line: string) => boo
   return -1
 }
 
-// As linhas entre a última `open` e a última linha de fim; o que vem depois do fim é ignorado. Falta uma das duas: null.
+// As linhas entre `open` e a linha de fim; o que vem depois do fim é ignorado. Falta uma das duas, ou há mais de uma de cada: null
+// (um segundo bloco vazio não pode apagar os achados do primeiro).
 function blockOf(text: string, open: string, isEnd: (line: string) => boolean): string[] | null {
   const lines = linesOf(text)
+  if (lines.filter((l) => l === open).length > 1 || lines.filter(isEnd).length > 1) return null
   const end = lastIndexWhere(lines, isEnd, lines.length)
   const start = end < 0 ? -1 : lastIndexWhere(lines, (l) => l === open, end)
   return start < 0 ? null : lines.slice(start + 1, end)

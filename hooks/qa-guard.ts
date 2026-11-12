@@ -758,13 +758,22 @@ function hookCallOf(input: unknown): HookCall | null {
   return typeof tool === 'string' && isRecord(toolInput) && isAbs(cwd) ? { tool, toolInput, cwd, agentId } : null
 }
 
-const mayPlanfixerRead = (real: string, state: PlanfixerCtx): boolean => !isSecretPath(real) && (isInside(real, state.dir) || isInside(real, state.cwd))
+const PLANFIXER_SECRET_DIRS = ['.git', '.ssh', '.aws', '.gnupg', '.docker', '.kube']
+const PLANFIXER_SECRET_FILE = /^(\.npmrc|\.netrc|\.pgpass|id_rsa.*|id_ed25519.*|.*\.(pem|key))$/
+// Soma ao `.env*` do isSecretPath as pastas e os arquivos de credencial; o QA segue com o isSecretPath.
+const isPlanfixerSecret = (p: string): boolean => isSecretPath(p) || p.split('/').some(seg => PLANFIXER_SECRET_DIRS.includes(seg.toLowerCase()) || PLANFIXER_SECRET_FILE.test(seg.toLowerCase()))
+
+const mayPlanfixerRead = (real: string, state: PlanfixerCtx): boolean => !isPlanfixerSecret(real) && (isInside(real, state.dir) || isInside(real, state.cwd))
+
+// A ferramenta lê a home real com `~`; resolver contra o cwd aprovaria outro arquivo.
+const planfixerPathOf = (tool: string, path: unknown): string | Decision =>
+  typeof path !== 'string' ? deny(`${tool} sem file_path em texto`) : path.startsWith('~') ? deny(`${tool} com ~ em ${path} é proibido para o corretor de plano`) : path
 
 function planfixerToolDecision(state: PlanfixerCtx, call: HookCall, fs: FsView): Decision {
   const { tool, toolInput, cwd } = call
   if (tool !== 'Edit' && tool !== 'Read') return deny(`a ferramenta ${tool} não é liberada para o corretor de plano`)
-  const path = toolInput['file_path']
-  if (typeof path !== 'string') return deny(`${tool} sem file_path em texto`)
+  const path = planfixerPathOf(tool, toolInput['file_path'])
+  if (typeof path !== 'string') return path
   const real = fs.realOf(resolveIn(path, cwd, cwd))
   if (real === null) return deny(`caminho sem resolução: ${path}`)
   const ok = (real === state.doc && !isSecretPath(real)) || (tool === 'Read' && mayPlanfixerRead(real, state))

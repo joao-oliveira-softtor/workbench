@@ -1376,6 +1376,23 @@ describe('guardDecisionOf: papel planfixer', () => {
     expect(fixer(inputOf('Read', {}))).toBe('deny')
   })
 
+  test('til na home real: Read e Edit com file_path começando em ~ negam; relativo comum segue contra o cwd', () => {
+    expect(fixer(inputOf('Read', { file_path: '~/.ssh/id_rsa' }))).toBe('deny')
+    expect(fixer(inputOf('Edit', { file_path: '~/plano.md' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: '~' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: 'src/app.ts' }))).toBe('allow')
+  })
+
+  test('Read nega credenciais dentro do cwd e da pasta de apoio; código comum libera', () => {
+    for (const p of ['.git/config', 'sub/.npmrc', 'chave.pem', 'a/.ssh/x', '.aws/credentials', '.gnupg/k', '.docker/config.json', '.kube/config', '.netrc', '.pgpass', 'id_rsa', 'id_rsa.pub', 'id_ed25519', 'x/server.key', 'A/KEY.PEM', 'id_rsa_notes']) {
+      expect(fixer(inputOf('Read', { file_path: `${PCWD}/${p}` })), p).toBe('deny')
+    }
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/.git/config` }))).toBe('deny')
+    for (const p of ['src/app.ts', 'keyboard.ts', 'monkey.md', 'git/readme.md']) {
+      expect(fixer(inputOf('Read', { file_path: `${PCWD}/${p}` })), p).toBe('allow')
+    }
+  })
+
   test('qualquer outra ferramenta nega, inclusive Write no documento', () => {
     expect(fixer(inputOf('Bash', { command: 'ls' }))).toBe('deny')
     expect(fixer(inputOf('Write', { file_path: DOC }))).toBe('deny')

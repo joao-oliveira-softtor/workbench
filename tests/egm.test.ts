@@ -38,9 +38,10 @@ describe('parseReview', () => {
   test('sem achados: só ACHADOS e o veredito', () => {
     expect(parseReview('d', 'ACHADOS\nVEREDITO: GO')).toEqual(ok())
   })
-  test('usa o ÚLTIMO veredito e o último ACHADOS antes dele', () => {
-    const text = 'ACHADOS\n- [Blocker] velho: x\nVEREDITO: NO-GO\nACHADOS\n- [Nit] novo: y\nVEREDITO: GO'
-    expect(parseReview('d', text)).toEqual(ok(f('d', 1, 'Nit', 'novo: y')))
+  test('dois blocos ou dois vereditos: incomplete (o segundo vazio não apaga o Blocker do primeiro)', () => {
+    expect(parseReview('d', 'ACHADOS\n- [Blocker] velho: x\nVEREDITO: NO-GO\nACHADOS\nVEREDITO: GO')).toEqual(INC)
+    expect(parseReview('d', 'ACHADOS\n- [Blocker] velho: x\nVEREDITO: NO-GO\nVEREDITO: GO')).toEqual(INC)
+    expect(parseReview('d', 'ACHADOS\nACHADOS\nVEREDITO: GO')).toEqual(INC)
   })
   test('sem veredito, sem ACHADOS ou ACHADOS depois do veredito: incomplete', () => {
     expect(parseReview('d', 'ACHADOS\n- [Nit] a: b')).toEqual(INC)
@@ -69,12 +70,12 @@ describe('parseFix', () => {
       fixOk(ans('design', 1, 'precisa do usuário', 'qual prazo?'), ans('zoom-out', 2, 'corrigido', 'feito')),
     )
   })
-  test('texto antes do RESPOSTAS e depois do FIM é ignorado; vale o último bloco', () => {
-    const text = 'conversa\nRESPOSTAS\n- [rejeitado] design #1: x\nFIM\nRESPOSTAS\n- [corrigido] design #1\n- [corrigido] zoom-out #2\nFIM\nlixo'
-    expect(parseFix(text, asked)).toEqual(fixOk(ans('design', 1, 'corrigido'), ans('zoom-out', 2, 'corrigido')))
-  })
-  test('null é missing', () => {
-    expect(parseFix(null, asked)).toEqual({ kind: 'missing' })
+  test('texto antes do RESPOSTAS e depois do FIM é ignorado; mais de um bloco é incomplete', () => {
+    const one = 'conversa\nRESPOSTAS\n- [corrigido] design #1\n- [corrigido] zoom-out #2\nFIM\nlixo'
+    expect(parseFix(one, asked)).toEqual(fixOk(ans('design', 1, 'corrigido'), ans('zoom-out', 2, 'corrigido')))
+    expect(parseFix(`RESPOSTAS\n- [rejeitado] design #1: x\nFIM\n${one}`, asked)).toEqual({ kind: 'incomplete' })
+    expect(parseFix('RESPOSTAS\nRESPOSTAS\n- [corrigido] design #1\n- [corrigido] zoom-out #2\nFIM', asked)).toEqual({ kind: 'incomplete' })
+    expect(parseFix('RESPOSTAS\n- [corrigido] design #1\n- [corrigido] zoom-out #2\nFIM\nFIM', asked)).toEqual({ kind: 'incomplete' })
   })
   test('incomplete: sem FIM, sem RESPOSTAS, linha ruim, falta resposta, repetida, não pedida, sem motivo', () => {
     const bad = (...l: string[]): Fix => parseFix(wrap(...l), asked)
