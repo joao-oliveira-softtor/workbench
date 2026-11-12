@@ -64,6 +64,14 @@ O botão **Retomada** resume o seu último dia de trabalho, de todos os projetos
 - O conteúdo das sessões vai para o modelo barato (Haiku), pela conta que o Claude Code estiver usando.
 - Não há tarefa agendada: o mod não captura nada sozinho, só lê o que existe no disco quando você clica.
 
+## EGM (revisão do plano)
+
+O botão **EGM** pede a revisão de um plano antes de você mandar executar. Na etapa **Revisão**, escreva o caminho do plano no campo do prompt e clique: o mod lança os cinco revisores do plugin EGM, manda um agente corrigir o plano (ele só pode editar esse arquivo), faz até 3 rodadas e mostra o progresso no próprio botão. Na conversa entra só uma linha com o veredito e o caminho do relatório. Para parar no meio, digite `/workbench egm stop`. Os arquivos ficam em `~/.claude/workbench-egm`. O plano é corrigido no lugar onde está: se ele estiver dentro de um repositório, a correção aparece ali como alteração não commitada (clicar em Revisão conta como pedido para corrigir aquele arquivo). Antes de cada correção, uma cópia do plano fica em `~/.claude/workbench-egm/<revisão>/r<rodada>/doc-antes.md`, para comparar ou voltar.
+
+Precisa do plugin EGM ligado e do Node 22.6 ou mais novo. O comando `/egm:egm-review` digitado continua valendo.
+
+No **Planejar**, quando a conversa chama o ExitPlanMode para sair do plan mode, o mod segura a saída e roda essa mesma revisão no arquivo do plano; os achados voltam para a própria conversa corrigir, e a saída só passa depois do GO. Para sair sem revisão, digite `/workbench egm stop`, que desarma.
+
 ## QA
 
 O botão **QA** testa o seu app de verdade, num navegador de teste, e corrige o que achar. Ele anda por etapas: o nome do botão diz em qual você está, e o clique seguinte aprova o que a etapa anterior mostrou.

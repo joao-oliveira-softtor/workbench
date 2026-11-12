@@ -733,6 +733,62 @@ function removerDecisionOf(input: unknown, stateText: string | null): Decision {
   return { decision: 'allow', reason: 'linha aprovada no painel do workbench' }
 }
 
+// ---- O corretor do plano (botão EGM): edita UM documento e lê só perto dele ----
+
+type PlanfixerCtx = { agentId: string | null; doc: string; dir: string; cwd: string }
+
+// Contexto gravado pelo mod antes de lançar o corretor: o plano (`doc`), a pasta de apoio (`dir`) e a pasta da sessão (`cwd`).
+export const planfixerStateTextOf = (ctx: PlanfixerCtx): string => JSON.stringify({ role: 'planfixer', agentId: ctx.agentId, doc: ctx.doc, dir: ctx.dir, cwd: ctx.cwd })
+
+const isAbs = (v: unknown): v is string => typeof v === 'string' && v.startsWith('/')
+const isAgentId = (v: unknown): v is string | null => v === null || typeof v === 'string'
+
+function planfixerStateOf(text: string | null): PlanfixerCtx | null {
+  const raw = text === null ? null : jsonOf(text)
+  if (!isRecord(raw) || raw['role'] !== 'planfixer') return null
+  const { agentId, doc, dir, cwd } = raw
+  return isAgentId(agentId) && isAbs(doc) && isAbs(dir) && isAbs(cwd) ? { agentId, doc, dir, cwd } : null
+}
+
+type HookCall = { tool: string; toolInput: Record<string, unknown>; cwd: string; agentId: unknown }
+
+function hookCallOf(input: unknown): HookCall | null {
+  if (!isRecord(input)) return null
+  const { tool_name: tool, tool_input: toolInput, cwd, agent_id: agentId } = input
+  return typeof tool === 'string' && isRecord(toolInput) && isAbs(cwd) ? { tool, toolInput, cwd, agentId } : null
+}
+
+const PLANFIXER_SECRET_DIRS = ['.git', '.ssh', '.aws', '.gnupg', '.docker', '.kube']
+const PLANFIXER_SECRET_FILE = /^(\.npmrc|\.netrc|\.pgpass|id_rsa.*|id_ed25519.*|.*\.(pem|key))$/
+// Soma ao `.env*` do isSecretPath as pastas e os arquivos de credencial; o QA segue com o isSecretPath.
+const isPlanfixerSecret = (p: string): boolean => isSecretPath(p) || p.split('/').some(seg => PLANFIXER_SECRET_DIRS.includes(seg.toLowerCase()) || PLANFIXER_SECRET_FILE.test(seg.toLowerCase()))
+
+const mayPlanfixerRead = (real: string, state: PlanfixerCtx): boolean => !isPlanfixerSecret(real) && (isInside(real, state.dir) || isInside(real, state.cwd))
+
+// A ferramenta lê a home real com `~`; resolver contra o cwd aprovaria outro arquivo.
+const planfixerPathOf = (tool: string, path: unknown): string | Decision =>
+  typeof path !== 'string' ? deny(`${tool} sem file_path em texto`) : path.startsWith('~') ? deny(`${tool} com ~ em ${path} é proibido para o corretor de plano`) : path
+
+function planfixerToolDecision(state: PlanfixerCtx, call: HookCall, fs: FsView): Decision {
+  const { tool, toolInput, cwd } = call
+  if (tool !== 'Edit' && tool !== 'Read') return deny(`a ferramenta ${tool} não é liberada para o corretor de plano`)
+  const path = planfixerPathOf(tool, toolInput['file_path'])
+  if (typeof path !== 'string') return path
+  const real = fs.realOf(resolveIn(path, cwd, cwd))
+  if (real === null) return deny(`caminho sem resolução: ${path}`)
+  const ok = (real === state.doc && !isSecretPath(real)) || (tool === 'Read' && mayPlanfixerRead(real, state))
+  return ok ? { decision: 'allow', reason: 'dentro do que o corretor de plano pode usar' } : deny(`${tool} em ${path} é proibido para o corretor de plano`)
+}
+
+function planfixerDecisionOf(input: unknown, stateText: string | null, fs: FsView): Decision {
+  const state = planfixerStateOf(stateText)
+  if (state === null) return deny('contexto do corretor de plano ausente ou inválido')
+  const call = hookCallOf(input)
+  if (call === null) return deny('entrada do hook com forma inesperada')
+  if (state.agentId !== null && state.agentId !== call.agentId) return deny('agente aposentado: o id não é o do contexto')
+  return planfixerToolDecision(state, call, fs)
+}
+
 function qaDecisionOf(role: string, input: unknown, stateText: string | null, fs: FsView): Decision {
   if (!isRole(role)) return deny(`papel desconhecido: ${role}`)
   const state = stateOf(stateText)
@@ -750,7 +806,8 @@ function qaDecisionOf(role: string, input: unknown, stateText: string | null, fs
 // Decisão estrita do hook PreToolUse: o que a trava não libera é negado. Nunca lança.
 export function guardDecisionOf(role: string, input: unknown, stateText: string | null, fs: FsView): Decision {
   try {
-    return role === 'remover' ? removerDecisionOf(input, stateText) : qaDecisionOf(role, input, stateText, fs)
+    if (role === 'remover') return removerDecisionOf(input, stateText)
+    return role === 'planfixer' ? planfixerDecisionOf(input, stateText, fs) : qaDecisionOf(role, input, stateText, fs)
   } catch (error) {
     return deny(`erro interno na trava de QA: ${error instanceof Error ? error.message : 'desconhecido'}`)
   }

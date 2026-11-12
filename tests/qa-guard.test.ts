@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bashCheckOf, guardDecisionOf, readCheckOf, removerStateTextOf, writeCheckOf } from '../hooks/qa-guard'
+import { bashCheckOf, guardDecisionOf, planfixerStateTextOf, readCheckOf, removerStateTextOf, writeCheckOf } from '../hooks/qa-guard'
 import type { FsView, GuardCtx, QaRole } from '../hooks/qa-guard'
 
 const ROLES: QaRole[] = ['runner', 'observer', 'fixer']
@@ -1331,6 +1331,108 @@ describe('guardDecisionOf: papel remover', () => {
 
   test('o contexto de um agente de QA não serve ao remover, e o do remover não serve a um agente de QA', () => {
     expect(guardDecisionOf('runner', inputOf('Bash', { command: LINES[2] }), ctx, SAME_FS).decision).toBe('deny')
+  })
+})
+
+// O corretor do plano (botão EGM): o hook roda com o papel `planfixer` e só libera editar o documento do plano e ler perto dele.
+describe('guardDecisionOf: papel planfixer', () => {
+  const DOC = '/home/u/plans/p1.md'
+  const DIR = '/home/u/plans/ctx'
+  const PCWD = '/home/u/app'
+  const ctx = planfixerStateTextOf({ agentId: null, doc: DOC, dir: DIR, cwd: PCWD })
+  const inputOf = (tool_name: string, tool_input: unknown, agent_id = 'p1') => ({ agent_id, agent_type: 'workbench:egm-fixer', cwd: PCWD, tool_name, tool_input })
+  const fixer = (input: unknown, text: string | null = ctx, fs: FsView = SAME_FS) => guardDecisionOf('planfixer', input, text, fs).decision
+
+  test('o contexto é JSON com papel, agente, documento, pasta e cwd, nessa ordem', () => {
+    expect(ctx).toBe(JSON.stringify({ role: 'planfixer', agentId: null, doc: DOC, dir: DIR, cwd: PCWD }))
+  })
+
+  test('Edit no documento libera; em outro arquivo, nega; caminho relativo se resolve contra o cwd da entrada', () => {
+    expect(fixer(inputOf('Edit', { file_path: DOC }))).toBe('allow')
+    expect(fixer(inputOf('Edit', { file_path: '/home/u/plans/outro.md' }))).toBe('deny')
+    expect(fixer(inputOf('Edit', { file_path: 'x.md' }))).toBe('deny')
+    expect(fixer({ ...inputOf('Edit', { file_path: 'p1.md' }), cwd: '/home/u/plans' })).toBe('allow')
+    expect(fixer(inputOf('Edit', {}))).toBe('deny')
+  })
+
+  test('Edit por link simbólico que aponta para o documento libera; link para outro arquivo nega', () => {
+    const fs: FsView = { realOf: p => (p === '/home/u/app/link.md' ? DOC : p === '/home/u/plans/p1-link.md' ? '/home/u/seg.md' : p), isFile: () => true }
+    expect(fixer(inputOf('Edit', { file_path: '/home/u/app/link.md' }), ctx, fs)).toBe('allow')
+    expect(fixer(inputOf('Edit', { file_path: '/home/u/plans/p1-link.md' }), ctx, fs)).toBe('deny')
+    expect(fixer(inputOf('Edit', { file_path: DOC }), ctx, { realOf: () => null, isFile: () => true })).toBe('deny')
+  })
+
+  test('Read libera o documento, a pasta de apoio e o cwd do contexto; fora deles, ou inexistente, nega', () => {
+    expect(fixer(inputOf('Read', { file_path: DOC }))).toBe('allow')
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/a/b.md` }))).toBe('allow')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/src/a.ts` }))).toBe('allow')
+    expect(fixer(inputOf('Read', { file_path: '/home/u/.ssh/id' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/.env` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/sub/.env.local` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/.env` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/sub/env.ts` }))).toBe('allow')
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/a.md` }), ctx, { realOf: () => null, isFile: () => true })).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/../x` }))).toBe('deny')
+    expect(fixer(inputOf('Read', {}))).toBe('deny')
+  })
+
+  test('til na home real: Read e Edit com file_path começando em ~ negam; relativo comum segue contra o cwd', () => {
+    expect(fixer(inputOf('Read', { file_path: '~/.ssh/id_rsa' }))).toBe('deny')
+    expect(fixer(inputOf('Edit', { file_path: '~/plano.md' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: '~' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: 'src/app.ts' }))).toBe('allow')
+  })
+
+  test('Read nega credenciais dentro do cwd e da pasta de apoio; código comum libera', () => {
+    for (const p of ['.git/config', 'sub/.npmrc', 'chave.pem', 'a/.ssh/x', '.aws/credentials', '.gnupg/k', '.docker/config.json', '.kube/config', '.netrc', '.pgpass', 'id_rsa', 'id_rsa.pub', 'id_ed25519', 'x/server.key', 'A/KEY.PEM', 'id_rsa_notes']) {
+      expect(fixer(inputOf('Read', { file_path: `${PCWD}/${p}` })), p).toBe('deny')
+    }
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/.git/config` }))).toBe('deny')
+    for (const p of ['src/app.ts', 'keyboard.ts', 'monkey.md', 'git/readme.md']) {
+      expect(fixer(inputOf('Read', { file_path: `${PCWD}/${p}` })), p).toBe('allow')
+    }
+  })
+
+  test('qualquer outra ferramenta nega, inclusive Write no documento', () => {
+    expect(fixer(inputOf('Bash', { command: 'ls' }))).toBe('deny')
+    expect(fixer(inputOf('Write', { file_path: DOC }))).toBe('deny')
+    expect(fixer(inputOf('MultiEdit', { file_path: DOC }))).toBe('deny')
+    expect(fixer(inputOf('Grep', { pattern: 'x' }))).toBe('deny')
+  })
+
+  test('com id no contexto, nega outro agente; sem id (null), aceita qualquer um', () => {
+    const withId = planfixerStateTextOf({ agentId: 'p1', doc: DOC, dir: DIR, cwd: PCWD })
+    expect(fixer(inputOf('Edit', { file_path: DOC }), withId)).toBe('allow')
+    expect(fixer(inputOf('Edit', { file_path: DOC }, 'p2'), withId)).toBe('deny')
+    expect(fixer(inputOf('Edit', { file_path: DOC }, 'qualquer'))).toBe('allow')
+  })
+
+  test('nega contexto ausente, {}, inválido, de outro papel ou com caminho não absoluto; e entrada sem forma', () => {
+    const edit = inputOf('Edit', { file_path: DOC })
+    expect(fixer(edit, null)).toBe('deny')
+    expect(fixer(edit, '{}')).toBe('deny')
+    expect(fixer(edit, '{')).toBe('deny')
+    expect(fixer(edit, JSON.stringify({ role: 'remover', agentId: null, doc: DOC, dir: DIR, cwd: PCWD }))).toBe('deny')
+    expect(fixer(edit, JSON.stringify({ role: 'planfixer', agentId: 7, doc: DOC, dir: DIR, cwd: PCWD }))).toBe('deny')
+    for (const bad of [{ doc: 'p1.md' }, { dir: 'ctx' }, { cwd: 'app' }, { doc: 7 }]) {
+      expect(fixer(edit, JSON.stringify({ role: 'planfixer', agentId: null, doc: DOC, dir: DIR, cwd: PCWD, ...bad }))).toBe('deny')
+    }
+    expect(fixer(null)).toBe('deny')
+    expect(fixer({ tool_name: 7, tool_input: {} })).toBe('deny')
+    expect(fixer({ tool_name: 'Edit', tool_input: 'x' })).toBe('deny')
+  })
+
+  test('entrada sem forma é recusada pela forma, nunca por acaso da ferramenta', () => {
+    const why = (input: unknown) => guardDecisionOf('planfixer', input, ctx, SAME_FS).reason
+    const SHAPE = 'entrada do hook com forma inesperada'
+    expect(why({ tool_name: 5, tool_input: {}, cwd: PCWD })).toBe(SHAPE)
+    expect(why({ tool_name: 'Edit', tool_input: 'x', cwd: 'rel' })).toBe(SHAPE)
+    expect(why({ tool_name: 'Edit', tool_input: {}, cwd: 'rel' })).toBe(SHAPE)
+  })
+
+  test('o documento do plano que se chama .env* também é negado', () => {
+    const envCtx = planfixerStateTextOf({ agentId: null, doc: `${PCWD}/.env`, dir: DIR, cwd: PCWD })
+    expect(fixer(inputOf('Edit', { file_path: `${PCWD}/.env` }), envCtx)).toBe('deny')
   })
 })
 

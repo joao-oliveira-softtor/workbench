@@ -66,7 +66,7 @@ export type QaEnv = { home: string; root: string; qaRoot: string; guardFile: str
 
 // `tokenOf`: o código do arquivo da trava (um por processo, guardado no estado da sessão).
 export async function qaEnvOf($: EngineInterface, tokenOf: () => Promise<string>): Promise<QaEnv | null> {
-  const home = nonEmpty(await settle(() => $.env.get('HOME'))) ?? nonEmpty(await settle(() => $.env.get('USERPROFILE')))
+  const home = await homeOf($)
   const found = await repoRoot($)
   if (home === undefined || found === null) return null
   // O hook da trava resolve links simbólicos: o contexto guarda o caminho real, senão o hook nega tudo. Falhou: fica o lido.
@@ -84,7 +84,11 @@ export async function liveQaIdsOf($: EngineInterface): Promise<string[]> {
   return listed.ok ? listed.value.filter(a => types.includes(a.type) && !ENDED.has(a.status)).map(a => a.id) : []
 }
 
-// O validate só aceita `$.env.get` com o nome literal, então a leitura fica no chamador.
+// A pasta do usuário: HOME, senão USERPROFILE. O validate só aceita `$.env.get` com o nome literal.
+export async function homeOf($: EngineInterface): Promise<string | undefined> {
+  return nonEmpty(await settle(() => $.env.get('HOME'))) ?? nonEmpty(await settle(() => $.env.get('USERPROFILE')))
+}
+
 const nonEmpty = (got: Settled<string | undefined>): string | undefined => (got.ok && got.value !== '' ? got.value : undefined)
 
 // Devolve o motivo quando os tipos travados não puderam ser registrados; null = tudo registrado.
@@ -119,7 +123,7 @@ export async function exists($: EngineInterface, path: string): Promise<boolean>
   return found.ok && found.value
 }
 
-async function readText($: EngineInterface, path: string): Promise<string | null> {
+export async function readText($: EngineInterface, path: string): Promise<string | null> {
   const read = await settle(() => $.fs.read(path))
   return read.ok && typeof read.value === 'string' ? read.value : null
 }
@@ -127,7 +131,7 @@ async function readText($: EngineInterface, path: string): Promise<string | null
 // Processo sem shell; qualquer falha (rejeição ou saída diferente de 0) vira null.
 type EnvRun = { argv: string[]; env: Record<string, string> }
 
-async function run($: EngineInterface, cmd: string[] | EnvRun, cwd?: string): Promise<string | null> {
+export async function run($: EngineInterface, cmd: string[] | EnvRun, cwd?: string): Promise<string | null> {
   const { argv, env } = Array.isArray(cmd) ? { argv: cmd, env: undefined } : cmd
   const ran = await settle(() => $.process.run(argv, { ...(cwd === undefined ? {} : { cwd }), ...(env === undefined ? {} : { env }) }))
   return ran.ok && ran.value.exitCode === 0 ? ran.value.stdout : null
@@ -290,7 +294,11 @@ function probeFileOf(role: QaRole, runDir: string, fixDir: string): string {
 
 // `{ deny }` volta como texto; uma rejeição não prova que o agente não nasceu (agentId null: o timer adota ou encerra).
 export async function spawnQa($: EngineInterface, role: QaRole, prompt: string, description: string): Promise<{ agentId: string | null } | { deny: string }> {
-  const spawned = await settle(() => $.agent.spawn({ subagentType: QA_TYPE[role], prompt, description }))
+  return spawnAgent($, QA_TYPE[role], prompt, description)
+}
+
+export async function spawnAgent($: EngineInterface, subagentType: string, prompt: string, description: string): Promise<{ agentId: string | null } | { deny: string }> {
+  const spawned = await settle(() => $.agent.spawn({ subagentType, prompt, description }))
   if (!spawned.ok) return { agentId: null }
   if (spawned.value.deny !== undefined) return { deny: spawned.value.deny }
   return { agentId: spawned.value.agentId ?? null }

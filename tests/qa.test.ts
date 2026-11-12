@@ -20,6 +20,7 @@ import {
   abWrapperTextOf,
   afterJudgeOf,
   agentStepOf,
+  qaTimeoutOf,
   authEnvOf,
   authFileOf,
   binOf,
@@ -260,8 +261,9 @@ describe('afterJudgeOf', () => {
 
 describe('agentStepOf', () => {
   const T = 1_000_000
-  const cur = (over: Partial<{ role: QaRole; agentId: string | null; at: number; isEnded: boolean }> = {}) => ({
-    role: 'runner' as QaRole,
+  // O papel do QA vira o prazo dele (`qaTimeoutOf`), como no register.
+  const cur = ({ role = 'runner', ...over }: Partial<{ role: QaRole; agentId: string | null; at: number; isEnded: boolean }> = {}) => ({
+    timeoutMs: qaTimeoutOf(role),
     agentId: null as string | null,
     at: T,
     isEnded: false,
@@ -477,6 +479,7 @@ describe('guardStateTextOf e hookCommandOf', () => {
   test('o comando do hook chama o node com o papel e o arquivo, e barra se o node falhar', () => {
     expect(hookCommandOf('/p/workbench', 'runner', '/q/guard-t.json')).toBe('node --no-warnings --experimental-strip-types "/p/workbench/hooks/qa-hook.mjs" runner "/q/guard-t.json" || exit 2')
     expect(hookCommandOf('/p', 'fixer', '/q/g.json')).toContain(' fixer ')
+    expect(hookCommandOf('/p', 'planfixer', '/q/g.json')).toContain(' planfixer "/q/g.json"')
   })
 
   test('caminho com aspas duplas, cifrão, crase, barra invertida ou quebra de linha não vira comando', () => {

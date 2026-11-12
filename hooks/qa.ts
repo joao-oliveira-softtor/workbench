@@ -146,10 +146,13 @@ export function afterJudgeOf(attempt: number, accepted: boolean): 'corrigido' | 
 
 export type AgentStep = { step: 'wait' } | { step: 'adopt'; agentId: string } | { step: 'ended' }
 
-// Mesma lógica do `removalStepOf`, mais o tempo limite de runner e observer (o fixer nunca é abandonado por tempo).
-// `known`: ids de QA já conhecidos; um agente vivo deles (p. ex. abandonado por tempo) nunca é adotado como o do item novo.
+// O prazo de cada papel do QA: o fixer nunca é abandonado por tempo.
+export const qaTimeoutOf = (role: QaRole): number | null => (role === 'fixer' ? null : AGENT_TIMEOUT_MS)
+
+// Mesma lógica do `removalStepOf`, mais o prazo (`timeoutMs` null: sem prazo).
+// `known`: ids já conhecidos; um agente vivo deles (p. ex. abandonado por tempo) nunca é adotado como o do item novo.
 export function agentStepOf(
-  current: { role: QaRole; agentId: string | null; at: number; isEnded: boolean },
+  current: { timeoutMs: number | null; agentId: string | null; at: number; isEnded: boolean },
   type: string,
   listed: readonly Listed[] | null,
   now: number,
@@ -157,7 +160,7 @@ export function agentStepOf(
 ): AgentStep {
   if (current.isEnded) return { step: 'ended' }
   // O tempo limite não depende da lista: uma consulta que falha não pode prender um agente travado.
-  if (current.role !== 'fixer' && now - current.at >= AGENT_TIMEOUT_MS) return { step: 'ended' }
+  if (current.timeoutMs !== null && now - current.at >= current.timeoutMs) return { step: 'ended' }
   if (listed === null) return { step: 'wait' }
   if (current.agentId !== null) {
     const agent = listed.find(a => a.id === current.agentId)
@@ -174,7 +177,7 @@ export function agentStepOf(
 export const qaHomeOf = (home: string): string => `${home}/.claude/workbench-qa`
 
 // FNV-1a de 32 bits: no caminho, dois projetos de mesmo nome em pastas diferentes não dividem a raiz.
-function hashOf(text: string): string {
+export function hashOf(text: string): string {
   let h = 0x811c9dc5
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193)
   return (h >>> 0).toString(16).padStart(8, '0')
@@ -284,7 +287,7 @@ export function impWrapperTextOf(o: { bin: string }): string {
 export const guardStateTextOf = (role: QaRole, agentId: string | null, ctx: GuardCtx): string => JSON.stringify({ role, agentId, ctx })
 
 // O comando fica entre aspas duplas no shell: aspas, `$`, crase, `\` e quebra de linha não entram.
-export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover', guardFile: string): string | null {
+export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover' | 'planfixer', guardFile: string): string | null {
   if ([pluginRoot, guardFile].some(p => /["$`\\\r\n]/.test(p))) return null
   // O `|| exit 2` é o que barra a ferramenta quando o node falha. `--experimental-strip-types`: sem ela o Node 22.6 a 22.x não
   // importa o qa-guard.ts ("Unknown file extension .ts") e todo agente fica sem ferramentas; nas versões novas ela já vem ligada.
@@ -305,7 +308,7 @@ const ANSWER = 'Quem lê o resultado é o mod, nos arquivos: a resposta final é
 const promptOf = (role: string, skill: string): string =>
   [`Você é o ${role} do QA do workbench.`, `A skill ${skill} já está carregada: ela é o seu procedimento.`, 'Os valores do trabalho vêm no pedido.', ANSWER].join('\n')
 
-const hooksOf = (command: string): AgentSpec['hooks'] => ({ PreToolUse: [{ matcher: 'Bash|Write|Edit|Read', hooks: [{ type: 'command', command }] }] })
+export const hooksOf = (command: string): AgentSpec['hooks'] => ({ PreToolUse: [{ matcher: 'Bash|Write|Edit|Read', hooks: [{ type: 'command', command }] }] })
 
 export function qaAgentsOf(hook: (role: QaRole) => string): AgentSpec[] {
   return [
