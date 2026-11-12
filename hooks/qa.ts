@@ -146,10 +146,13 @@ export function afterJudgeOf(attempt: number, accepted: boolean): 'corrigido' | 
 
 export type AgentStep = { step: 'wait' } | { step: 'adopt'; agentId: string } | { step: 'ended' }
 
-// Mesma lógica do `removalStepOf`, mais o tempo limite de runner e observer (o fixer nunca é abandonado por tempo).
-// `known`: ids de QA já conhecidos; um agente vivo deles (p. ex. abandonado por tempo) nunca é adotado como o do item novo.
+// O prazo de cada papel do QA: o fixer nunca é abandonado por tempo.
+export const qaTimeoutOf = (role: QaRole): number | null => (role === 'fixer' ? null : AGENT_TIMEOUT_MS)
+
+// Mesma lógica do `removalStepOf`, mais o prazo (`timeoutMs` null: sem prazo).
+// `known`: ids já conhecidos; um agente vivo deles (p. ex. abandonado por tempo) nunca é adotado como o do item novo.
 export function agentStepOf(
-  current: { role: QaRole; agentId: string | null; at: number; isEnded: boolean },
+  current: { timeoutMs: number | null; agentId: string | null; at: number; isEnded: boolean },
   type: string,
   listed: readonly Listed[] | null,
   now: number,
@@ -157,7 +160,7 @@ export function agentStepOf(
 ): AgentStep {
   if (current.isEnded) return { step: 'ended' }
   // O tempo limite não depende da lista: uma consulta que falha não pode prender um agente travado.
-  if (current.role !== 'fixer' && now - current.at >= AGENT_TIMEOUT_MS) return { step: 'ended' }
+  if (current.timeoutMs !== null && now - current.at >= current.timeoutMs) return { step: 'ended' }
   if (listed === null) return { step: 'wait' }
   if (current.agentId !== null) {
     const agent = listed.find(a => a.id === current.agentId)

@@ -102,6 +102,19 @@ declare module 'claude-code' {
       compactingAt: number | null
       // Planejar: etapa que o botão mostra e o doc revisado pelo /egm:egm-review (vazio fora do Executar).
       planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string; report: string }
+      // EGM: a revisão em curso, comandada pelo mod (a forma repete a de `EgmJob` do hooks/egm.ts; o tsc confere). Não zera
+      // no session.start: a recarga continua de onde parou.
+      egmJob: {
+        doc: string
+        dir: string
+        round: 1 | 2 | 3
+        phase: 'review' | 'fix'
+        mark: string
+        slots: { name: string; type: string; agentId: string | null; at: number; hasAnswer: boolean }[]
+        todo: string[]
+      } | null
+      // EGM: os ids dos agentes lançados pela revisão (os 200 mais recentes); o aviso de fim deles sai da conversa.
+      egmAgents: string[]
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.
       refining: boolean
       // Resumo do dia (botão "Retomada"): etapa que o botão mostra; null = parado. A trava de verdade é variável do módulo.

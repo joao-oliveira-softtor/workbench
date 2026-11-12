@@ -119,6 +119,19 @@ describe('botão EGM na faixa', () => {
     expect(await labelOf(ui)).toBe('EGM: Executar')
   })
 
+  test('na Revisão o clique não escreve o comando: a revisão roda pelo mod, e campo sem caminho só avisa', async ($, on) => {
+    on('agent.list', () => ({ value: [] }))
+    const t = await boot($, on)
+    const ui = await $.ui.mount(BAND)
+    await typeCommand($, 'egm:egm-brainstorm', 'x')
+    await typeCommand($, 'egm:egm-draft')
+    await ui.press({ key: 'plan' })
+    await tick(t)
+    expect(t.log.fills).toEqual([])
+    expect(t.log.toasts.at(-1)).toBe('EGM: escreva o caminho do plano no campo e clique em Revisão')
+    expect(await labelOf(ui)).toBe('EGM: Revisão')
+  })
+
   test('comando de fora do fluxo não muda a etapa', async ($, on) => {
     await boot($, on)
     const ui = await $.ui.mount(BAND)

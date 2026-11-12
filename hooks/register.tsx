@@ -23,7 +23,6 @@ import {
 import type { Analysis, Phase, RunningAgent, Step } from './compact'
 import {
   EGM_COMMANDS,
-  PLAN_LABELS,
   PLAN_START,
   executePromptOf,
   fillTextOf,
@@ -31,8 +30,12 @@ import {
   planAfter,
   planPromptOf,
   refineInputOf,
+  reportPathOf as planReportOf,
   typedIntentOf,
 } from './plan'
+import { EGM_FIXER, egmLabelOf } from './egm'
+import { executeOkOf, registerEgm, saveAnswer, startReview, stepEgm, stopEgm } from './egm-flow'
+import type { EgmEnv } from './egm-flow'
 import type { PlanStep, Refined } from './plan'
 import {
   NODE_MIN,
@@ -61,6 +64,7 @@ import {
   qaLabelOf,
   qaLoginPromptOf,
   qaPlanPromptOf,
+  qaTimeoutOf,
   retestDirOf,
   runDirOf,
   runDonePromptOf,
@@ -107,6 +111,7 @@ import {
   exists,
   guardCtxOf,
   guardRefusalOf,
+  homeOf,
   isNodeReady,
   liveQaIdsOf,
   loadMatrix,
@@ -202,7 +207,10 @@ const removal = atom({ plugin: 'workbench', key: 'removal' } as const, null)
 const compacting = atom({ plugin: 'workbench', key: 'compacting' } as const, null)
 const compactingAt = atom({ plugin: 'workbench', key: 'compactingAt' } as const, null)
 // Etapa do botão EGM e o doc revisado. Não zera no session.start: ele roda também a cada recarga do mod.
+// O validate só lê átomos declarados no próprio arquivo: estes três repetem as chaves do egm-flow.ts (mesmo estado).
 const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_START)
+const egmJob = atom({ plugin: 'workbench', key: 'egmJob' } as const, null)
+const egmAgents = atom({ plugin: 'workbench', key: 'egmAgents' } as const, [])
 const refining = atom({ plugin: 'workbench', key: 'refining' } as const, false)
 const resuming = atom({ plugin: 'workbench', key: 'resuming' } as const, null)
 // QA: nenhum destes zera no session.start (é o que permite retomar e o que mantém suprimidos os agentes já lançados).
@@ -242,6 +250,9 @@ let humanSinceAutoResume = true
 let hasSeenMainTurn = false
 // EGM: o clique só enfileira a etapa (o dispatch de um botão pode ser abandonado); o drainPlan faz o trabalho no timer.
 let planQueued: PlanStep | null = null
+// EGM, revisão pelo mod: a trava do passo do timer (o clique Revisão também a pega) e o ambiente (HOME, arquivo da trava).
+let isEgmStepping = false
+let egmEnv: EgmEnv | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
 let refinePhase: Phase = 'idle'
 // Resumo do dia (botão "Retomada"): a trava é `resumePhase`, como o `refinePhase`; `resuming` em $.state é só o rótulo.
@@ -850,21 +861,12 @@ async function drainCompact($: EngineInterface): Promise<void> {
 // porque as skills dele não rodam por chamada do modelo.
 async function runPlan($: EngineInterface, step: PlanStep): Promise<void> {
   switch (step) {
-    case 'execute': {
-      const flow = await read($, planFlow)
-      // Volta ao começo antes de enviar: o envio pode durar o turno inteiro, e um segundo clique não pode executar de novo.
-      await update($, planFlow, () => PLAN_START)
-      try {
-        await $.prompt.submit({ text: executePromptOf(flow.doc) })
-      } catch (err) {
-        await update($, planFlow, () => flow)
-        throw err
-      }
-      return
-    }
+    case 'execute':
+      return runExecute($)
+    case 'review':
+      return runReview($)
     case 'brainstorm':
-    case 'draft':
-    case 'review': {
+    case 'draft': {
       const box = await $.prompt.read()
       const filled = await $.prompt.fill({ text: fillTextOf(step, box.text) })
       if (!filled.isFilled) $.ui.toast(`Não deu para escrever no campo de prompt (há um diálogo aberto?): digite /${EGM_COMMANDS[step]}`)
@@ -872,6 +874,55 @@ async function runPlan($: EngineInterface, step: PlanStep): Promise<void> {
     }
     default:
       throw new Error('Caso não tratado: ' + String(step satisfies never))
+  }
+}
+
+async function runExecute($: EngineInterface): Promise<void> {
+  const flow = await read($, planFlow)
+  const report = planReportOf(flow)
+  // Revisão feita pelo mod: só executa se o relatório disser GO para este doc, com a marca de agora.
+  if (report !== '' && !(await executeOkOf($, flow))) {
+    await update($, planFlow, () => ({ step: 'review', doc: flow.doc, report: '' }))
+    $.ui.toast('EGM: o plano mudou depois da revisão (ou o relatório sumiu); clique em Revisão de novo')
+    return
+  }
+  // Volta ao começo antes de enviar: o envio pode durar o turno inteiro, e um segundo clique não pode executar de novo.
+  await update($, planFlow, () => PLAN_START)
+  try {
+    await $.prompt.submit({ text: executePromptOf(flow.doc, report) })
+  } catch (err) {
+    await update($, planFlow, () => flow)
+    throw err
+  }
+}
+
+// A revisão roda pelo mod: o clique pega a trava do passo do timer; ocupada, volta para a fila e roda no tique seguinte.
+async function runReview($: EngineInterface): Promise<void> {
+  if (isEgmStepping) {
+    planQueued = 'review'
+    return
+  }
+  isEgmStepping = true
+  try {
+    const refused = await startReview($, egmEnv)
+    if (refused !== null) $.ui.toast(refused)
+  } finally {
+    isEgmStepping = false
+  }
+}
+
+// Um passo da revisão por tique, sob a mesma trava do clique.
+async function drainEgm($: EngineInterface): Promise<void> {
+  const env = egmEnv
+  if (isEgmStepping || env === null) return
+  isEgmStepping = true
+  try {
+    const text = await stepEgm($, env)
+    if (text !== null) await notice($, text)
+  } catch (err) {
+    $.ui.toast(`EGM: passo falhou (${errorText(err)})`)
+  } finally {
+    isEgmStepping = false
   }
 }
 
@@ -978,7 +1029,7 @@ async function claudeDirOf($: EngineInterface): Promise<string | null> {
   const set = (got: Settled<string | undefined>): string | undefined => (got.ok && got.value !== '' ? got.value : undefined)
   const config = set(await settle(() => $.env.get('CLAUDE_CONFIG_DIR')))
   if (config !== undefined) return config
-  const home = set(await settle(() => $.env.get('HOME'))) ?? set(await settle(() => $.env.get('USERPROFILE')))
+  const home = await homeOf($)
   return home === undefined ? null : `${home}/.claude`
 }
 
@@ -1507,7 +1558,7 @@ async function adoptAgent($: EngineInterface, env: QaEnv, ctx: GuardCtx, c: QaCu
 
 // O item em curso: espera, adota o agente sem id (trava e qaGuarded), ou avança quando o agente acabou.
 async function stepCurrent($: EngineInterface, env: QaEnv, runDir: string, matrix: Matrix, c: QaCurrent): Promise<void> {
-  const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
+  const step = agentStepOf({ ...c, timeoutMs: qaTimeoutOf(c.role) }, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
       return
@@ -1571,7 +1622,7 @@ async function stepFix($: EngineInterface, f: FixCtx, job: QaJob): Promise<void>
     const reason = 'o app não subiu pela worktree'
     return setFixCurrent($, f, c.role === 'fixer' ? await unverifiedFix($, f, c, reason) : await finishDefect($, f, c, 'não reverificado', [reason], []), c)
   }
-  const step = agentStepOf(c, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
+  const step = agentStepOf({ ...c, timeoutMs: qaTimeoutOf(c.role) }, QA_TYPE[c.role], await agentsOf($), await $.clock.now(), await read($, qaGuarded))
   switch (step.step) {
     case 'wait':
       return
@@ -1983,6 +2034,8 @@ export const register: Register = on => {
     humanSinceAutoResume = true
     hasSeenMainTurn = false
     planQueued = null
+    isEgmStepping = false
+    egmEnv = null
     refinePhase = 'idle'
     resumePhase = 'idle'
     resumeSent = false
@@ -2007,13 +2060,16 @@ export const register: Register = on => {
       const registered = await settle(() => registerQa($, ready, $.plugin.root))
       qaBlocked = registered.ok ? registered.value : `QA: falha ao registrar os agentes (${registered.error.slice(0, 80)})`
     }
+    // A revisão EGM não depende de repositório git (o QA sim): registro próprio, que falha sem derrubar o painel.
+    const egm = await settle(() => registerEgm($, () => guardTokenOf($), $.plugin.root))
+    egmEnv = egm.ok ? egm.value : null
     const delegate = await settle(() => $.store.get(ROUTE_DELEGATE_KEY))
     isDelegateOn = delegate.ok && delegate.value === true
     await $.command.register({
       name: 'workbench',
       description:
-        'Painel das worktrees em voo. `/workbench base <ref>` troca a base; `/workbench stale` pede a sugestão de limpeza; `/workbench qa` faz o mesmo que o botão QA; `/workbench qa stop` para o QA em curso.',
-      argumentHint: '[base <ref> | stale | qa [stop]]',
+        'Painel das worktrees em voo. `/workbench base <ref>` troca a base; `/workbench stale` pede a sugestão de limpeza; `/workbench qa` faz o mesmo que o botão QA; `/workbench qa stop` para o QA em curso; `/workbench egm stop` para a revisão EGM em curso.',
+      argumentHint: '[base <ref> | stale | qa [stop] | egm stop]',
     })
     await $.command.register({
       name: 'route',
@@ -2050,6 +2106,7 @@ export const register: Register = on => {
       void drainCompact($).catch(() => {})
       void drainAutoResume($).catch(() => {})
       void drainPlan($).catch(() => {})
+      void drainEgm($).catch(() => {})
       void drainRefine($).catch(() => {})
       void drainResume($).catch(() => {})
       void drainQa($).catch(() => {})
@@ -2078,6 +2135,7 @@ export const register: Register = on => {
     // Os dois cliques do Corrigir só confirmam se quem pede é a pessoa: o modelo (ou outra fonte) não roda nem para o QA.
     if ((args === 'qa' || args === 'qa stop') && !isQaOrigin(e.origin.kind)) return { text: 'QA: só o usuário pode rodar ou parar o QA (digitando o comando ou pelo botão QA).' }
     if (args === 'qa stop') return { text: await stopQa($) }
+    if (args === 'egm stop') return { text: isQaOrigin(e.origin.kind) ? await stopEgm($, egmEnv) : 'EGM: só o usuário pode parar a revisão.' }
     if (args === 'qa') return { text: (await pressQa($)) ?? 'QA: a etapa atual roda em segundo plano (veja o botão QA).' }
     await openPanel($)
     return { text: 'Painel do workbench aberto.' }
@@ -2110,6 +2168,7 @@ export const register: Register = on => {
       // O aviso de fim de um agente de QA: quem lê o resultado é o mod, nos arquivos. Nenhum outro texto é derrubado.
       const handback = e.isMeta === true ? handbackAgentOf(e.text) : null
       if (handback !== null && (await read($, qaGuarded)).includes(handback)) return { drop: 'workbench: o relatório do agente de QA é lido pelo mod' }
+      if (handback !== null && (await read($, egmAgents)).includes(handback)) return { drop: 'workbench: a resposta do agente da revisão EGM é lida pelo mod' }
       // Um comando do EGM que entrou avança a etapa do botão EGM (e guarda o doc no review). Nunca segura o prompt.
       const flow = e.command === undefined ? null : planAfter(e.command)
       if (flow !== null) void update($, planFlow, () => flow).catch(() => {})
@@ -2139,6 +2198,8 @@ export const register: Register = on => {
   on('agent.offer', { agent: QA_RUNNER }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
   on('agent.offer', { agent: QA_OBSERVER }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
   on('agent.offer', { agent: QA_FIXER }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
+  // O corretor da revisão EGM: só o mod o lança.
+  on('agent.offer', { agent: EGM_FIXER }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
 
   // A ferramenta qa_auth (o Login a chama): só as contagens do login salvo de um perfil da matriz atual. Sem filtro por
   // nome no `on` e com o evento lido como `unknown`: a união dos tipos das ferramentas MCP estoura a memória do tsc.
@@ -2195,6 +2256,8 @@ export const register: Register = on => {
       resumeWatch = null
       if (e.reason !== 'answer') await notice($, resumeFailureOf(e.reason))
     }
+    // A resposta de um agente da revisão EGM vai para o arquivo; quem decide é o timer.
+    if (e.agentId !== undefined) await settle(() => saveAnswer($, e.agentId ?? '', e.answer))
     // Só marca o fim do agente do item de QA em curso: quem avança é o timer.
     const agentId = e.agentId
     if (agentId !== undefined && (await read($, qaJob))?.current?.agentId === agentId) {
@@ -2230,7 +2293,7 @@ export const register: Register = on => {
           {(await read($, refining)) ? 'Refinando…' : 'Planejar'}
         </Button>
         <Button key="plan" plain onPress={() => void pressPlan($).catch(() => {})}>
-          {PLAN_LABELS[(await read($, planFlow)).step]}
+          {egmLabelOf(await read($, planFlow), await read($, egmJob))}
         </Button>
         <Button key="qa" plain onPress={() => void pressQa($).then(text => text !== null && $.ui.toast(text)).catch(() => {})}>
           {qaLabelOf(await read($, qaFlow), await read($, qaJob))}

@@ -20,6 +20,7 @@ import {
   abWrapperTextOf,
   afterJudgeOf,
   agentStepOf,
+  qaTimeoutOf,
   authEnvOf,
   authFileOf,
   binOf,
@@ -260,8 +261,9 @@ describe('afterJudgeOf', () => {
 
 describe('agentStepOf', () => {
   const T = 1_000_000
-  const cur = (over: Partial<{ role: QaRole; agentId: string | null; at: number; isEnded: boolean }> = {}) => ({
-    role: 'runner' as QaRole,
+  // O papel do QA vira o prazo dele (`qaTimeoutOf`), como no register.
+  const cur = ({ role = 'runner', ...over }: Partial<{ role: QaRole; agentId: string | null; at: number; isEnded: boolean }> = {}) => ({
+    timeoutMs: qaTimeoutOf(role),
     agentId: null as string | null,
     at: T,
     isEnded: false,
