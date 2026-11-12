@@ -80,7 +80,7 @@ export const EXECUTION_STEPS = (target: string): string[] => [
   'Local de trabalho: prepare ou confira a worktree pela `superpowers:using-git-worktrees` (nunca o checkout principal nem a branch principal) e rode tudo dentro dela.',
   `Setup do SDD primeiro: carregue \`superpowers:subagent-driven-development\` e faça o setup dele com o ${target} como plano (sdd-workspace, progress.md), para que o registro de progresso e os pacotes de revisão (task-brief, review-package) existam também para as tarefas do lote paralelo e nenhuma seja refeita depois de uma compactação.`,
   `Quebre a seção de implementação do ${target} em tarefas, seguindo a ub-mode e o Ponytail. Não redesenhe: divergência e motivo vão anotados no relatório final.`,
-  'Lote paralelo: as tarefas sem dependência entre si e sem arquivo em comum vão por `superpowers:dispatching-parallel-agents`, um subagente por tarefa. Esses implementadores não fazem commit, não usam `git stash` (desfaria as edições dos outros) e rodam só os testes da própria tarefa. Ao final do lote, você roda a suíte inteira, faz um commit por tarefa só com os arquivos dela (`git add <caminhos da tarefa>`), roda em cada uma o revisor de tarefa do SDD (task-reviewer-prompt.md) e grava `Task N: complete` no progress.md. É uma exceção declarada à regra do SDD de não despachar vários implementadores em paralelo.',
+  'Lote paralelo (obrigatório quando houver duas ou mais tarefas sem dependência entre si e sem arquivo em comum): antes de despachar, carregue a skill `superpowers:dispatching-parallel-agents` pela ferramenta Skill e lance um subagente por tarefa, todos numa mensagem só; tarefa do lote nunca vai para a fila. Esses implementadores não fazem commit, não usam `git stash` (desfaria as edições dos outros) e rodam só os testes da própria tarefa. Ao final do lote, você roda a suíte inteira, faz um commit por tarefa só com os arquivos dela (`git add <caminhos da tarefa>`), roda em cada uma o revisor de tarefa do SDD (task-reviewer-prompt.md) e grava `Task N: complete` no progress.md. É uma exceção declarada à regra do SDD de não despachar vários implementadores em paralelo.',
   `O resto vai em fila por \`superpowers:subagent-driven-development\` ${SDD_RULE}, depois do lote.`,
   'Escolha o `model` de cada subagente por estas faixas, e faça a revisão final no fim:',
 ]
@@ -160,7 +160,7 @@ export function typedIntentOf(box: string): string | null {
 // estruturada cede ao plan mode.
 const PLAN_FLOW = [
   '1. Esclareça antes de desenhar: faça as dúvidas acima, e as que surgirem, pelo AskUserQuestion com resposta livre (Other), até eu confirmar a hipótese de trabalho.',
-  "2. Desenhe no arquivo do plano: visão geral, objetivos e não objetivos, plano técnico, alternativas, riscos, e implementação com arquivos, assinaturas e tarefas com as dependências entre elas, sem código. Inclua no plano uma seção 'Execução' com as regras abaixo.",
+  "2. Desenhe no arquivo do plano: visão geral, objetivos e não objetivos, plano técnico, alternativas, riscos, e implementação com arquivos, assinaturas e tarefas com as dependências entre elas, sem código, e uma linha 'Lote paralelo:' com as tarefas sem dependência entre si e sem arquivo em comum (ou 'nenhum' e o motivo). Inclua no plano uma seção 'Execução' com as regras abaixo.",
   '3. Antes do ExitPlanMode, faça a revisão EGM da regra global.',
   "4. Aprovado, execute pela seção 'Execução' do plano:",
   ...numbered(EXECUTION_STEPS('plano aprovado'), 1, '   '),

@@ -136,6 +136,12 @@ describe('executePromptOf', () => {
     expect(text).toContain('superpowers:subagent-driven-development')
   })
 
+  test('o lote paralelo é obrigatório: carrega a skill pela ferramenta Skill e despacha numa mensagem só', () => {
+    expect(text).toContain('carregue a skill `superpowers:dispatching-parallel-agents` pela ferramenta Skill')
+    expect(text).toContain('numa mensagem só')
+    expect(text).toContain('nunca vai para a fila')
+  })
+
   test('divide o trabalho pelas mesmas regras do roteador', () => {
     expect(text).toContain(SDD_RULE)
     expect(text).toContain(EXECUTION_OVERRIDE_RULE)
@@ -298,6 +304,7 @@ describe('planPromptOf', () => {
     expect(text).toContain("'Execução'")
     expect(text).toContain('superpowers:using-git-worktrees')
     expect(text).toContain('superpowers:subagent-driven-development')
+    expect(text).toContain("linha 'Lote paralelo:'")
     expect(text).toContain('superpowers:dispatching-parallel-agents')
     expect(text).toContain('git stash')
     expect(text).toContain('plano aprovado')
