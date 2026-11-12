@@ -7,9 +7,9 @@ import type { Turn } from './compact'
 import { EXECUTION_OVERRIDE_RULE, SDD_RULE, TIER_LINES, jsonObjectIn } from './route'
 
 export type PlanStep = 'brainstorm' | 'draft' | 'review' | 'execute'
-export type PlanFlow = { step: PlanStep; doc: string }
+export type PlanFlow = { step: PlanStep; doc: string; report: string }
 
-export const PLAN_START: PlanFlow = { step: 'brainstorm', doc: '' }
+export const PLAN_START: PlanFlow = { step: 'brainstorm', doc: '', report: '' }
 
 export const PLAN_LABELS = {
   brainstorm: 'EGM',
@@ -47,8 +47,11 @@ export function docOf(args: string): string {
 export function planAfter(command: { name: string; args: string }): PlanFlow | null {
   const step = nextStepOf(command.name)
   if (step === null) return null
-  return { step, doc: step === 'execute' ? docOf(command.args) : '' }
+  return { step, doc: step === 'execute' ? docOf(command.args) : '', report: '' }
 }
+
+// Valor guardado por versão antiga não tem o campo `report`.
+export const reportPathOf = (flow: { report?: string }): string => flow.report ?? ''
 
 // Só um comando do EGM no começo do campo é trocado (clique duplo); qualquer outro comando do usuário fica.
 const EGM_PREFIX = /^\/(?:egm:)?egm-[\w-]+\s*/
@@ -93,10 +96,12 @@ const numbered = (lines: readonly string[], from: number, indent = ''): string[]
 
 // O pedido de "Executar": vai por `$.prompt.submit`, sem passar pelo DELEGATE_CONTEXT (a origem não é o composer), por isso
 // leva a ressalva do roteador e as faixas.
-export function executePromptOf(doc: string): string {
+// Com `report` (caminho do relatório da revisão feita pelo workbench), o portão vira uma linha que aponta para ele.
+export function executePromptOf(doc: string, report = ''): string {
+  const gate = report === '' ? GATE(doc) : [`1. A revisão EGM deste doc foi feita pelo workbench e conferida por código (relatório: ${report}). Não refaça a revisão.`]
   return [
     'O workbench pede para executar o plano revisado pelo EGM. ' + DOC_LINE(doc),
-    ...GATE(doc),
+    ...gate,
     ...numbered(EXECUTION_STEPS('doc'), 2),
     ...EXECUTION_TAIL,
   ].join('\n')

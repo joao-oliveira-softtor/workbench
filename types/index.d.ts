@@ -101,7 +101,7 @@ declare module 'claude-code' {
       // um clique de começar outra por cima até um turno começar ou o prazo passar.
       compactingAt: number | null
       // Planejar: etapa que o botão mostra e o doc revisado pelo /egm:egm-review (vazio fora do Executar).
-      planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string }
+      planFlow: { step: 'brainstorm' | 'draft' | 'review' | 'execute'; doc: string; report: string }
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.
       refining: boolean
       // Resumo do dia (botão "Retomada"): etapa que o botão mostra; null = parado. A trava de verdade é variável do módulo.

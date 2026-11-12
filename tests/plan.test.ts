@@ -13,6 +13,7 @@ import {
   planAfter,
   planPromptOf,
   refineInputOf,
+  reportPathOf,
   typedIntentOf,
 } from '../hooks/plan'
 import { EXECUTION_OVERRIDE_RULE, SDD_RULE, TIER_LINES } from '../hooks/route'
@@ -55,16 +56,27 @@ describe('docOf', () => {
 
 describe('planAfter', () => {
   test('comando do EGM avança a etapa e guarda o doc só no review', () => {
-    expect(planAfter({ name: 'egm:egm-brainstorm', args: 'webhooks' })).toEqual({ step: 'draft', doc: '' })
-    expect(planAfter({ name: 'egm-draft', args: '' })).toEqual({ step: 'review', doc: '' })
+    expect(planAfter({ name: 'egm:egm-brainstorm', args: 'webhooks' })).toEqual({ step: 'draft', doc: '', report: '' })
+    expect(planAfter({ name: 'egm-draft', args: '' })).toEqual({ step: 'review', doc: '', report: '' })
     expect(planAfter({ name: 'egm:egm-review', args: 'docs/designs/a.md' })).toEqual({
       step: 'execute',
       doc: 'docs/designs/a.md',
+      report: '',
     })
   })
 
   test('comando de fora do fluxo não devolve nada', () => {
     expect(planAfter({ name: 'route', args: 'x' })).toBeNull()
+  })
+})
+
+describe('reportPathOf', () => {
+  test('flow guardado por versão antiga, sem o campo, devolve vazio', () => {
+    expect(reportPathOf({ step: 'execute', doc: 'x' } as never)).toBe('')
+  })
+
+  test('devolve o caminho do relatório guardado', () => {
+    expect(reportPathOf({ report: '/r/veredito.md' })).toBe('/r/veredito.md')
   })
 })
 
@@ -156,12 +168,37 @@ describe('executePromptOf', () => {
     expect(empty).toContain('SITEMAP.md')
     expect(empty).toContain('design_draft.md')
   })
+
+  test('sem relatório, o texto é o de sempre', () => {
+    expect(executePromptOf('docs/designs/a.md', '')).toBe(text)
+  })
+})
+
+describe('executePromptOf com relatório', () => {
+  const doc = 'docs/designs/a.md'
+  const text = executePromptOf(doc)
+  const withReport = executePromptOf(doc, '/r/veredito.md')
+
+  test('troca o portão pela linha que aponta o relatório e não manda refazer a revisão', () => {
+    expect(withReport).toContain(
+      '1. A revisão EGM deste doc foi feita pelo workbench e conferida por código (relatório: /r/veredito.md). Não refaça a revisão.',
+    )
+    expect(withReport).not.toContain('implementation_readiness_report.md')
+    expect(withReport).not.toContain('na dúvida')
+  })
+
+  test('o resto do texto não muda: antes do portão e do 2. em diante são iguais', () => {
+    const headOf = (s: string) => s.slice(0, s.indexOf('\n1. '))
+    const tailOf = (s: string) => s.slice(s.indexOf('\n2. Local de trabalho'))
+    expect(headOf(withReport)).toBe(headOf(text))
+    expect(tailOf(withReport)).toBe(tailOf(text))
+  })
 })
 
 describe('rótulos e estado inicial', () => {
   test('uma etiqueta por etapa, e a primeira etapa é o brainstorm sem doc', () => {
     expect(PLAN_LABELS).toEqual({ brainstorm: 'EGM', draft: 'EGM: Rascunho', review: 'EGM: Revisão', execute: 'EGM: Executar' })
-    expect(PLAN_START).toEqual({ step: 'brainstorm', doc: '' })
+    expect(PLAN_START).toEqual({ step: 'brainstorm', doc: '', report: '' })
   })
 })
 
