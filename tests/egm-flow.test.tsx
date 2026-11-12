@@ -36,7 +36,8 @@ type Over = {
   home?: string | null
   node?: string
   hasPlugin?: boolean
-  spawns?: { deny?: string; unlisted?: boolean }[]
+  // `withId`: o hook devolve o id na hora (o caso real); o agente também vai à lista.
+  spawns?: { deny?: string; unlisted?: boolean; withId?: boolean }[]
   messages?: Record<string, { role: 'user' | 'assistant'; text: string }[]>
   failWrite?: (path: string) => boolean
   failRegister?: boolean
@@ -102,7 +103,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     const r = over.spawns?.shift() ?? {}
     if (r.deny !== undefined) return { deny: r.deny }
     if (r.unlisted !== true) listed.push({ id, type, status: 'running', description: 'x', spawnedBy: 'workbench' })
-    return { model: 'opus' }
+    return r.withId === true ? { model: 'opus', agentId: id } : { model: 'opus' }
   })
   on('agent.list', () => ({ value: listed }))
   on('session.messages', (_$, e) => ({ value: (over.messages?.[e.agentId ?? ''] ?? []).map(m => ({ ...m, toolUses: [] })) }))
@@ -447,6 +448,29 @@ describe('EGM: rodadas', () => {
     await answerRound($, t, {})
     expect(t.log.notices.at(-1)).toBe(`EGM: não consegui gravar o relatório em ${t.dir()}/veredito.md; clique em Revisão de novo`)
     expect(await label(ui)).toBe('EGM: Revisão')
+  })
+})
+
+describe('EGM: lançamento que devolve o id', () => {
+  // O harness descarta o `agentId` que o hook `agent.spawn` devolve quando quem lança é o mod (chega `{ model }`): o id
+  // na hora vira adoção. O código usa um só caminho (`bindAgent`) para os dois casos, e este teste o prova pela adoção:
+  // slot com id, resposta gravada, id calado e a trava do corretor regravada com o id.
+  test('revisor e corretor: o id entra no slot, a resposta é gravada, o aviso é calado e a trava leva o id', async ($, on) => {
+    const { t, ui } = await ready($, on, { spawns: [{ withId: true }, {}, {}, {}, {}, { withId: true }] })
+    await clickPlan(t, ui)
+    await tick(t)
+    await tick(t)
+    await reply($, 'a1', blocker())
+    expect(t.files.get(`${t.dir()}/r1/zoom-out.md`)).toBe(blocker())
+    const drop = await $.prompt.submit({ text: '<agent-message from="a1">feito</agent-message>', wait: false, isMeta: true, origin: { kind: 'peer' } })
+    expect('drop' in drop).toBe(true)
+    for (let i = 0; i < NAMES.length; i++) await tick(t)
+    await answerRound($, t, {}, NAMES.slice(1))
+    expect(t.log.spawns.at(-1)?.type).toBe(EGM_FIXER)
+    await tick(t)
+    expect(t.guard()).toEqual({ role: 'planfixer', agentId: 'a6', doc: DOC, dir: t.dir(), cwd: CWD })
+    await reply($, 'a6', answers('- [corrigido] zoom-out #1'))
+    expect(t.files.get(`${t.dir()}/r1/correcao.md`)).toBe(answers('- [corrigido] zoom-out #1'))
   })
 })
 

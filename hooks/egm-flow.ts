@@ -153,7 +153,7 @@ export async function stepEgm($: EngineInterface, env: EgmEnv): Promise<string |
 
 // Revisor sem arquivo de resposta: espera, adota o lançado sem id, ou encerra (tenta a última mensagem do agente; o revisor
 // sem texto fica `revisão incompleta`, o corretor sem texto fica sem arquivo, que o `parseFix` lê como sem resposta).
-async function pollSlot($: EngineInterface, job: EgmJob, slot: EgmSlot, listed: Listed[] | null, now: number, known: readonly string[]): Promise<EgmSlot> {
+async function pollSlot($: EngineInterface, env: EgmEnv, job: EgmJob, slot: EgmSlot, listed: Listed[] | null, now: number, known: readonly string[]): Promise<EgmSlot> {
   const path = answerPathOf(job.dir, job.round, slot.name)
   if (slot.hasAnswer || (await exists($, path))) return { ...slot, hasAnswer: true }
   const timeoutMs = slot.name === FIXER ? null : AGENT_TIMEOUT_MS
@@ -162,7 +162,7 @@ async function pollSlot($: EngineInterface, job: EgmJob, slot: EgmSlot, listed: 
     case 'wait':
       return slot
     case 'adopt':
-      await addAgent($, step.agentId)
+      await bindAgent($, env, job, slot.name, step.agentId)
       return { ...slot, agentId: step.agentId }
     case 'ended':
       return endSlot($, slot, path)
@@ -185,17 +185,17 @@ export async function recoverAnswer($: EngineInterface, agentId: string): Promis
   return got.value.filter(m => m.role === 'assistant' && m.text.trim() !== '').at(-1)?.text ?? null
 }
 
-async function pollSlots($: EngineInterface, job: EgmJob): Promise<EgmSlot[]> {
+async function pollSlots($: EngineInterface, env: EgmEnv, job: EgmJob): Promise<EgmSlot[]> {
   const listed = await ownAgentsOf($)
   const now = await $.clock.now()
   const known = await read($, egmAgents)
   const slots: EgmSlot[] = []
-  for (const slot of job.slots) slots.push(await pollSlot($, job, slot, listed, now, known))
+  for (const slot of job.slots) slots.push(await pollSlot($, env, job, slot, listed, now, known))
   return slots
 }
 
 async function stepReview($: EngineInterface, env: EgmEnv, before: EgmJob): Promise<string | null> {
-  const slots = await pollSlots($, before)
+  const slots = await pollSlots($, env, before)
   if (!(await setJob($, before.dir, cur => ({ ...cur, slots })))) return null
   const job = { ...before, slots }
   const [next, ...rest] = job.todo
@@ -215,12 +215,16 @@ async function launchReviewer($: EngineInterface, env: EgmEnv, job: EgmJob, name
   if (!(await setJob($, job.dir, cur => ({ ...cur, slots: [...cur.slots, slot], todo: rest })))) return null
   const spawned = await spawnAgent($, persona.subagentType, prompt, `EGM: ${name} r${job.round}`)
   if ('deny' in spawned) return finishEgm($, env, job, 'NO-GO', reasonOf('M6', `${name}: ${spawned.deny}`))
-  const id = spawned.agentId
-  if (id !== null) {
-    await addAgent($, id)
-    await setJob($, job.dir, cur => ({ ...cur, slots: cur.slots.map(s => (s.name === name ? { ...s, agentId: id } : s)) }))
-  }
+  if (spawned.agentId !== null) await bindAgent($, env, job, name, spawned.agentId)
   return null
+}
+
+// O id do agente de um slot, venha do lançamento ou da adoção: entra em `egmAgents`, no slot e, no corretor, na trava.
+// Um caminho só para os dois casos: o harness de teste descarta o id que o lançamento devolve, então só a adoção o exercita.
+async function bindAgent($: EngineInterface, env: EgmEnv, job: EgmJob, name: string, id: string): Promise<void> {
+  await addAgent($, id)
+  await setJob($, job.dir, cur => ({ ...cur, slots: cur.slots.map(s => (s.name === name ? { ...s, agentId: id } : s)) }))
+  if (name === FIXER) await guardFixer($, env, job, id)
 }
 
 // O revisor não lê fora da pasta da sessão: persona, padrão, plano e a rodada anterior vão no pedido.
@@ -303,21 +307,15 @@ async function startFix($: EngineInterface, env: EgmEnv, job: EgmJob, findings: 
   }
   const spawned = await spawnAgent($, EGM_FIXER, fixPromptOf(job.doc, findings, job.dir, job.round), `EGM: corretor r${job.round}`)
   if ('deny' in spawned) return finishEgm($, env, job, 'NO-GO', reasonOf('M6', `corretor: ${spawned.deny}`))
-  const id = spawned.agentId
-  if (id !== null) {
-    await addAgent($, id)
-    await setJob($, job.dir, cur => ({ ...cur, slots: cur.slots.map(s => ({ ...s, agentId: id })) }))
-    await guardFixer($, env, job, id)
-  }
+  if (spawned.agentId !== null) await bindAgent($, env, job, FIXER, spawned.agentId)
   return null
 }
 
 async function stepFix($: EngineInterface, env: EgmEnv, job: EgmJob): Promise<string | null> {
   const [before] = job.slots
   if (before === undefined) return finishEgm($, env, job, 'NO-GO', reasonOf('M4'))
-  const [slot = before] = await pollSlots($, job)
+  const [slot = before] = await pollSlots($, env, job)
   if (!(await setJob($, job.dir, cur => ({ ...cur, slots: [slot] })))) return null
-  if (slot.agentId !== null && before.agentId === null) await guardFixer($, env, job, slot.agentId)
   if (!slot.hasAnswer) return null
   await settle(() => $.fs.write(env.guardFile, '{}'))
   const docText = await readText($, job.doc)
