@@ -758,7 +758,7 @@ function hookCallOf(input: unknown): HookCall | null {
   return typeof tool === 'string' && isRecord(toolInput) && isAbs(cwd) ? { tool, toolInput, cwd, agentId } : null
 }
 
-const mayPlanfixerRead = (real: string, state: PlanfixerCtx): boolean => isInside(real, state.dir) || isInside(real, state.cwd)
+const mayPlanfixerRead = (real: string, state: PlanfixerCtx): boolean => !isSecretPath(real) && (isInside(real, state.dir) || isInside(real, state.cwd))
 
 function planfixerToolDecision(state: PlanfixerCtx, call: HookCall, fs: FsView): Decision {
   const { tool, toolInput, cwd } = call
@@ -767,7 +767,7 @@ function planfixerToolDecision(state: PlanfixerCtx, call: HookCall, fs: FsView):
   if (typeof path !== 'string') return deny(`${tool} sem file_path em texto`)
   const real = fs.realOf(resolveIn(path, cwd, cwd))
   if (real === null) return deny(`caminho sem resolução: ${path}`)
-  const ok = real === state.doc || (tool === 'Read' && mayPlanfixerRead(real, state))
+  const ok = (real === state.doc && !isSecretPath(real)) || (tool === 'Read' && mayPlanfixerRead(real, state))
   return ok ? { decision: 'allow', reason: 'dentro do que o corretor de plano pode usar' } : deny(`${tool} em ${path} é proibido para o corretor de plano`)
 }
 

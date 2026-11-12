@@ -140,9 +140,10 @@ async function boot($: Engine, on: On, over: Over = {}) {
     })
   }
   await start($)
+  const setHome = (h: string | null) => { over.home = h }
   const dir = () => [...dirs].find(d => d.startsWith(`${EGM_ROOT}/`)) ?? ''
   const guard = () => JSON.parse(log.guards.at(-1) ?? '{}')
-  return { clock, files, dirs, box, listed, log, dir, guard }
+  return { clock, files, dirs, box, listed, log, dir, guard, setHome }
 }
 
 type T = Awaited<ReturnType<typeof boot>>
@@ -485,6 +486,17 @@ describe('EGM: parada, recarga e avisos', () => {
     await tick(t)
     expect(t.log.guards.at(-1)).toBe('{}')
     expect((await command($, 'egm stop')).text).toBe('EGM: nenhuma revisão em andamento.')
+  })
+
+  test('egm stop com o ambiente nulo (registro sem HOME na recarga) ainda grava {} na trava', async ($, on) => {
+    const { t } = await launched($, on)
+    const guardFile = t.log.guards.length
+    t.setHome(null)
+    await start($)
+    t.setHome(HOME)
+    await command($, 'egm stop')
+    expect(t.log.guards.length).toBeGreaterThan(guardFile)
+    expect(t.log.guards.at(-1)).toBe('{}')
   })
 
   test('segundo session.start no meio: o trabalho continua de onde parou', async ($, on) => {

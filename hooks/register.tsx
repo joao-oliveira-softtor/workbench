@@ -2135,7 +2135,7 @@ export const register: Register = on => {
     // Os dois cliques do Corrigir só confirmam se quem pede é a pessoa: o modelo (ou outra fonte) não roda nem para o QA.
     if ((args === 'qa' || args === 'qa stop') && !isQaOrigin(e.origin.kind)) return { text: 'QA: só o usuário pode rodar ou parar o QA (digitando o comando ou pelo botão QA).' }
     if (args === 'qa stop') return { text: await stopQa($) }
-    if (args === 'egm stop') return { text: isQaOrigin(e.origin.kind) ? await stopEgm($, egmEnv) : 'EGM: só o usuário pode parar a revisão.' }
+    if (args === 'egm stop') return { text: isQaOrigin(e.origin.kind) ? await stopEgm($, egmEnv, () => guardTokenOf($)) : 'EGM: só o usuário pode parar a revisão.' }
     if (args === 'qa') return { text: (await pressQa($)) ?? 'QA: a etapa atual roda em segundo plano (veja o botão QA).' }
     await openPanel($)
     return { text: 'Painel do workbench aberto.' }

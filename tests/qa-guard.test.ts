@@ -1367,6 +1367,10 @@ describe('guardDecisionOf: papel planfixer', () => {
     expect(fixer(inputOf('Read', { file_path: `${DIR}/a/b.md` }))).toBe('allow')
     expect(fixer(inputOf('Read', { file_path: `${PCWD}/src/a.ts` }))).toBe('allow')
     expect(fixer(inputOf('Read', { file_path: '/home/u/.ssh/id' }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/.env` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/sub/.env.local` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${DIR}/.env` }))).toBe('deny')
+    expect(fixer(inputOf('Read', { file_path: `${PCWD}/sub/env.ts` }))).toBe('allow')
     expect(fixer(inputOf('Read', { file_path: `${DIR}/a.md` }), ctx, { realOf: () => null, isFile: () => true })).toBe('deny')
     expect(fixer(inputOf('Read', { file_path: `${DIR}/../x` }))).toBe('deny')
     expect(fixer(inputOf('Read', {}))).toBe('deny')
@@ -1399,6 +1403,19 @@ describe('guardDecisionOf: papel planfixer', () => {
     expect(fixer(null)).toBe('deny')
     expect(fixer({ tool_name: 7, tool_input: {} })).toBe('deny')
     expect(fixer({ tool_name: 'Edit', tool_input: 'x' })).toBe('deny')
+  })
+
+  test('entrada sem forma é recusada pela forma, nunca por acaso da ferramenta', () => {
+    const why = (input: unknown) => guardDecisionOf('planfixer', input, ctx, SAME_FS).reason
+    const SHAPE = 'entrada do hook com forma inesperada'
+    expect(why({ tool_name: 5, tool_input: {}, cwd: PCWD })).toBe(SHAPE)
+    expect(why({ tool_name: 'Edit', tool_input: 'x', cwd: 'rel' })).toBe(SHAPE)
+    expect(why({ tool_name: 'Edit', tool_input: {}, cwd: 'rel' })).toBe(SHAPE)
+  })
+
+  test('o documento do plano que se chama .env* também é negado', () => {
+    const envCtx = planfixerStateTextOf({ agentId: null, doc: `${PCWD}/.env`, dir: DIR, cwd: PCWD })
+    expect(fixer(inputOf('Edit', { file_path: `${PCWD}/.env` }), envCtx)).toBe('deny')
   })
 })
 

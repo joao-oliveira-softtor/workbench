@@ -59,6 +59,12 @@ async function realOf($: EngineInterface, path: string): Promise<string> {
   return (await run($, ['realpath', '--', path]))?.trim() || path
 }
 
+// Sem o ambiente registrado (registro que falhou), o arquivo da trava ainda se monta; sem HOME, null.
+async function guardFileOf($: EngineInterface, tokenOf: () => Promise<string>): Promise<string | null> {
+  const found = await homeOf($)
+  return found === undefined ? null : `${egmRootOf(await realOf($, found))}/guard-${await tokenOf()}.json`
+}
+
 // Registra o corretor (tipo travado). Sem HOME: null, e o clique avisa no passo 4.
 export async function registerEgm($: EngineInterface, tokenOf: () => Promise<string>, modRoot: string): Promise<EgmEnv | null> {
   const found = await homeOf($)
@@ -364,11 +370,12 @@ export async function saveAnswer($: EngineInterface, agentId: string, answer: st
   await $.fs.write(answerPathOf(job.dir, job.round, slot.name), answer)
 }
 
-export async function stopEgm($: EngineInterface, env: EgmEnv | null): Promise<string> {
+export async function stopEgm($: EngineInterface, env: EgmEnv | null, tokenOf: () => Promise<string>): Promise<string> {
   const job = await read($, egmJob)
   if (job === null) return 'EGM: nenhuma revisão em andamento.'
   await update($, egmJob, () => null)
-  if (env !== null) await settle(() => $.fs.write(env.guardFile, '{}'))
+  const guardFile = env === null ? await guardFileOf($, tokenOf) : env.guardFile
+  if (guardFile !== null) await settle(() => $.fs.write(guardFile, '{}'))
   return `EGM: revisão parada. O plano fica como está; as respostas já recebidas estão em ${job.dir}.`
 }
 
