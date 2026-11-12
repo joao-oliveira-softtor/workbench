@@ -477,6 +477,7 @@ describe('guardStateTextOf e hookCommandOf', () => {
   test('o comando do hook chama o node com o papel e o arquivo, e barra se o node falhar', () => {
     expect(hookCommandOf('/p/workbench', 'runner', '/q/guard-t.json')).toBe('node --no-warnings --experimental-strip-types "/p/workbench/hooks/qa-hook.mjs" runner "/q/guard-t.json" || exit 2')
     expect(hookCommandOf('/p', 'fixer', '/q/g.json')).toContain(' fixer ')
+    expect(hookCommandOf('/p', 'planfixer', '/q/g.json')).toContain(' planfixer "/q/g.json"')
   })
 
   test('caminho com aspas duplas, cifrão, crase, barra invertida ou quebra de linha não vira comando', () => {

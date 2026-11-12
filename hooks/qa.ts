@@ -174,7 +174,7 @@ export function agentStepOf(
 export const qaHomeOf = (home: string): string => `${home}/.claude/workbench-qa`
 
 // FNV-1a de 32 bits: no caminho, dois projetos de mesmo nome em pastas diferentes não dividem a raiz.
-function hashOf(text: string): string {
+export function hashOf(text: string): string {
   let h = 0x811c9dc5
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193)
   return (h >>> 0).toString(16).padStart(8, '0')
@@ -284,7 +284,7 @@ export function impWrapperTextOf(o: { bin: string }): string {
 export const guardStateTextOf = (role: QaRole, agentId: string | null, ctx: GuardCtx): string => JSON.stringify({ role, agentId, ctx })
 
 // O comando fica entre aspas duplas no shell: aspas, `$`, crase, `\` e quebra de linha não entram.
-export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover', guardFile: string): string | null {
+export function hookCommandOf(pluginRoot: string, role: QaRole | 'remover' | 'planfixer', guardFile: string): string | null {
   if ([pluginRoot, guardFile].some(p => /["$`\\\r\n]/.test(p))) return null
   // O `|| exit 2` é o que barra a ferramenta quando o node falha. `--experimental-strip-types`: sem ela o Node 22.6 a 22.x não
   // importa o qa-guard.ts ("Unknown file extension .ts") e todo agente fica sem ferramentas; nas versões novas ela já vem ligada.
