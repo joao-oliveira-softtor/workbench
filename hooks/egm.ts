@@ -28,7 +28,19 @@ export type Outcome = {
   nits: Located[]
 }
 export type EgmSlot = { name: string; type: string; agentId: string | null; at: number; hasAnswer: boolean }
-export type EgmJob = { doc: string; dir: string; round: Round; phase: 'review' | 'fix'; mark: string; slots: EgmSlot[]; todo: string[] }
+// `origin`: quem começou (clique em "EGM: Revisão" ou ExitPlanMode no plan mode). `ask`: o pedido de correção mandado à
+// conversa no plan mode (`turnId` = o turno que o respondeu); sempre null no botão.
+export type EgmJob = {
+  doc: string
+  dir: string
+  round: Round
+  phase: 'review' | 'fix'
+  mark: string
+  slots: EgmSlot[]
+  todo: string[]
+  origin: 'button' | 'planmode'
+  ask: { isSent: boolean; turnId: string | null } | null
+}
 
 export const EGM_FIXER = 'workbench:egm-fixer'
 

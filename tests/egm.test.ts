@@ -280,7 +280,7 @@ describe('reportOkOf', () => {
 describe('egmLabelOf', () => {
   const flow = { step: 'review', doc: '/d.md', report: '' } as const
   const slot = (hasAnswer: boolean) => ({ name: 'a', type: 't', agentId: null, at: 0, hasAnswer })
-  const job = (over: object) => ({ doc: '/d.md', dir: '/x', round: 2 as const, phase: 'review' as const, mark: 'aa', slots: [], todo: [], ...over })
+  const job = (over: object) => ({ doc: '/d.md', dir: '/x', round: 2 as const, phase: 'review' as const, mark: 'aa', slots: [], todo: [], origin: 'button' as const, ask: null, ...over })
   test('sem trabalho: o rótulo da etapa', () => {
     expect(egmLabelOf(flow, null)).toBe('EGM: Revisão')
   })

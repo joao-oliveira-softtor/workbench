@@ -112,7 +112,17 @@ declare module 'claude-code' {
         mark: string
         slots: { name: string; type: string; agentId: string | null; at: number; hasAnswer: boolean }[]
         todo: string[]
+        origin: 'button' | 'planmode'
+        ask: { isSent: boolean; turnId: string | null } | null
       } | null
+      // Plan mode: o pedido do Planejar armou a revisão do ExitPlanMode; desarma no GO, num /plan sem a marca e no egm stop.
+      planArmed: boolean
+      // Plan mode: o GO da última revisão (doc e relatório); o ExitPlanMode passa se o relatório vale para o texto de agora.
+      planGo: { doc: string; report: string } | null
+      // Plan mode: o doc que o gancho do ExitPlanMode deixou para o tique criar a revisão (sob a trava).
+      planQueuedDoc: string | null
+      // Plan mode: o texto a mandar à conversa quando a sessão parar (pedido de correção ou mensagem de fim).
+      egmOutbox: { text: string; kind: 'ask' | 'end' } | null
       // EGM: os ids dos agentes lançados pela revisão (os 200 mais recentes); o aviso de fim deles sai da conversa.
       egmAgents: string[]
       // Planejar refinando ("Refinando…"); só o rótulo. A trava de verdade é variável do módulo.

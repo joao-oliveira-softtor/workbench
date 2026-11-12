@@ -26,6 +26,7 @@ import {
   PLAN_START,
   executePromptOf,
   fillTextOf,
+  isPlanArmingOf,
   parseRefine,
   planAfter,
   planPromptOf,
@@ -33,8 +34,8 @@ import {
   reportPathOf as planReportOf,
   typedIntentOf,
 } from './plan'
-import { EGM_FIXER, egmLabelOf } from './egm'
-import { executeOkOf, registerEgm, saveAnswer, startReview, stepEgm, stopEgm } from './egm-flow'
+import { EGM_FIXER, PLAN_FIX_HEADER, egmLabelOf } from './egm'
+import { executeOkOf, holdExit, markAskTurn, registerEgm, saveAnswer, saveMainAnswer, startReview, stepEgm, stopEgm, takeOutbox } from './egm-flow'
 import type { EgmEnv } from './egm-flow'
 import type { PlanStep, Refined } from './plan'
 import {
@@ -211,6 +212,8 @@ const compactingAt = atom({ plugin: 'workbench', key: 'compactingAt' } as const,
 const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_START)
 const egmJob = atom({ plugin: 'workbench', key: 'egmJob' } as const, null)
 const egmAgents = atom({ plugin: 'workbench', key: 'egmAgents' } as const, [])
+// Repete a chave do egm-flow.ts: o prompt.submit arma e desarma a revisão do ExitPlanMode.
+const planArmed = atom({ plugin: 'workbench', key: 'planArmed' } as const, false)
 const refining = atom({ plugin: 'workbench', key: 'refining' } as const, false)
 const resuming = atom({ plugin: 'workbench', key: 'resuming' } as const, null)
 // QA: nenhum destes zera no session.start (é o que permite retomar e o que mantém suprimidos os agentes já lançados).
@@ -253,6 +256,10 @@ let planQueued: PlanStep | null = null
 // EGM, revisão pelo mod: a trava do passo do timer (o clique Revisão também a pega) e o ambiente (HOME, arquivo da trava).
 let isEgmStepping = false
 let egmEnv: EgmEnv | null = null
+// Plan mode: o turno do pedido de correção que o turn.start viu com a trava ocupada (o tique seguinte o aplica), e a
+// pasta do trabalho cujo pedido o envio recusou (o tique seguinte encerra NO-GO).
+let askTurn: string | null = null
+let askDropped: string | null = null
 // Planejar (refinamento): a trava é `refinePhase`, como o `compactPhase`; `refining` em $.state é só o rótulo.
 let refinePhase: Phase = 'idle'
 // Resumo do dia (botão "Retomada"): a trava é `resumePhase`, como o `refinePhase`; `resuming` em $.state é só o rótulo.
@@ -911,20 +918,64 @@ async function runReview($: EngineInterface): Promise<void> {
   }
 }
 
-// Um passo da revisão por tique, sob a mesma trava do clique.
+// Um passo da revisão por tique, sob a mesma trava do clique. Com a sessão parada, tira da caixa de saída o texto para a
+// conversa e só o manda depois de soltar a trava: o submit pode durar o turno inteiro e não pode prender os tiques.
 async function drainEgm($: EngineInterface): Promise<void> {
   const env = egmEnv
   if (isEgmStepping || env === null) return
   isEgmStepping = true
+  let box: Awaited<ReturnType<typeof takeOutbox>> = null
   try {
-    const text = await stepEgm($, env)
+    const [turnId, dropped] = [askTurn, askDropped]
+    askTurn = null
+    askDropped = null
+    if (turnId !== null) await markAskTurn($, turnId)
+    const text = await stepEgm($, env, dropped)
     if (text !== null) await notice($, text)
+    if (!isMainTurn) box = await takeOutbox($)
   } catch (err) {
     $.ui.toast(`EGM: passo falhou (${errorText(err)})`)
   } finally {
     isEgmStepping = false
   }
+  if (box !== null) await sendOutbox($, box)
 }
+
+// Pedido de correção recusado: o tique seguinte encerra NO-GO (o próximo turno do usuário nunca vira correção).
+async function sendOutbox($: EngineInterface, box: { text: string; kind: 'ask' | 'end'; dir: string }): Promise<void> {
+  const sent = await settle(() => $.prompt.submit({ text: box.text }))
+  const drop = sent.ok ? sent.value.drop : errorText(sent.error)
+  if (drop === undefined) return
+  if (box.kind === 'ask') askDropped = box.dir
+  else await notice($, `EGM: a mensagem não entrou na conversa (${drop}): ${box.text}`)
+}
+
+// A revisão é portão de qualidade, não de segurança: na falha, a saída passa.
+async function exitDenyOf($: EngineInterface, planFilePath: string): Promise<string | null> {
+  try {
+    return await holdExit($, egmEnv, planFilePath)
+  } catch {
+    return null
+  }
+}
+
+// O turn.start do pedido de correção grava o id sob a trava; ocupada, o tique seguinte o aplica.
+async function markAskTurnLocked($: EngineInterface, turnId: string): Promise<void> {
+  if (isEgmStepping) {
+    askTurn = turnId
+    return
+  }
+  isEgmStepping = true
+  try {
+    await markAskTurn($, turnId)
+  } finally {
+    isEgmStepping = false
+  }
+}
+
+// Os campos `plan` e `planFilePath` do ExitPlanMode não estão nos tipos da API; o spike os mostrou.
+const isExitCall = (call: unknown): call is { planFilePath: string } =>
+  typeof call === 'object' && call !== null && Reflect.get(call, 'tool') === 'ExitPlanMode' && Reflect.get(call, 'agentId') === undefined && typeof Reflect.get(call, 'planFilePath') === 'string'
 
 async function pressPlan($: EngineInterface): Promise<void> {
   planQueued = (await read($, planFlow)).step
@@ -2036,6 +2087,8 @@ export const register: Register = on => {
     planQueued = null
     isEgmStepping = false
     egmEnv = null
+    askTurn = null
+    askDropped = null
     refinePhase = 'idle'
     resumePhase = 'idle'
     resumeSent = false
@@ -2172,6 +2225,8 @@ export const register: Register = on => {
       // Um comando do EGM que entrou avança a etapa do botão EGM (e guarda o doc no review). Nunca segura o prompt.
       const flow = e.command === undefined ? null : planAfter(e.command)
       if (flow !== null) void update($, planFlow, () => flow).catch(() => {})
+      // O pedido do Planejar arma a revisão do ExitPlanMode; outro /plan, sem a marca, desarma.
+      if (e.command?.name === 'plan' || /^\/plan(\s|$)/.test(e.text)) void update($, planArmed, () => isPlanArmingOf({ command: e.command, text: e.text })).catch(() => {})
       const isOpen = shouldDelegate({
         isOn: isDelegateOn,
         length: e.text.length,
@@ -2203,13 +2258,19 @@ export const register: Register = on => {
 
   // A ferramenta qa_auth (o Login a chama): só as contagens do login salvo de um perfil da matriz atual. Sem filtro por
   // nome no `on` e com o evento lido como `unknown`: a união dos tipos das ferramentas MCP estoura a memória do tsc.
+  // No mesmo hook (o engine aceita um só `tool.call` sem filtro), o ExitPlanMode do loop principal com a revisão armada: o
+  // mod segura a saída e roda a revisão EGM. Um erro do mod nunca prende a sessão no plan mode (o `.catch` deixa passar).
   on('tool.call', async ($, e, next) => {
     const call: unknown = e
+    if (isExitCall(call)) {
+      const deny = await exitDenyOf($, call.planFilePath)
+      return deny === null ? next(e) : { deny }
+    }
     if (!isAuthCall(call)) return next(e)
     const env = qaEnv
     if (env === null) return { deny: qaBlocked ?? QA_OFF }
     return authReplyOf($, env, (await read($, qaFlow)).runDir, call.profile, await $.clock.now())
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'qa_auth: a consulta falhou' }))
+  }).catch(($, e, next) => (next.called || isExitCall(e) ? next(e) : { deny: 'qa_auth: a consulta falhou' }))
 
   // Toda compactação que chega ao mod (`/compact`, a automática do Claude Code, o pré-cálculo, a de outro mod; a do
   // próprio botão o engine não passa por aqui) deixa um aviso gravado no transcrito: é a prova de qual `trigger` chega.
@@ -2241,6 +2302,7 @@ export const register: Register = on => {
       await settle(() => update($, compactingAt, () => null))
       // O texto-base com `includes`: vale mesmo que o engine ponha uma moldura em volta do pedido do mod.
       if (resumeWatch !== null && 'text' in resumeWatch) resumeWatch = e.text.includes(RESUME_HEAD) ? { turnId: e.turnId } : null
+      if (e.text.includes(PLAN_FIX_HEADER)) await settle(() => markAskTurnLocked($, e.turnId))
     }
     return next(e)
   })
@@ -2256,8 +2318,10 @@ export const register: Register = on => {
       resumeWatch = null
       if (e.reason !== 'answer') await notice($, resumeFailureOf(e.reason))
     }
-    // A resposta de um agente da revisão EGM vai para o arquivo; quem decide é o timer.
+    // A resposta de um agente da revisão EGM (ou, no plan mode, da conversa ao pedido de correção) vai para o arquivo; quem
+    // decide é o timer.
     if (e.agentId !== undefined) await settle(() => saveAnswer($, e.agentId ?? '', e.answer))
+    else await settle(() => saveMainAnswer($, e, askTurn))
     // Só marca o fim do agente do item de QA em curso: quem avança é o timer.
     const agentId = e.agentId
     if (agentId !== undefined && (await read($, qaJob))?.current?.agentId === agentId) {

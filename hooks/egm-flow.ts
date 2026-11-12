@@ -5,9 +5,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import {
+  EGM_BUSY_TEXT,
   EGM_FIXER,
+  EGM_WAIT_TEXT,
   PERSONAS,
   egmFixerSpecOf,
+  exitDecisionOf,
   fixOf,
   fixPromptOf,
   newestVersionOf,
@@ -15,13 +18,15 @@ import {
   outcomeOf,
   parseFix,
   parseReview,
+  planEndTextOf,
+  planFixPromptOf,
   reasonOf,
   reportOf,
   reportOkOf,
   reviewPromptOf,
   roundOf,
 } from './egm'
-import type { EgmJob, EgmSlot, Finding, Fix, Reason, Review, RoundStep } from './egm'
+import type { EgmJob, EgmSlot, Finding, Fix, Outcome, Reason, Review, RoundStep } from './egm'
 import { settle } from './model'
 import { PLAN_START, docOf, reportPathOf, typedIntentOf } from './plan'
 import type { PlanFlow } from './plan'
@@ -38,6 +43,12 @@ const planFlow = atom({ plugin: 'workbench', key: 'planFlow' } as const, PLAN_ST
 const egmJob = atom({ plugin: 'workbench', key: 'egmJob' } as const, null)
 // Os agentes lançados pelo EGM (os mais recentes): o aviso de fim deles sai da conversa e nenhum é adotado de novo.
 const egmAgents = atom({ plugin: 'workbench', key: 'egmAgents' } as const, [])
+// Revisão no plan mode (também no register.tsx): armada pelo pedido do Planejar, o GO que libera a saída, o doc que o
+// gancho deixa para o tique e o texto a mandar à conversa. Nenhum zera no session.start (a revisão segue depois da recarga).
+const planArmed = atom({ plugin: 'workbench', key: 'planArmed' } as const, false)
+const planGo = atom({ plugin: 'workbench', key: 'planGo' } as const, null)
+const planQueuedDoc = atom({ plugin: 'workbench', key: 'planQueuedDoc' } as const, null)
+const egmOutbox = atom({ plugin: 'workbench', key: 'egmOutbox' } as const, null)
 
 // `home` é o caminho real (a trava compara caminhos reais); `isFixerReady`: o tipo do corretor foi registrado com a trava.
 export type EgmEnv = { home: string; guardFile: string; isFixerReady: boolean }
@@ -107,7 +118,12 @@ export async function startReview($: EngineInterface, env: EgmEnv | null): Promi
   const typed = await typedDocOf($)
   if (typed.kind === 'refused') return typed.text
   if (env === null) return 'EGM: não achei a pasta do usuário (HOME)'
-  return createJob($, env, typed.path)
+  const doc = await docPathOf($, typed.path, env.home)
+  if (doc === null) return `EGM: não consegui ler o arquivo ${typed.path}`
+  if (!env.isFixerReady || !(await isNodeReady($))) return 'EGM: o corretor não pode rodar aqui (precisa do Node 22.6 ou mais novo)'
+  const refused = await createJob($, env, doc, 'button', typed.path)
+  if (refused === null) await $.prompt.fill({ text: '' })
+  return refused
 }
 
 // Passos 1 a 3: nenhum trabalho nem corretor antigo vivo (a lista que falha também recusa), e o caminho do campo.
@@ -120,19 +136,84 @@ async function typedDocOf($: EngineInterface): Promise<{ kind: 'ok'; path: strin
   return path === '' ? refused('EGM: escreva o caminho do plano no campo e clique em Revisão') : { kind: 'ok', path }
 }
 
-// Passos 5 a 8; depois grava o trabalho e só então limpa o campo.
-async function createJob($: EngineInterface, env: EgmEnv, typed: string): Promise<string | null> {
-  const doc = await docPathOf($, typed, env.home)
-  const text = doc === null ? null : await readText($, doc)
-  if (doc === null || text === null) return `EGM: não consegui ler o arquivo ${typed}`
+// Passos 5, 6 e 8 com o caminho já resolvido (`shown` é o que o aviso mostra); o motivo da recusa ou null.
+async function createJob($: EngineInterface, env: EgmEnv, doc: string, origin: EgmJob['origin'], shown: string): Promise<string | null> {
+  const text = await readText($, doc)
+  if (text === null) return `EGM: não consegui ler o arquivo ${shown}`
   if ((await pluginRootOf($, env.home)) === null) return 'EGM: plugin egm não encontrado (claude plugin enable egm@egm)'
-  if (!env.isFixerReady || !(await isNodeReady($))) return 'EGM: o corretor não pode rodar aqui (precisa do Node 22.6 ou mais novo)'
   const dir = `${egmRootOf(env.home)}/${stampOf(await $.clock.now())}`
   if (!(await mkdirs($, dir))) return 'EGM: não consegui criar a pasta da revisão'
-  const job: EgmJob = { doc, dir, round: 1, phase: 'review', mark: hashOf(text), slots: [], todo: [...PERSONA_NAMES] }
+  const job: EgmJob = { doc, dir, round: 1, phase: 'review', mark: hashOf(text), slots: [], todo: [...PERSONA_NAMES], origin, ask: null }
   await update($, egmJob, () => job)
-  await $.prompt.fill({ text: '' })
   return null
+}
+
+// ---- ExitPlanMode no plan mode ----
+
+// Os fatos do gancho (I/O) e a decisão pura; devolve o motivo da recusa ou null (a saída passa).
+export async function holdExit($: EngineInterface, env: EgmEnv | null, planFilePath: string): Promise<string | null> {
+  const doc = await realOf($, planFilePath)
+  const job = await read($, egmJob)
+  const decision = exitDecisionOf({ isArmed: await read($, planArmed), isReady: await isReadyOf($, env, doc), isGoOk: await isGoOkOf($, doc), jobOrigin: job?.origin ?? null })
+  switch (decision) {
+    case 'pass':
+      return null
+    case 'pass-go':
+      await update($, planArmed, () => false)
+      await update($, planGo, () => null)
+      return null
+    case 'wait':
+      return EGM_WAIT_TEXT
+    case 'busy':
+      return EGM_BUSY_TEXT
+    case 'start':
+      await update($, planQueuedDoc, () => doc)
+      return EGM_WAIT_TEXT
+    default:
+      throw new Error('Caso não tratado: ' + String(decision satisfies never))
+  }
+}
+
+// Ambiente registrado, plano dentro de ~/.claude/plans (caminho real) e plugin EGM instalado.
+async function isReadyOf($: EngineInterface, env: EgmEnv | null, doc: string): Promise<boolean> {
+  return env !== null && doc.startsWith(`${env.home}/.claude/plans/`) && (await pluginRootOf($, env.home)) !== null
+}
+
+// O GO guardado vale para este doc com o texto de agora (a mesma conferência do "EGM: Executar").
+async function isGoOkOf($: EngineInterface, doc: string): Promise<boolean> {
+  const go = await read($, planGo)
+  const docText = go === null || go.doc !== doc ? null : await readText($, doc)
+  return go !== null && docText !== null && reportOkOf(await readText($, go.report), doc, hashOf(docText))
+}
+
+// Sob a trava do tique: o doc que o gancho deixou vira trabalho, se ninguém começou outro no meio.
+async function startPlanReview($: EngineInterface, env: EgmEnv, doc: string): Promise<null> {
+  await update($, planQueuedDoc, () => null)
+  if ((await read($, egmJob)) !== null) return send($, EGM_BUSY_TEXT, 'end')
+  const refused = await createJob($, env, doc, 'planmode', doc)
+  return refused === null ? null : send($, `${refused}. Chame ExitPlanMode de novo.`, 'end')
+}
+
+async function send($: EngineInterface, text: string, kind: 'ask' | 'end'): Promise<null> {
+  await update($, egmOutbox, () => ({ text, kind }))
+  return null
+}
+
+// Sob a trava: tira o texto da caixa de saída e, no pedido de correção, marca o envio (o tique seguinte não reenvia).
+export async function takeOutbox($: EngineInterface): Promise<{ text: string; kind: 'ask' | 'end'; dir: string } | null> {
+  const box = await read($, egmOutbox)
+  if (box === null) return null
+  await update($, egmOutbox, () => null)
+  const job = await read($, egmJob)
+  if (box.kind === 'ask' && job !== null) await setJob($, job.dir, cur => ({ ...cur, ask: cur.ask === null ? null : { ...cur.ask, isSent: true } }))
+  return { ...box, dir: job?.dir ?? '' }
+}
+
+// Sob a trava: o turno que começou com o pedido de correção enviado é o que responde a ele.
+export async function markAskTurn($: EngineInterface, turnId: string): Promise<void> {
+  const job = await read($, egmJob)
+  if (job === null || job.phase !== 'fix' || job.ask?.isSent !== true || job.ask.turnId !== null) return
+  await setJob($, job.dir, cur => ({ ...cur, ask: cur.ask === null ? null : { ...cur.ask, turnId } }))
 }
 
 // Absoluto (`~/` é o HOME, relativo vem da pasta da sessão) e real; null quando o arquivo não existe.
@@ -144,14 +225,17 @@ async function docPathOf($: EngineInterface, typed: string, home: string): Promi
 // ---- Passo do timer ----
 
 // Um passo; devolve o aviso a gravar (fim do trabalho) ou null.
-export async function stepEgm($: EngineInterface, env: EgmEnv): Promise<string | null> {
+// `dropped`: a pasta do trabalho cujo pedido de correção o envio recusou.
+export async function stepEgm($: EngineInterface, env: EgmEnv, dropped: string | null = null): Promise<string | null> {
+  const queued = await read($, planQueuedDoc)
+  if (queued !== null) return startPlanReview($, env, queued)
   const job = await read($, egmJob)
   if (job === null) return null
   switch (job.phase) {
     case 'review':
       return stepReview($, env, job)
     case 'fix':
-      return stepFix($, env, job)
+      return job.origin === 'planmode' ? stepPlanFix($, env, job, dropped) : stepFix($, env, job)
     default:
       throw new Error('Caso não tratado: ' + String(job.phase satisfies never))
   }
@@ -304,6 +388,7 @@ async function guardFixer($: EngineInterface, env: EgmEnv, job: EgmJob, id: stri
 
 async function startFix($: EngineInterface, env: EgmEnv, job: EgmJob, findings: Finding[], docText: string): Promise<string | null> {
   const before = await settle(() => $.fs.write(`${roundDirOf(job.dir, job.round)}/doc-antes.md`, docText))
+  if (job.origin === 'planmode') return before.ok ? askFix($, job, findings) : finishEgm($, env, job, 'NO-GO', reasonOf('M7'))
   const guard = before.ok ? await settle(async () => $.fs.write(env.guardFile, await guardTextOf($, job, null))) : before
   if (!guard.ok) return finishEgm($, env, job, 'NO-GO', reasonOf('M7'))
   const slot: EgmSlot = { name: FIXER, type: EGM_FIXER, agentId: null, at: await $.clock.now(), hasAnswer: false }
@@ -317,6 +402,18 @@ async function startFix($: EngineInterface, env: EgmEnv, job: EgmJob, findings: 
   return null
 }
 
+// Plan mode: quem corrige é a conversa (o corretor do mod herda o aviso de plan mode e não edita); o pedido sai pela caixa.
+async function askFix($: EngineInterface, job: EgmJob, findings: Finding[]): Promise<null> {
+  if (!(await setJob($, job.dir, cur => ({ ...cur, phase: 'fix', slots: [], todo: [], ask: { isSent: false, turnId: null } })))) return null
+  return send($, planFixPromptOf(job.doc, findings, job.round), 'ask')
+}
+
+// Plan mode: espera a resposta do turno do pedido (o turn.complete grava `correcao.md`); sem prazo, o egm stop encerra.
+async function stepPlanFix($: EngineInterface, env: EgmEnv, job: EgmJob, dropped: string | null): Promise<string | null> {
+  if (dropped === job.dir) return finishEgm($, env, job, 'NO-GO', { code: 'M7', text: 'não consegui mandar o pedido de correção à conversa' })
+  return (await exists($, answerPathOf(job.dir, job.round, FIXER))) ? decideFix($, env, job) : null
+}
+
 async function stepFix($: EngineInterface, env: EgmEnv, job: EgmJob): Promise<string | null> {
   const [before] = job.slots
   if (before === undefined) return finishEgm($, env, job, 'NO-GO', reasonOf('M4'))
@@ -324,6 +421,10 @@ async function stepFix($: EngineInterface, env: EgmEnv, job: EgmJob): Promise<st
   if (!(await setJob($, job.dir, cur => ({ ...cur, slots: [slot] })))) return null
   if (!slot.hasAnswer) return null
   await settle(() => $.fs.write(env.guardFile, '{}'))
+  return decideFix($, env, job)
+}
+
+async function decideFix($: EngineInterface, env: EgmEnv, job: EgmJob): Promise<string | null> {
   const docText = await readText($, job.doc)
   const reviews = await reviewsOf($, job.dir, job.round, null)
   const fix = parseFix(await readText($, answerPathOf(job.dir, job.round, FIXER)), askedOf(reviews))
@@ -345,9 +446,23 @@ async function finishEgm($: EngineInterface, env: EgmEnv, job: EgmJob, verdict: 
   const wrote = await settle(() => $.fs.write(report, reportOf(outcome)))
   await setJob($, job.dir, () => null)
   await settle(() => $.fs.write(env.guardFile, '{}'))
-  if (!wrote.ok) return `EGM: não consegui gravar o relatório em ${report}; clique em Revisão de novo`
+  const saved = wrote.ok ? outcome : null
+  return job.origin === 'planmode' ? endPlan($, job, saved, report) : endButton($, job, saved, report)
+}
+
+// Botão: o GO leva a etapa a Executar com o relatório.
+async function endButton($: EngineInterface, job: EgmJob, outcome: Outcome | null, report: string): Promise<string> {
+  if (outcome === null) return `EGM: não consegui gravar o relatório em ${report}; clique em Revisão de novo`
   if (outcome.verdict === 'GO') await update($, planFlow, () => ({ step: 'execute', doc: job.doc, report }))
   return noticeOf(outcome, report)
+}
+
+// Plan mode: o botão EGM não muda; o GO libera o próximo ExitPlanMode e a mesma mensagem vai à conversa e ao usuário.
+async function endPlan($: EngineInterface, job: EgmJob, outcome: Outcome | null, report: string): Promise<string> {
+  if (outcome?.verdict === 'GO') await update($, planGo, () => ({ doc: job.doc, report }))
+  const text = planEndTextOf(outcome, job.dir)
+  await send($, text, 'end')
+  return text
 }
 
 async function roundsOf($: EngineInterface, job: EgmJob): Promise<{ reviews: Record<string, Review>; fix: Fix | null }[]> {
@@ -370,9 +485,24 @@ export async function saveAnswer($: EngineInterface, agentId: string, answer: st
   await $.fs.write(answerPathOf(job.dir, job.round, slot.name), answer)
 }
 
-export async function stopEgm($: EngineInterface, env: EgmEnv | null, tokenOf: () => Promise<string>): Promise<string> {
+// `turn.complete` do loop principal: a resposta ao pedido de correção do plan mode vira `correcao.md` (sem a trava, como
+// o saveAnswer). `pending`: o id que o turn.start guardou e o tique ainda não aplicou. Turno interrompido: incompleta (M5).
+export async function saveMainAnswer($: EngineInterface, e: { turnId: string; answer: string; reason: string }, pending: string | null): Promise<void> {
   const job = await read($, egmJob)
-  if (job === null) return 'EGM: nenhuma revisão em andamento.'
+  if (job?.origin !== 'planmode' || job.phase !== 'fix' || job.ask === null) return
+  if (e.turnId !== job.ask.turnId && e.turnId !== pending) return
+  const text = e.reason !== 'answer' || e.answer.trim() === '' ? INCOMPLETE_TEXT : e.answer
+  await $.fs.write(answerPathOf(job.dir, job.round, FIXER), text)
+}
+
+// Desarma o plan mode antes de olhar o trabalho: um plano abandonado sem revisão também deixa de segurar a saída.
+export async function stopEgm($: EngineInterface, env: EgmEnv | null, tokenOf: () => Promise<string>): Promise<string> {
+  await update($, planArmed, () => false)
+  await update($, planGo, () => null)
+  await update($, egmOutbox, () => null)
+  await update($, planQueuedDoc, () => null)
+  const job = await read($, egmJob)
+  if (job === null) return 'EGM: nenhuma revisão em andamento; a saída do plan mode não é mais segurada.'
   await update($, egmJob, () => null)
   const guardFile = env === null ? await guardFileOf($, tokenOf) : env.guardFile
   if (guardFile !== null) await settle(() => $.fs.write(guardFile, '{}'))

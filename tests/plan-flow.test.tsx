@@ -2,7 +2,8 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { executePromptOf, planPromptOf } from '../hooks/plan'
+import { EGM_WAIT_TEXT } from '../hooks/egm'
+import { PLAN_REVIEW_MARK, executePromptOf, planPromptOf } from '../hooks/plan'
 
 // Planejar pelo engine: a faixa montada, o botão apertado, o timer de 3 s, e hooks do teste no lugar do engine (campo de
 // prompt, envio, toast, turnos). O `session.start` de cada `boot` zera as variáveis do módulo; o estado `planFlow` fica
@@ -24,6 +25,31 @@ type Over = {
   isAnswered?: boolean
   // Roda dentro do model.complete (n = a chamada): é onde o usuário edita o campo ou clica de novo durante o refinamento.
   onModel?: (n: number) => Promise<void>
+  // HOME, o plugin EGM instalado e um plano em ~/.claude/plans: o ExitPlanMode armado é segurado.
+  isPlanMode?: boolean
+}
+
+const HOME = '/home/user'
+const PLAN = `${HOME}/.claude/plans/plano-x.md`
+const EGM_ROOT = `${HOME}/.claude/plugins/cache/egm/egm`
+
+function planModeHooks(on: On) {
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  on('process.run', (_$, e) => {
+    const out = e.argv[0] === 'realpath' ? `${e.argv.filter(a => a !== '--').slice(1).join('\n')}\n` : ''
+    return { value: { exitCode: e.argv[0] === 'realpath' ? 0 : 1, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.list', (_$, e) => ({ value: e.path === EGM_ROOT ? [{ name: '0.1.0', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }))
+  on('tool.call', () => ({ result: 'saiu', text: 'saiu' }))
+}
+
+// O ExitPlanMode montado à mão (os campos `plan` e `planFilePath` não estão nos tipos da API).
+async function exitPlan($: Engine): Promise<string> {
+  const tool: object = $.tool
+  const call = Reflect.get(tool, 'call')
+  const r: unknown = await call.call(tool, { tool: 'ExitPlanMode', tool_use_id: 'u1', plan: 'x', planFilePath: PLAN })
+  const deny = typeof r === 'object' && r !== null ? Reflect.get(r, 'deny') : undefined
+  return typeof deny === 'string' ? deny : 'passou'
 }
 
 async function boot($: Engine, on: On, over: Over = {}) {
@@ -33,6 +59,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   const box = { text: over.typed ?? '' }
   const log = { fills: [] as string[], submits: [] as string[], toasts: [] as string[], logs: [] as string[], models: [] as string[], prompts: [] as string[] }
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  if (over.isPlanMode === true) planModeHooks(on)
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('agent.register', (_$, e) => ({ value: { agent: e.name } }))
   on('ui.log', (_$, e) => {
@@ -46,7 +73,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   })
   on('session.messages', () => ({ value: [{ role: 'user' as const, text: 'conversa-x', toolUses: [] }] }))
   // Só o CLAUDE.md existe (o engine entrega o caminho já absoluto): o AGENTS.md cai no engine do teste e fica de fora.
-  on('fs.read', (_$, e, next) => (/[\\/]CLAUDE\.md$/.test(e.path) ? { value: 'claude-x' } : next(e)))
+  on('fs.read', (_$, e, next) => (/[\\/]CLAUDE\.md$/.test(e.path) ? { value: 'claude-x' } : e.path === PLAN ? { value: 'plano v1' } : next(e)))
   on('model.complete', async (_$, e) => {
     log.models.push(e.model)
     log.prompts.push(e.prompt)
@@ -316,5 +343,33 @@ describe('botão Planejar (refinamento para o /plan)', () => {
     expect(await label(r)).toBe('Planejar')
     await tick(r)
     expect(r.log.models).toEqual([])
+  })
+})
+
+describe('Planejar arma a revisão do ExitPlanMode', () => {
+  test('o pedido do Planejar enviado arma: o ExitPlanMode é segurado', async ($, on) => {
+    const t = await boot($, on, { typed: 'pesquisar pedido', isPlanMode: true })
+    const ui = await mountBand($)
+    expect(await exitPlan($)).toBe('passou')
+    await ui.press({ key: 'refine' })
+    await tick(t)
+    const sent = t.box.text
+    expect(sent.startsWith('/plan ')).toBe(true)
+    await typeCommand($, 'plan', sent.slice('/plan '.length))
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
+  })
+
+  test('o pedido só como texto (sem comando) também arma', async ($, on) => {
+    const t = await boot($, on, { isPlanMode: true })
+    await $.prompt.submit({ text: `/plan x. ${PLAN_REVIEW_MARK}.`, wait: false, origin: { kind: 'composer' } })
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
+    expect(t.log.toasts).toEqual([])
+  })
+
+  test('um /plan digitado sem a marca desarma', async ($, on) => {
+    await boot($, on, { isPlanMode: true })
+    await typeCommand($, 'plan', `x. ${PLAN_REVIEW_MARK}.`)
+    await typeCommand($, 'plan', 'outro plano')
+    expect(await exitPlan($)).toBe('passou')
   })
 })

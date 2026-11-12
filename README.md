@@ -70,6 +70,8 @@ O botão **EGM** pede a revisão de um plano antes de você mandar executar. Na 
 
 Precisa do plugin EGM ligado e do Node 22.6 ou mais novo. O comando `/egm:egm-review` digitado continua valendo.
 
+No **Planejar**, quando a conversa chama o ExitPlanMode para sair do plan mode, o mod segura a saída e roda essa mesma revisão no arquivo do plano; os achados voltam para a própria conversa corrigir, e a saída só passa depois do GO. Para sair sem revisão, digite `/workbench egm stop`, que desarma.
+
 ## QA
 
 O botão **QA** testa o seu app de verdade, num navegador de teste, e corrige o que achar. Ele anda por etapas: o nome do botão diz em qual você está, e o clique seguinte aprova o que a etapa anterior mostrou.
