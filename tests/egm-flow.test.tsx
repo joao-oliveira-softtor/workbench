@@ -49,6 +49,8 @@ type Over = {
   isOldFlow?: boolean
   // O `realpath` falha (sem ele, o mod usa o caminho como veio).
   failReal?: boolean
+  // O HOME do ambiente é um link para este caminho real (o `realpath` o resolve).
+  homeLink?: string
   // Arquivos que o plugin EGM não tem, e pastas a mais (existem, mas não se leem como arquivo).
   dropFiles?: string[]
   extraDirs?: string[]
@@ -83,6 +85,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('process.run', (_$, e) => {
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const [cmd, ...args] = e.argv
+    if (cmd === 'realpath' && over.homeLink !== undefined) return ok(`${args.filter(a => a !== '--').join('\n').replace(over.homeLink, HOME)}\n`)
     if (cmd === 'realpath') return over.failReal === true ? { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } : ok(`${args.filter(a => a !== '--').join('\n')}\n`)
     if (cmd === 'mkdir') {
       if (over.failMkdir === true) return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -777,6 +780,19 @@ describe('EGM no plan mode: o gancho do ExitPlanMode', () => {
     await clickPlan(t, ui)
     await arm($)
     expect(await exitPlan($)).toBe(EGM_BUSY_TEXT)
+  })
+
+  test('plano mode em curso de OUTRO plano: nega com o texto de ocupado, não de espera', async ($, on) => {
+    const { t } = await planReview($, on)
+    expect(await exitPlan($, `${HOME}/.claude/plans/outro.md`)).toBe(EGM_BUSY_TEXT)
+    await tick(t)
+    expect([...t.dirs].filter(d => /\/workbench-egm\/[^/]+$/.test(d))).toHaveLength(1)
+  })
+
+  test('HOME que é link: o prefixo usa o caminho real e a revisão não some', async ($, on) => {
+    await boot($, on, { home: '/home/link', homeLink: '/home/link' })
+    await arm($)
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
   })
 
   test('plano fora de ~/.claude/plans: a saída passa', async ($, on) => {

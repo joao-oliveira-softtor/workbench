@@ -184,7 +184,7 @@ async function strictRealOf($: EngineInterface, path: string): Promise<string | 
 
 async function exitDecisionFor($: EngineInterface, env: EgmEnv | null, doc: string): Promise<ReturnType<typeof exitDecisionOf>> {
   const job = await read($, egmJob)
-  return exitDecisionOf({ isArmed: await read($, planArmed), isReady: await isReadyOf($, env, doc), isGoOk: await isGoOkOf($, doc), jobOrigin: job?.origin ?? null })
+  return exitDecisionOf({ isArmed: await read($, planArmed), isReady: await isReadyOf($, env, doc), isGoOk: await isGoOkOf($, doc), isJobDoc: job?.doc === doc, jobOrigin: job?.origin ?? null })
 }
 
 // Ambiente registrado, plano dentro de ~/.claude/plans (caminho real) e plugin EGM instalado.
