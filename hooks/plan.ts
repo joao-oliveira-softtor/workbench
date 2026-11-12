@@ -155,13 +155,25 @@ export function typedIntentOf(box: string): string | null {
   return text.replace(EGM_PREFIX, '').trim()
 }
 
+// Trecho fixo do passo 3: o workbench acha o pedido do Planejar por ele (isPlanArmingOf).
+export const PLAN_REVIEW_MARK = 'o workbench segura a saída e roda a revisão EGM por código'
+
+export const PLAN_REVIEW_STEP =
+  '3. Quando o plano estiver pronto, chame ExitPlanMode: o workbench segura a saída e roda a revisão EGM por código no arquivo do plano. Não lance revisores você mesmo. Se ele mandar achados, corrija o plano e feche a resposta com o bloco RESPOSTAS pedido, sem chamar ExitPlanMode nessa resposta. Se ele não segurar a saída (plugin egm ausente), faça a revisão EGM da regra global antes de sair.'
+
+// O pedido do Planejar é o que traz a marca: pelo comando /plan ou pelo texto /plan que o campo escreveu.
+export function isPlanArmingOf(input: { command?: { name: string; args: string }; text: string }): boolean {
+  if (input.command?.name === 'plan' && input.command.args.includes(PLAN_REVIEW_MARK)) return true
+  return input.text.startsWith('/plan ') && input.text.includes(PLAN_REVIEW_MARK)
+}
+
 // No plan mode o Claude só escreve o arquivo do plano e fecha cada turno com AskUserQuestion ou ExitPlanMode: as skills do
 // EGM que gravam arquivos não rodam lá, então o fluxo vai por extenso. A regra do brainstorm do EGM que proíbe pergunta
 // estruturada cede ao plan mode.
 const PLAN_FLOW = [
   '1. Esclareça antes de desenhar: faça as dúvidas acima, e as que surgirem, pelo AskUserQuestion com resposta livre (Other), até eu confirmar a hipótese de trabalho.',
   "2. Desenhe no arquivo do plano: visão geral, objetivos e não objetivos, plano técnico, alternativas, riscos, e implementação com arquivos, assinaturas e tarefas com as dependências entre elas, sem código, e uma linha 'Lote paralelo:' com as tarefas sem dependência entre si e sem arquivo em comum (ou 'nenhum' e o motivo). Inclua no plano uma seção 'Execução' com as regras abaixo.",
-  '3. Antes do ExitPlanMode, faça a revisão EGM da regra global.',
+  PLAN_REVIEW_STEP,
   "4. Aprovado, execute pela seção 'Execução' do plano:",
   ...numbered(EXECUTION_STEPS('plano aprovado'), 1, '   '),
   ...EXECUTION_TAIL.map(line => `   ${line}`),

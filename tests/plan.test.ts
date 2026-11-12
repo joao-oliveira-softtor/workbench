@@ -2,12 +2,15 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   PLAN_LABELS,
+  PLAN_REVIEW_MARK,
+  PLAN_REVIEW_STEP,
   PLAN_START,
   PROJECT_RULE,
   REFINE_RULES,
   docOf,
   executePromptOf,
   fillTextOf,
+  isPlanArmingOf,
   nextStepOf,
   parseRefine,
   planAfter,
@@ -315,6 +318,10 @@ describe('planPromptOf', () => {
     expect(text.indexOf('babysit-pr:babysit-pr')).toBeLessThan(text.indexOf('Pedido original:'))
   })
 
+  test('o passo 3 é a revisão por código, com o ExitPlanMode segurado pelo workbench', () => {
+    expect(text).toContain(PLAN_REVIEW_STEP)
+  })
+
   test('termina com o pedido original', () => {
     expect(text.endsWith('Pedido original:\noriginal-x')).toBe(true)
   })
@@ -332,6 +339,30 @@ describe('planPromptOf', () => {
     const empty = planPromptOf({ intencao: 'i', contexto: [], duvidas: ['d'] }, 'o')
     expect(empty).not.toContain('Contexto:')
     expect(empty).toContain('Dúvidas a esclarecer:\n- d')
+  })
+})
+
+describe('isPlanArmingOf', () => {
+  test('arma pelo comando /plan com a marca nos argumentos', () => {
+    expect(isPlanArmingOf({ command: { name: 'plan', args: `intencao ${PLAN_REVIEW_MARK}` }, text: '' })).toBe(true)
+  })
+
+  test('arma pelo texto que começa com /plan e traz a marca', () => {
+    expect(isPlanArmingOf({ text: `/plan intencao\n${PLAN_REVIEW_MARK}` })).toBe(true)
+  })
+
+  test('a marca é um trecho do passo 3, que é o que o plano manda escrever', () => {
+    expect(PLAN_REVIEW_STEP).toContain(PLAN_REVIEW_MARK)
+  })
+
+  test('recusa /plan sem a marca, nas duas formas', () => {
+    expect(isPlanArmingOf({ command: { name: 'plan', args: 'intencao' }, text: '' })).toBe(false)
+    expect(isPlanArmingOf({ text: '/plan intencao' })).toBe(false)
+  })
+
+  test('recusa /planning, mesmo com a marca, nas duas formas', () => {
+    expect(isPlanArmingOf({ text: `/planning ${PLAN_REVIEW_MARK}` })).toBe(false)
+    expect(isPlanArmingOf({ command: { name: 'planning', args: PLAN_REVIEW_MARK }, text: '' })).toBe(false)
   })
 })
 
