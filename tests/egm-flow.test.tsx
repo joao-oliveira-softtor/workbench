@@ -22,6 +22,7 @@ const CWD = `${HOME}/proj`
 const DOC = `${CWD}/plano.md`
 const ROOT = `${HOME}/.claude/plugins/cache/egm/egm/0.1.0`
 const EGM_ROOT = `${HOME}/.claude/workbench-egm`
+const HOLD_MS = 10_000
 const NAMES = PERSONAS.map(p => p.persona)
 const TYPE_OF = Object.fromEntries(PERSONAS.map(p => [p.persona, p.subagentType])) as Record<string, string>
 
@@ -44,6 +45,15 @@ type Over = {
   failMkdir?: boolean
   // O `planFlow` lido como uma versão antiga o gravou (sem o campo `report`).
   isOldFlow?: boolean
+  // O `realpath` falha (sem ele, o mod usa o caminho como veio).
+  failReal?: boolean
+  // Arquivos que o plugin EGM não tem, e pastas a mais (existem, mas não se leem como arquivo).
+  dropFiles?: string[]
+  extraDirs?: string[]
+  // O `session.messages` devolve algo que não é lista.
+  badMessages?: boolean
+  // A resposta da lista de agentes ou do lançamento chega HOLD_MS depois, uma vez (segura o passo para um `egm stop` no meio).
+  holdAt?: 'list' | 'spawn'
 }
 
 async function boot($: Engine, on: On, over: Over = {}) {
@@ -54,7 +64,8 @@ async function boot($: Engine, on: On, over: Over = {}) {
     ...PERSONAS.map(p => [`${ROOT}/agents/${p.file}`, `PERSONA ${p.persona}`] as [string, string]),
     ...PERSONAS.flatMap(p => (p.standard === null ? [] : [[`${ROOT}/resources/document_standards/${p.standard}`, 'PADRAO'] as [string, string]])),
   ])
-  const dirs = new Set<string>(over.hasPlugin === false ? [] : [ROOT])
+  for (const f of over.dropFiles ?? []) files.delete(f)
+  const dirs = new Set<string>([...(over.hasPlugin === false ? [] : [ROOT]), ...(over.extraDirs ?? [])])
   const box = { text: over.typed ?? '' }
   const listed: Agent[] = []
   const log = { toasts: [] as string[], submits: [] as string[], notices: [] as string[], guards: [] as string[], spawns: [] as { id: string; type: string; prompt: string }[], agents: [] as string[] }
@@ -65,7 +76,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('process.run', (_$, e) => {
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const [cmd, ...args] = e.argv
-    if (cmd === 'realpath') return ok(`${args.filter(a => a !== '--').join('\n')}\n`)
+    if (cmd === 'realpath') return over.failReal === true ? { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } : ok(`${args.filter(a => a !== '--').join('\n')}\n`)
     if (cmd === 'mkdir') {
       if (over.failMkdir === true) return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       dirs.add(args.at(-1) ?? '')
@@ -95,7 +106,13 @@ async function boot($: Engine, on: On, over: Over = {}) {
     return { value: { agent: e.name } }
   })
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__workbench__${e.name}` } }))
-  on('agent.spawn', (_$, e) => {
+  const holdOnce = async (at: 'list' | 'spawn') => {
+    if (over.holdAt !== at) return
+    over.holdAt = undefined
+    await clock.sleep(HOLD_MS)
+  }
+  on('agent.spawn', async (_$, e) => {
+    await holdOnce('spawn')
     const type = e.subagentType ?? String(Reflect.get(e, 'subagent_type'))
     n += 1
     const id = `a${n}`
@@ -105,8 +122,11 @@ async function boot($: Engine, on: On, over: Over = {}) {
     if (r.unlisted !== true) listed.push({ id, type, status: 'running', description: 'x', spawnedBy: 'workbench' })
     return r.withId === true ? { model: 'opus', agentId: id } : { model: 'opus' }
   })
-  on('agent.list', () => ({ value: listed }))
-  on('session.messages', (_$, e) => ({ value: (over.messages?.[e.agentId ?? ''] ?? []).map(m => ({ ...m, toolUses: [] })) }))
+  on('agent.list', async () => {
+    await holdOnce('list')
+    return { value: listed }
+  })
+  on('session.messages', (_$, e) => ({ value: over.badMessages === true ? ('x' as never) : (over.messages?.[e.agentId ?? ''] ?? []).map(m => ({ ...m, toolUses: [] })) }))
   on('session.append', (_$, e, next) => {
     const text = e.message.content[0]?.text
     if (typeof text === 'string') log.notices.push(text)
@@ -162,7 +182,8 @@ const report = (t: T) => t.files.get(`${t.dir()}/veredito.md`) ?? ''
 
 // Etapa em Revisão (comandos digitados) e o caminho do plano no campo, relativo à pasta da sessão.
 async function ready($: Engine, on: On, over: Over = {}) {
-  const t = await boot($, on, { typed: 'plano.md', ...over })
+  over.typed ??= 'plano.md'
+  const t = await boot($, on, over) // o mesmo objeto: o teste arma `holdAt` depois
   const ui = await $.ui.mount(BAND)
   await typeCommand($, 'egm:egm-brainstorm', 'x')
   await typeCommand($, 'egm:egm-draft')
@@ -311,7 +332,10 @@ describe('EGM: rodadas', () => {
     await tick(t)
     await tick(t)
     expect(t.log.spawns.slice(-1).map(s => s.type)).toEqual([TYPE_OF['design']])
-    expect(t.log.spawns.at(-1)?.prompt).toContain('<correcao>')
+    const again = t.log.spawns.at(-1)?.prompt ?? ''
+    expect(again).toContain('falta o prazo')
+    expect(again).toContain('- [corrigido] design #1')
+    expect(t.log.spawns.find(s => s.type === TYPE_OF['design'])?.prompt).not.toContain('Rodada anterior')
     await answerRound($, t, {}, ['design'])
     expect(report(t)).toContain('Veredito: GO')
     expect(report(t)).toContain(`Marca: ${hashOf('plano v2')}`)
@@ -387,7 +411,17 @@ describe('EGM: rodadas', () => {
   })
 
   test('revisor encerrado sem resposta: a última mensagem vem do session.messages; sem texto vira incompleto', async ($, on) => {
-    const { t } = await launched($, on, { messages: { a1: [{ role: 'assistant', text: MAJOR }] } })
+    const { t } = await launched($, on, {
+      messages: {
+        a1: [
+          { role: 'assistant', text: 'primeira' },
+          { role: 'assistant', text: 'segunda' },
+          { role: 'assistant', text: MAJOR },
+          { role: 'user', text: 'pergunta' },
+          { role: 'assistant', text: '  ' },
+        ],
+      },
+    })
     for (const id of ['a1', 'a2']) t.listed.find(a => a.id === id)!.status = 'completed'
     await t.clock.advance(20_000)
     expect(t.files.get(`${t.dir()}/r1/zoom-out.md`)).toBe(MAJOR)
@@ -449,6 +483,117 @@ describe('EGM: rodadas', () => {
     await answerRound($, t, {})
     expect(t.log.notices.at(-1)).toBe(`EGM: não consegui gravar o relatório em ${t.dir()}/veredito.md; clique em Revisão de novo`)
     expect(await label(ui)).toBe('EGM: Revisão')
+  })
+})
+
+describe('EGM: bordas do clique e do passo', () => {
+  test('realpath que falha: o mod segue com o caminho como veio', async ($, on) => {
+    const { t, ui } = await ready($, on, { failReal: true })
+    await clickPlan(t, ui)
+    expect(t.dir()).toMatch(/\/workbench-egm\/\d{8}-\d{6}$/)
+    expect(await label(ui)).toBe('EGM: r1 revisando 0/5')
+  })
+
+  test('passo 2: corretor encerrado e agente de outro tipo vivo não barram o clique', async ($, on) => {
+    const { t, ui } = await ready($, on)
+    t.listed.push({ id: 'old', type: EGM_FIXER, status: 'completed', description: 'x', spawnedBy: 'workbench' })
+    t.listed.push({ id: 'live', type: TYPE_OF['design'] ?? '', status: 'running', description: 'x', spawnedBy: 'workbench' })
+    await clickPlan(t, ui)
+    expect(t.log.toasts).toEqual([])
+    expect(t.dir()).not.toBe('')
+  })
+
+  test('passo 5: o caminho existe mas não se lê (uma pasta)', async ($, on) => {
+    const { t, ui } = await ready($, on, { typed: 'pasta.md', extraDirs: [`${CWD}/pasta.md`] })
+    await clickPlan(t, ui)
+    expect(t.log.toasts).toEqual(['EGM: não consegui ler o arquivo pasta.md'])
+    expect(t.box.text).toBe('pasta.md')
+  })
+
+  test('persona do plugin que some: NO-GO sem lançar o revisor', async ($, on) => {
+    const first = PERSONAS[0]!
+    const { t, ui } = await ready($, on, { dropFiles: [`${ROOT}/agents/${first.file}`] })
+    await clickPlan(t, ui)
+    await tick(t)
+    expect(t.log.spawns).toEqual([])
+    expect(t.log.notices.at(-1)).toContain(`${first.persona}: não consegui ler a persona, o padrão ou o plano`)
+    expect(await label(ui)).toBe('EGM: Revisão')
+  })
+
+  test('mensagens do agente que não são lista: o revisor encerrado vira incompleto', async ($, on) => {
+    const { t } = await launched($, on, { badMessages: true })
+    t.listed.find(a => a.id === 'a1')!.status = 'completed'
+    await t.clock.advance(20_000)
+    expect(t.files.get(`${t.dir()}/r1/zoom-out.md`)).toBe('revisão incompleta')
+    expect(t.log.toasts.some(x => x.includes('passo falhou'))).toBe(false)
+  })
+
+  test('resposta em branco de um agente do trabalho não vira arquivo', async ($, on) => {
+    const { t } = await launched($, on)
+    await reply($, idOf(t, TYPE_OF['design'] ?? ''), '   ')
+    expect(t.files.has(`${t.dir()}/r1/design.md`)).toBe(false)
+  })
+
+  test('egm stop no meio da adoção do corretor: a trava termina em {} e nada falha', async ($, on) => {
+    const over: Over = {}
+    const { t } = await launched($, on, over)
+    await answerRound($, t, { design: blocker() })
+    expect(t.log.spawns.at(-1)?.type).toBe(EGM_FIXER)
+    over.holdAt = 'list'
+    await tick(t)
+    await command($, 'egm stop')
+    await t.clock.advance(HOLD_MS)
+    expect(t.log.guards.at(-2)).toContain('"a6"')
+    expect(t.log.guards.at(-1)).toBe('{}')
+    expect(t.log.toasts.some(x => x.includes('passo falhou'))).toBe(false)
+  })
+
+  test('um passo em curso segura o tique seguinte: o mesmo revisor não é lançado duas vezes', async ($, on) => {
+    const over: Over = {}
+    const { t, ui } = await ready($, on, over)
+    await clickPlan(t, ui)
+    over.holdAt = 'list'
+    await tick(t)
+    await tick(t)
+    await t.clock.advance(HOLD_MS)
+    expect(t.log.spawns.filter(s => s.type === TYPE_OF['zoom-out'])).toHaveLength(1)
+  })
+
+  test('segundo clique durante o primeiro espera na fila e recebe o aviso de revisão em andamento', async ($, on) => {
+    const over: Over = {}
+    const { t, ui } = await ready($, on, over)
+    over.holdAt = 'list'
+    await ui.press({ key: 'plan' })
+    await tick(t)
+    await ui.press({ key: 'plan' })
+    await tick(t)
+    await t.clock.advance(HOLD_MS)
+    await tick(t)
+    await tick(t)
+    expect(t.log.toasts).toContain('EGM: revisão em andamento (use /workbench egm stop)')
+    expect([...t.dirs].filter(d => /\/workbench-egm\/[^/]+$/.test(d))).toHaveLength(1)
+  })
+
+  test('recarga sem HOME com a revisão em curso: o tique não dá passo nem falha', async ($, on) => {
+    const { t } = await launched($, on)
+    const before = t.log.spawns.length
+    t.setHome(null)
+    await start($)
+    await tick(t)
+    await tick(t)
+    expect(t.log.toasts.some(x => x.includes('passo falhou'))).toBe(false)
+    expect(t.log.spawns).toHaveLength(before)
+  })
+
+  test('egm stop durante o lançamento negado: não grava relatório nem avisa', async ($, on) => {
+    const { t, ui } = await ready($, on, { holdAt: 'spawn', spawns: [{ deny: 'sem permissão' }] })
+    await clickPlan(t, ui)
+    await tick(t)
+    await command($, 'egm stop')
+    await t.clock.advance(HOLD_MS)
+    expect(report(t)).toBe('')
+    expect(t.log.toasts.some(x => x.includes('passo falhou'))).toBe(false)
+    expect(t.log.notices.some(x => x.includes('não consegui lançar'))).toBe(false)
   })
 })
 
