@@ -152,9 +152,10 @@ async function createJob($: EngineInterface, env: EgmEnv, doc: string, origin: E
 
 // Os fatos do gancho (I/O) e a decisão pura; devolve o motivo da recusa ou null (a saída passa).
 export async function holdExit($: EngineInterface, env: EgmEnv | null, planFilePath: string): Promise<string | null> {
-  const doc = await realOf($, planFilePath)
-  const job = await read($, egmJob)
-  const decision = exitDecisionOf({ isArmed: await read($, planArmed), isReady: await isReadyOf($, env, doc), isGoOk: await isGoOkOf($, doc), jobOrigin: job?.origin ?? null })
+  // Sem caminho real não há como saber se está em ~/.claude/plans: não pronto, a saída passa (E1).
+  const doc = await strictRealOf($, planFilePath)
+  if (doc === null) return null
+  const decision = await exitDecisionFor($, env, doc)
   switch (decision) {
     case 'pass':
       return null
@@ -167,11 +168,23 @@ export async function holdExit($: EngineInterface, env: EgmEnv | null, planFileP
     case 'busy':
       return EGM_BUSY_TEXT
     case 'start':
+      // Um GO antigo não vale durante a revisão nova (a conversa pode voltar ao texto aprovado).
+      await update($, planGo, () => null)
       await update($, planQueuedDoc, () => doc)
       return EGM_WAIT_TEXT
     default:
       throw new Error('Caso não tratado: ' + String(decision satisfies never))
   }
+}
+
+// Como o realOf, mas a falha dá null em vez do caminho como veio.
+async function strictRealOf($: EngineInterface, path: string): Promise<string | null> {
+  return (await run($, ['realpath', '--', path]))?.trim() || null
+}
+
+async function exitDecisionFor($: EngineInterface, env: EgmEnv | null, doc: string): Promise<ReturnType<typeof exitDecisionOf>> {
+  const job = await read($, egmJob)
+  return exitDecisionOf({ isArmed: await read($, planArmed), isReady: await isReadyOf($, env, doc), isGoOk: await isGoOkOf($, doc), jobOrigin: job?.origin ?? null })
 }
 
 // Ambiente registrado, plano dentro de ~/.claude/plans (caminho real) e plugin EGM instalado.
@@ -191,7 +204,10 @@ async function startPlanReview($: EngineInterface, env: EgmEnv, doc: string): Pr
   await update($, planQueuedDoc, () => null)
   if ((await read($, egmJob)) !== null) return send($, EGM_BUSY_TEXT, 'end')
   const refused = await createJob($, env, doc, 'planmode', doc)
-  return refused === null ? null : send($, `${refused}. Chame ExitPlanMode de novo.`, 'end')
+  if (refused === null) return null
+  // Recusa que se repetiria (arquivo ilegível, pasta): desarma, senão a conversa fica presa em "chame de novo" e nega.
+  await update($, planArmed, () => false)
+  return send($, `${refused}; a revisão do workbench foi desligada neste plano e o próximo ExitPlanMode passa sem ela.`, 'end')
 }
 
 async function send($: EngineInterface, text: string, kind: 'ask' | 'end'): Promise<null> {

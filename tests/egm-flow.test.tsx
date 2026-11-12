@@ -56,7 +56,8 @@ type Over = {
   badMessages?: boolean
   // A resposta da lista de agentes ou do lançamento chega HOLD_MS depois, uma vez (segura o passo para um `egm stop` no meio).
   // `fix`: a consulta de `correcao.md` (segura o passo do plan mode na fase fix).
-  holdAt?: 'list' | 'spawn' | 'fix'
+  // `job`: a primeira leitura do `egmJob` (segura o markAskTurn do tique).
+  holdAt?: 'list' | 'spawn' | 'fix' | 'job'
   // O envio do mod é recusado (`{ drop }`) quando o texto casa.
   dropSubmit?: (text: string) => boolean
 }
@@ -115,7 +116,7 @@ async function boot($: Engine, on: On, over: Over = {}) {
     return { value: { agent: e.name } }
   })
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__workbench__${e.name}` } }))
-  const holdOnce = async (at: 'list' | 'spawn' | 'fix') => {
+  const holdOnce = async (at: 'list' | 'spawn' | 'fix' | 'job') => {
     if (over.holdAt !== at) return
     over.holdAt = undefined
     await clock.sleep(HOLD_MS)
@@ -162,15 +163,17 @@ async function boot($: Engine, on: On, over: Over = {}) {
   on('turn.start', (_$, e) => ({ turnId: e.turnId, kind: 'engine' as const, ref: 1 }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('agent.offer', () => ({ isOffered: true }))
-  if (over.isOldFlow === true) {
-    on('state.get', async (_$, e, next) => {
-      const got = await next(e)
+  // Um hook só (o harness recusa dois): segura a leitura do `egmJob` e, com `isOldFlow`, lê o `planFlow` sem `report`.
+  on('state.get', (_$, e, next) => {
+    if (e.key === 'egmJob' && over.holdAt === 'job') return holdOnce('job').then(() => next(e))
+    if (over.isOldFlow !== true || e.key !== 'planFlow') return next(e)
+    return next(e).then(got => {
       const flow: unknown = got.value?.value
-      if (e.key !== 'planFlow' || typeof flow !== 'object' || flow === null) return got
+      if (typeof flow !== 'object' || flow === null) return got
       const { report: _, ...old } = flow as Record<string, unknown>
       return { ...got, value: { ...got.value, value: old } } as typeof got
     })
-  }
+  })
   await start($)
   const setHome = (h: string | null) => { over.home = h }
   const dir = () => [...dirs].find(d => d.startsWith(`${EGM_ROOT}/`)) ?? ''
@@ -856,6 +859,22 @@ describe('EGM no plan mode: correção pela conversa', () => {
     expect(await label(ui)).toBe('EGM: r2 revisando 0/1')
   })
 
+  test('id pendente aplicado no tique: o turno interrompido no meio da aplicação ainda dá M5', async ($, on) => {
+    const over: Over = {}
+    const { t } = await planAsked($, on, over)
+    over.holdAt = 'fix'
+    await tick(t)
+    await mainStart($, 'c1', asked(t)[0] ?? '')
+    await t.clock.advance(HOLD_MS)
+    over.holdAt = 'job'
+    await tick(t)
+    await mainEnd($, 'c1', '', 'aborted')
+    await t.clock.advance(HOLD_MS)
+    await tick(t)
+    expect(t.files.get(`${t.dir()}/r1/correcao.md`)).toBe('revisão incompleta')
+    expect(t.log.submits.at(-1)).toContain('NO-GO: a resposta da correção veio fora do formato')
+  })
+
   test('envio do pedido recusado: NO-GO M7 e o turno seguinte do usuário não é capturado', async ($, on) => {
     const { t } = await planAsked($, on, { dropSubmit: text => text.startsWith(PLAN_FIX_HEADER) })
     await tick(t)
@@ -876,6 +895,36 @@ describe('EGM no plan mode: fim e parada', () => {
     expect(await exitPlan($)).toBe('passou')
     t.files.set(PLAN, 'plano v2')
     expect(await exitPlan($)).toBe('passou')
+  })
+
+  test('GO antigo não solta a saída durante uma revisão nova, mesmo com o texto aprovado de volta', async ($, on) => {
+    const { t } = await planReview($, on)
+    await answerRound($, t, {})
+    t.files.set(PLAN, 'plano v2')
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
+    await tick(t)
+    t.files.set(PLAN, 'plano v1')
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
+  })
+
+  test('recusa ao criar a revisão (plano ilegível): desarma e o próximo ExitPlanMode passa', async ($, on) => {
+    const t = await boot($, on)
+    await arm($)
+    t.files.delete(PLAN)
+    t.dirs.add(PLAN)
+    expect(await exitPlan($)).toBe(EGM_WAIT_TEXT)
+    await tick(t)
+    expect(t.log.submits.at(-1)).toBe(`EGM: não consegui ler o arquivo ${PLAN}; a revisão do workbench foi desligada neste plano e o próximo ExitPlanMode passa sem ela.`)
+    expect(await exitPlan($)).toBe('passou')
+  })
+
+  test('realpath que falha: não está pronto e a saída passa sem revisão (nunca prefixo sobre caminho não resolvido)', async ($, on) => {
+    const t = await boot($, on, { failReal: true })
+    await arm($)
+    expect(await exitPlan($, `${HOME}/.claude/plans/../../x.md`)).toBe('passou')
+    expect(await exitPlan($)).toBe('passou')
+    await tick(t)
+    expect(t.dir()).toBe('')
   })
 
   test('plano mudado depois do GO: volta a segurar', async ($, on) => {

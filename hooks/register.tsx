@@ -927,9 +927,10 @@ async function drainEgm($: EngineInterface): Promise<void> {
   let box: Awaited<ReturnType<typeof takeOutbox>> = null
   try {
     const [turnId, dropped] = [askTurn, askDropped]
-    askTurn = null
     askDropped = null
+    // O pendente só sai depois de aplicado: um turn.complete no meio ainda o acha.
     if (turnId !== null) await markAskTurn($, turnId)
+    if (askTurn === turnId) askTurn = null
     const text = await stepEgm($, env, dropped)
     if (text !== null) await notice($, text)
     if (!isMainTurn) box = await takeOutbox($)
