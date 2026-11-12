@@ -305,7 +305,7 @@ const ANSWER = 'Quem lê o resultado é o mod, nos arquivos: a resposta final é
 const promptOf = (role: string, skill: string): string =>
   [`Você é o ${role} do QA do workbench.`, `A skill ${skill} já está carregada: ela é o seu procedimento.`, 'Os valores do trabalho vêm no pedido.', ANSWER].join('\n')
 
-const hooksOf = (command: string): AgentSpec['hooks'] => ({ PreToolUse: [{ matcher: 'Bash|Write|Edit|Read', hooks: [{ type: 'command', command }] }] })
+export const hooksOf = (command: string): AgentSpec['hooks'] => ({ PreToolUse: [{ matcher: 'Bash|Write|Edit|Read', hooks: [{ type: 'command', command }] }] })
 
 export function qaAgentsOf(hook: (role: QaRole) => string): AgentSpec[] {
   return [
