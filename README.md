@@ -66,7 +66,7 @@ O botão **Retomada** resume o seu último dia de trabalho, de todos os projetos
 
 ## EGM (revisão do plano)
 
-O botão **EGM** pede a revisão de um plano antes de você mandar executar. Na etapa **Revisão**, escreva o caminho do plano no campo do prompt e clique: o mod lança os cinco revisores do plugin EGM, manda um agente corrigir o plano (ele só pode editar esse arquivo), faz até 3 rodadas e mostra o progresso no próprio botão. Na conversa entra só uma linha com o veredito e o caminho do relatório. Para parar no meio, digite `/workbench egm stop`. Os arquivos ficam em `~/.claude/workbench-egm`.
+O botão **EGM** pede a revisão de um plano antes de você mandar executar. Na etapa **Revisão**, escreva o caminho do plano no campo do prompt e clique: o mod lança os cinco revisores do plugin EGM, manda um agente corrigir o plano (ele só pode editar esse arquivo), faz até 3 rodadas e mostra o progresso no próprio botão. Na conversa entra só uma linha com o veredito e o caminho do relatório. Para parar no meio, digite `/workbench egm stop`. Os arquivos ficam em `~/.claude/workbench-egm`. O plano é corrigido no lugar onde está: se ele estiver dentro de um repositório, a correção aparece ali como alteração não commitada (clicar em Revisão conta como pedido para corrigir aquele arquivo). Antes de cada correção, uma cópia do plano fica em `~/.claude/workbench-egm/<revisão>/r<rodada>/doc-antes.md`, para comparar ou voltar.
 
 Precisa do plugin EGM ligado e do Node 22.6 ou mais novo. O comando `/egm:egm-review` digitado continua valendo.
 
