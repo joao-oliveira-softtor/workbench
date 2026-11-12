@@ -80,10 +80,13 @@ export function parseFix(text: string | null, asked: readonly Finding[]): Fix {
     const [, kind, persona, n, reason] = m as RegExpExecArray
     return { persona: persona as string, n: Number(n), kind: kind as Answer['kind'], reason: reason ?? '' }
   })
+  return isReasonMissing(answers) || !isSameSet(answers, asked) ? INCOMPLETE : { kind: 'ok', answers }
+}
+
+const isReasonMissing = (answers: readonly Answer[]): boolean => answers.some((a) => a.kind !== 'corrigido' && a.reason === '')
+function isSameSet(answers: readonly Answer[], asked: readonly Finding[]): boolean {
   const keys = answers.map(keyOf)
-  const isReasonMissing = answers.some((a) => a.kind !== 'corrigido' && a.reason === '')
-  const isSameSet = new Set(keys).size === keys.length && keys.length === asked.length && asked.every((x) => keys.includes(keyOf(x)))
-  return isReasonMissing || !isSameSet ? INCOMPLETE : { kind: 'ok', answers }
+  return new Set(keys).size === keys.length && keys.length === asked.length && asked.every((x) => keys.includes(keyOf(x)))
 }
 
 // ---- Decisão ----
@@ -129,14 +132,21 @@ export function fixOf(input: { round: Round; reviews: Record<string, Review>; fi
   if (fix.kind === 'incomplete') return nogo('M5')
   const { answers } = fix
   const blockers = blockingOf(reviews).filter(isBlocker)
-  if (answers.some((a) => a.kind === 'precisa do usuário')) return nogo('M8')
-  if (answers.some((a) => a.kind === 'rejeitado' && blockers.some((b) => keyOf(b) === keyOf(a)))) return nogo('M9')
-  if (!input.isDocChanged && answers.some((a) => a.kind === 'corrigido')) return nogo('M10')
-  const todo = Object.keys(reviews).filter((p) => reviews[p]?.kind === 'incomplete' || findingsOf(reviews[p]).some(isBlocker))
+  if (asksUser(answers)) return nogo('M8')
+  if (rejectsBlocker(answers, blockers)) return nogo('M9')
+  if (claimsFixWithoutChange(answers, input.isDocChanged)) return nogo('M10')
+  const todo = todoOf(reviews)
   if (todo.length === 0) return { next: 'go' }
   if (round < 3) return { next: 'round', todo }
   return blockers.length > 0 ? nogo('M2', String(blockers.length)) : nogo('M3')
 }
+
+const asksUser = (answers: readonly Answer[]): boolean => answers.some((a) => a.kind === 'precisa do usuário')
+const rejectsBlocker = (answers: readonly Answer[], blockers: readonly Finding[]): boolean =>
+  answers.some((a) => a.kind === 'rejeitado' && blockers.some((b) => keyOf(b) === keyOf(a)))
+const claimsFixWithoutChange = (answers: readonly Answer[], isDocChanged: boolean): boolean => !isDocChanged && answers.some((a) => a.kind === 'corrigido')
+const todoOf = (reviews: Record<string, Review>): string[] =>
+  Object.keys(reviews).filter((p) => reviews[p]?.kind === 'incomplete' || findingsOf(reviews[p]).some(isBlocker))
 
 // ---- Pedidos ----
 
